@@ -33,6 +33,11 @@ def application(root: Path, ui_port: int):
     # Override config before importing original stores. No upstream files edited.
     import chatlocal.config as config
     config.ROOT, config.DATA, config.DB = home, home / 'data', home / 'data/chats.sqlite3'
+    import shutil
+    prompts=home/'prompts';prompts.mkdir(exist_ok=True)
+    shutil.copytree(source/'chatlocal/prompts/mcp_chat',prompts,dirs_exist_ok=True)
+    import chatlocal.mcp_chat_prompts as chat_prompts
+    chat_prompts.ROOT=prompts
     from fastapi import FastAPI, HTTPException, Request
     from chatlocal.mcp_routes import install_mcp_routes
     from fish_qq.onebot import OneBotClient

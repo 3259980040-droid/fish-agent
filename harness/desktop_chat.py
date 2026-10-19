@@ -27,6 +27,8 @@ class DesktopChat:
         self.cancel_event = threading.Event()
         self.lock = threading.Lock()
         self.active_session = None
+        self.active_client = None
+        self.active_cid = ''
         self.policy = Governance(root, role)
         with closing(self.connect()) as conn:
             conn.executescript("""CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,title TEXT,session_id TEXT,updated_at TEXT);
@@ -36,6 +38,9 @@ class DesktopChat:
             columns = {row[1] for row in conn.execute('PRAGMA table_info(conversations)')}
             if 'space_id' not in columns:
                 conn.execute("ALTER TABLE conversations ADD COLUMN space_id TEXT NOT NULL DEFAULT ''")
+            for name, default in (('mode', 'chat'), ('workspace', ''), ('revision', ''), ('permission','workspace-write')):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE conversations ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
             conn.commit()
 
     def connect(self):
@@ -43,8 +48,15 @@ class DesktopChat:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def new(self, title: str = "新对话", *, isolated=None, revision='') -> str:
+    def new(self, title: str = "新对话", *, isolated=None, revision='', mode='chat', workspace='',permission='danger-full-access') -> str:
         cid = uuid.uuid4().hex
+        if mode not in ('chat', 'work'): raise ValueError('未知对话模式')
+        if permission not in ('workspace-write','danger-full-access'):raise ValueError('未知工具权限')
+        if mode == 'work':
+            isolated = False
+            directory = Path(workspace or self.root).resolve()
+            if not directory.is_dir(): raise ValueError('请选择存在的工作目录')
+            workspace = str(directory)
         if isolated is None:
             isolated = self.role == 'qq'
         space = None
@@ -52,7 +64,7 @@ class DesktopChat:
             from social_context import SocialContext
             space = SocialContext(self.root).create_space(self.role, title, revision=revision)
         with closing(self.connect()) as conn:
-            conn.execute("INSERT INTO conversations(id,title,session_id,updated_at,space_id) VALUES(?,?,?,?,?)", (cid, title[:80], None, time.strftime("%Y-%m-%d %H:%M:%S"), space['id'] if space else ''))
+            conn.execute("INSERT INTO conversations(id,title,session_id,updated_at,space_id,mode,workspace,revision,permission) VALUES(?,?,?,?,?,?,?,?,?)", (cid, title[:80], None, time.strftime("%Y-%m-%d %H:%M:%S"), space['id'] if space else '',mode,workspace,revision,permission))
             conn.commit()
         return cid
 
@@ -90,8 +102,28 @@ class DesktopChat:
         for row in result:
             row["segments"] = json.loads(row["segments"] or "[]")
         context = self.conversation_context(cid) if cid else None
+        with closing(self.connect()) as conn:
+            settings = conn.execute('SELECT mode,workspace,revision,permission FROM conversations WHERE id=?',(cid,)).fetchone()
         return {"conversation_id": cid, "conversations": [dict(row) for row in conversations], "messages": result, 'has_more': total > len(result), 'search_hits': hits, 'focus_id': around,
-                'space': context}
+                'space': context, 'settings':dict(settings) if settings else {},'activity':getattr(self.active_client,'activity',{}) if cid==self.active_cid else {}}
+
+    def reload_persona(self, cid, revision):
+        """Keep ordinary history while changing the selected persona context."""
+        from social_context import SocialContext
+        store=SocialContext(self.root);store.persona(revision)
+        with closing(self.connect()) as db:
+            row=db.execute('SELECT * FROM conversations WHERE id=?',(cid,)).fetchone()
+            if not row: raise ValueError('请选择对话')
+            if row['space_id']:store.change_persona(row['space_id'],revision)
+            db.execute('UPDATE conversations SET revision=? WHERE id=?',(revision,cid));db.commit()
+        return {'ok':True,'note':'人格已重载；保留本窗口历史，后续回复使用新设定。'}
+
+    def set_work_permission(self,cid,permission):
+        if permission not in ('workspace-write','danger-full-access'):raise ValueError('未知工具权限')
+        with closing(self.connect()) as db:
+            row=db.execute("SELECT id FROM conversations WHERE id=? AND mode='work'",(cid,)).fetchone()
+            if not row:raise ValueError('请选择本地工作对话')
+            db.execute('UPDATE conversations SET permission=? WHERE id=?',(permission,cid));db.commit()
 
     def conversation_context(self, cid):
         with closing(self.connect()) as conn:
@@ -122,6 +154,7 @@ class DesktopChat:
         if not self.lock.acquire(blocking=False):
             raise RuntimeError("这个角色正在回复，请等待或取消")
         self.cancel_event.clear()
+        self.active_cid=cid
         mid = None
         try:
             if self.policy.config()["paused"]:
@@ -133,8 +166,9 @@ class DesktopChat:
             if conversation is None:
                 raise ValueError("对话不存在")
             space = self.conversation_context(cid)
+            work = conversation['mode'] == 'work'
             self._isolation_requested = bool(space)
-            scope = space['scope'] if space else 'owner'
+            scope = 'work:'+cid if work else space['scope'] if space else 'owner'
             imported = []
             for attachment in attachments[:3]:
                 source = Path(attachment["path"]).resolve()
@@ -155,7 +189,11 @@ class DesktopChat:
                 media.directory = SocialContext(self.root).directory(space['id']) / 'media'
             content = media.prepare_content(imported, text or "请理解这张图片。", local=True, cancelled=self.cancel_event)
             from memory_store import MemoryStore
-            content[0]["text"] = self.policy.identity_prompt(desktop=True) + MemoryStore(self.root, self.role).context(text, scope) + content[0]['text']
+            content[0]["text"] = self.policy.identity_prompt(desktop=True) + ('' if work else MemoryStore(self.root, self.role).context(text, scope)) + content[0]['text']
+            if work:
+                content[0]['text'] = ('[本地主人工作会话：使用 DSH 原生文件、编辑、终端和联网工具完成任务；'
+                    '工作目录为 '+conversation['workspace']+'。主人已授权在此工作目录处理文件。'
+                    '不通过 QQ 发送本轮结果；按实际工具结果说明修改及验证。]\n')+content[0]['text']
             if self.cancel_event.is_set():
                 raise InterruptedError("已取消")
             self.policy.consume("calls")
@@ -165,9 +203,9 @@ class DesktopChat:
                 raise InterruptedError("已取消")
             if not result.get("ok"):
                 raise RuntimeError(result.get("error", "没有取得完整回复"))
-            self.policy.check_output(result["text"])
+            if not work:self.policy.check_output(result["text"])
             self._record(cid, "outbound", result["text"], [], "done")
-            MemoryStore(self.root, self.role).enqueue('desktop:' + str(mid), text, scope)
+            if not work:MemoryStore(self.root, self.role).enqueue('desktop:' + str(mid), text, scope)
             self._status(mid, "done")
             return self.snapshot(cid)
         except Exception as exc:
@@ -177,10 +215,15 @@ class DesktopChat:
             raise
         finally:
             self.active_session = None
+            self.active_client = None
+            self.active_cid = ''
             self.lock.release()
 
     async def _turn(self, client, session, cid, content):
+        self.active_client=client
         await client.auth()
+        with closing(self.connect()) as db:
+            settings=dict(db.execute('SELECT * FROM conversations WHERE id=?',(cid,)).fetchone())
         if session:
             try:
                 baseline = await client.baseline(session)
@@ -190,7 +233,9 @@ class DesktopChat:
                 raise RuntimeError("运行时会话无法恢复，请新建对话；原记录仍保留")
         else:
             context = self.conversation_context(cid)
-            if context:
+            if settings['mode']=='work':
+                session=await client.create_session(cwd=settings['workspace'])
+            elif context:
                 from social_context import SocialContext
                 session = await client.create_session(cwd=str(SocialContext(self.root).directory(context['id'])))
             else:
@@ -202,7 +247,14 @@ class DesktopChat:
         self.active_session = session
         from tool_host import bind_session
         space = self.conversation_context(cid)
-        if space:
+        if settings['mode']=='work':
+            bind_session(self.root,self.role,session,scope='work:'+cid,desktop=True)
+            port=self.runtime.config.runtime_port(self.role)
+            response=await asyncio.to_thread(requests.post,f'http://127.0.0.1:{port}/fish/work-permission',
+                json={'session':session,'preset':settings['permission']},headers={'x-fish-token':control_token(self.root)},timeout=10,
+                proxies={'http':None,'https':None,'all':None})
+            if not response.ok:raise RuntimeError(response.json().get('error','工作工具权限未能应用'))
+        elif space:
             from social_context import SocialContext
             SocialContext(self.root).bind_runtime(space['id'], session)
             bind_session(self.root, self.role, session, scope=space['scope'], desktop=True)
@@ -211,7 +263,7 @@ class DesktopChat:
         if self.cancel_event.is_set():
             return {"cancelled": True}
         await client.prompt(session, content)
-        return await client.wait_response(session, baseline, 180, cancel_event=self.cancel_event)
+        return await client.wait_response(session, baseline, 1800 if settings['mode']=='work' else 180, cancel_event=self.cancel_event)
 
     def cancel(self):
         self.cancel_event.set()

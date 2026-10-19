@@ -127,6 +127,7 @@ def main() -> int:
     parser.add_argument("--page", default="")
     parser.add_argument("--ui-diagnostics", default="")
     parser.add_argument('--start-qq', action='store_true', help='Start the configured QQ services with this GUI')
+    parser.add_argument('--attach', action='store_true', help='Open the current source UI without taking ownership of existing background services')
     args = parser.parse_args()
 
     if args.screenshot or args.ui_diagnostics:
@@ -140,9 +141,9 @@ def main() -> int:
     from .services import FishServices
 
     app = QApplication(sys.argv)
-    if not (args.ui_diagnostics or args.screenshot) and not _acquire_single_instance():
-        print("大鱼 Fish 已经在运行。")
-        return 0
+    if not (args.ui_diagnostics or args.screenshot or args.attach) and not _acquire_single_instance():
+        # A fresh UI can attach to a running source backend after an update.
+        args.attach=True
     for font_path in (
         Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / "segoeui.ttf",
         Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / "msyh.ttc",
@@ -153,9 +154,9 @@ def main() -> int:
     app.setFont(QFont("Microsoft YaHei UI", 9))
     app.setApplicationName("大鱼 Fish")
     services = FishServices()
-    window = MainWindow(services, manage_shutdown=not (args.screenshot or args.ui_diagnostics))
+    window = MainWindow(services, manage_shutdown=not (args.screenshot or args.ui_diagnostics or args.attach))
     window.show()
-    if not (args.screenshot or args.ui_diagnostics):
+    if not (args.screenshot or args.ui_diagnostics or args.attach):
         from .setup_wizard import SetupWizard
         from storage import read_json
         if read_json(services.root / 'harness/setup.json', {'completed': True}).get('completed') is False:

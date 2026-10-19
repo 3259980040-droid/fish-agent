@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QSize, QTimer, QDate
 from PySide6.QtGui import QIcon, QPixmap, QTextDocument
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QDateEdit, QToolButton, QLayout,
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QListWidget, QDateEdit, QToolButton, QLayout, QLineEdit,
     QListWidgetItem, QPlainTextEdit, QScrollArea, QVBoxLayout, QWidget, QDialog)
 
 from .pages import BasePage, _button, _label
@@ -80,13 +80,31 @@ class ChatPage(BasePage):
         self.focus_id = 0
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 26, 28, 24)
-        header = self._header("对话", "直接发送文字和照片。这里与角色本地对话，不会向 QQ 联系人发消息。", root)
+        # Primary: conversation and Send. Secondary: workspace/persona settings.
+        # Reuse theme.tokens spacing, existing Card and button hierarchy.
+        header = self._header("对话", "用 DeepSeek 处理本地文件，或在独立窗口试聊人格。", root)
         self.roles = QComboBox()
         self.roles.addItem("大肥鱼 · QQ 角色", "qq")
         self.roles.addItem("研究员 · 研究角色", "research")
         header.addWidget(self.roles)
         self.personas = QComboBox(); self.personas.setMaximumWidth(290); self.personas.setToolTip('新建窗口所绑定的人格版本；已有窗口保持原版本')
         header.addWidget(self.personas)
+        settings = QHBoxLayout()
+        self.chat_mode = QComboBox(); self.chat_mode.addItem('本地工作 · 文件与终端', 'work'); self.chat_mode.addItem('人格聊天 · 独立窗口', 'chat')
+        settings.addWidget(self.chat_mode)
+        self.workspace = QLineEdit(str(self.services.root)); self.workspace.setPlaceholderText('新建本地工作对话的目录'); settings.addWidget(self.workspace, 1)
+        self.workspace_btn = _button('选择目录'); settings.addWidget(self.workspace_btn)
+        self.persona_reload = _button('重载当前人格'); settings.addWidget(self.persona_reload)
+        root.addLayout(settings)
+        self.workspace_btn.clicked.connect(self._workspace)
+        self.chat_mode.currentIndexChanged.connect(lambda: [w.setEnabled(self.chat_mode.currentData() == 'work') for w in (self.workspace, self.workspace_btn)])
+        self.persona_reload.clicked.connect(self._reload_persona)
+        permissions=QHBoxLayout();permissions.addWidget(_label('本地工具权限','Caption'))
+        self.tool_permission=QComboBox();self.tool_permission.addItem('完整本机权限 · 文件与命令','danger-full-access');self.tool_permission.addItem('只写工作目录 · 扩展操作需授权','workspace-write');permissions.addWidget(self.tool_permission)
+        self.permission_apply=_button('应用到当前工作对话');permissions.addWidget(self.permission_apply)
+        self.native_panel=_button('工具与授权面板');permissions.addWidget(self.native_panel);permissions.addStretch();root.addLayout(permissions)
+        self.permission_apply.clicked.connect(self._permission);self.native_panel.clicked.connect(self._native_panel)
+        self.workspace_btn.setText('新对话目录');self.workspace.setToolTip('此目录用于新建工作对话；当前对话的目录显示在聊天上方。')
         root.addWidget(self.toast)
         body = QHBoxLayout()
         history = Card("历史对话")
@@ -214,12 +232,43 @@ class ChatPage(BasePage):
     def _new(self):
         if self.loading: return
         self._remember_draft()
-        self.cid = self.services.chat(self.role).new(revision=self.personas.currentData() or '')
+        try:
+            self.cid = self.services.chat(self.role).new(revision=self.personas.currentData() or '',mode=self.chat_mode.currentData(),workspace=self.workspace.text(),permission=self.tool_permission.currentData())
+        except Exception as exc:
+            self._toast(str(exc)); return
         self._restore_draft()
         self.focus_id = 0
         self.search.blockSignals(True); self.search.clear(); self.search.blockSignals(False)
         self._fingerprint = None
         self.refresh()
+
+    def _workspace(self):
+        path = QFileDialog.getExistingDirectory(self, '选择本地工作目录', self.workspace.text())
+        if path: self.workspace.setText(path)
+
+    def _permission(self):
+        if self.loading:return
+        try:
+            self.services.chat(self.role).set_work_permission(self.cid,self.tool_permission.currentData());self._toast('已保存工具权限，下次发送任务生效。');self.refresh()
+        except Exception as exc:self._toast(str(exc))
+
+    def _native_panel(self):
+        role=self.role
+        def url():
+            from runtime_adapter import DSHRuntimeAdapter
+            return DSHRuntimeAdapter(self.services.root,role,self.services.runtime).connect().launch_url
+        def opened(value):
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl(value))
+        self._submit(url,opened)
+
+    def _reload_persona(self):
+        if self.loading: return
+        try:
+            result = self.services.chat(self.role).reload_persona(self.cid, self.personas.currentData() or '')
+            self._toast(result['note']); self._fingerprint = None; self.refresh()
+        except Exception as exc: self._toast(str(exc))
 
     def _period(self):
         self.focus_id = 0
@@ -268,8 +317,13 @@ class ChatPage(BasePage):
         if self.cid != data['conversation_id']:
             self._remember_draft(); self.cid = data['conversation_id']; self._restore_draft()
         space = data.get('space')
-        self.context_label.setText(('独立测试 · ' + space['persona']['name'] + ' · 版本 ' + space['revision'][:8] + '\n本窗口的历史、记忆、附件和工具读取范围独立。') if space else
+        settings = data.get('settings', {})
+        permission='完整本机权限' if settings.get('permission')=='danger-full-access' else '工作目录权限'
+        self.context_label.setText(('本地工作 · DSH 文件、编辑和终端工具 · '+permission+'\n工作目录：' + settings.get('workspace', '') + ' · 使用已配置的 DeepSeek API') if settings.get('mode') == 'work' else ('独立测试 · ' + space['persona']['name'] + ' · 版本 ' + space['revision'][:8] + '\n本窗口的历史、记忆和附件独立。') if space else
                                   '日常区 · 原有会话沿用旧范围。新建 QQ 测试窗口后使用独立记忆。')
+        activity=data.get('activity',{})
+        if activity.get('state')=='waiting_approval':self.context_label.setText(self.context_label.text()+'\n等待工具授权：'+activity.get('tool','')+'；打开“工具与授权面板”处理。')
+        elif activity.get('state')=='tool':self.context_label.setText(self.context_label.text()+'\n正在使用工具：'+activity.get('tool',''))
         self.focus_id = data.get('focus_id', 0)
         self.conversations.blockSignals(True)
         self.conversations.clear()
@@ -342,7 +396,9 @@ class ChatPage(BasePage):
         text, attachments = self.editor.toPlainText(), list(self.attachments)
         if not text.strip() and not attachments: return
         chat = self.services.chat(self.role)
-        if not self.cid: self.cid = chat.new()
+        if not self.cid:
+            try:self.cid = chat.new(revision=self.personas.currentData() or '',mode=self.chat_mode.currentData(),workspace=self.workspace.text(),permission=self.tool_permission.currentData())
+            except Exception as exc:self._toast(str(exc));return
         cid = self.cid
         self.focus_id = 0
         self.search.blockSignals(True); self.search.clear(); self.search.blockSignals(False)

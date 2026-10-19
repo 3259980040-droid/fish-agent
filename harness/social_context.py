@@ -223,6 +223,15 @@ class SocialContext:
             db.execute('UPDATE spaces SET session=?,updated=? WHERE id=?', (str(session), time.time(), sid))
         return self.space(sid)
 
+    def change_persona(self, sid, revision):
+        space=self.space(sid);persona=self.persona(revision)
+        if persona['role']!=space['role']:raise ValueError('人格不属于此角色')
+        with database(self.path) as db:
+            db.execute('UPDATE spaces SET revision=?,updated=? WHERE id=?',(revision,time.time(),sid))
+            db.execute('INSERT INTO audit(kind,subject,actor,created) VALUES(?,?,?,?)',('persona_reloaded',sid,'owner',time.time()))
+        (self.directory(sid)/'persona.md').write_text(persona['body'],encoding='utf-8')
+        return self.space(sid)
+
     def select_owner_space(self, sid, sender):
         self.require_owner(sender)
         space = self.space(sid)

@@ -16,7 +16,7 @@ def configuration(root):
 def matches(root, space):
     config = configuration(root)
     return bool(config.get('enabled') and space['origin'] == 'owner-qq'
-                and space['revision'] == config.get('persona_revision'))
+                and (space['id']==config.get('space_id') or space['revision'] == config.get('persona_revision')))
 
 
 def ensure_service(root):

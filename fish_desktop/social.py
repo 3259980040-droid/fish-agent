@@ -3,7 +3,7 @@ import time
 import json
 import difflib
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFormLayout, QHBoxLayout, QFileDialog,
     QLineEdit, QPlainTextEdit, QSpinBox, QTabWidget, QVBoxLayout, QWidget, QScrollArea, QLayout, QFrame, QDialog)
 from .pages import BasePage, _button, _label
 from .widgets import Card
@@ -16,7 +16,9 @@ class SocialPage(BasePage):
         self.dirty = False
         self._drafts = {}
         root = QVBoxLayout(self); root.setContentsMargins(28, 26, 28, 24)
-        self._header('人格与群聊', '先在独立窗口和主人 QQ 测试，再由主人认可具体版本。群发言单独开启。', root)
+        # Primary: selected persona and Apply. Secondary: source import and history.
+        # Reuse existing theme tokens, forms, cards and button styles.
+        self._header('人格与群聊', '导入人格、选择目标并重载；群聊参与和定时任务在这里管理。', root)
         root.addWidget(self.toast)
         self.tabs = QTabWidget(); root.addWidget(self.tabs, 1)
         persona = QWidget(); layout = QVBoxLayout(persona)
@@ -24,6 +26,12 @@ class SocialPage(BasePage):
         top.addWidget(self.versions, 1)
         self.reload_btn = _button('刷新版本'); top.addWidget(self.reload_btn)
         layout.addLayout(top)
+        source_row=QHBoxLayout();self.import_btn=_button('导入人格文件');source_row.addWidget(self.import_btn)
+        self.presets_btn=_button('导入社区预设');source_row.addWidget(self.presets_btn)
+        self.apply_target=QComboBox();self.apply_target.addItem('主人私聊','owner');source_row.addWidget(self.apply_target,1)
+        self.fresh_history=QCheckBox('新窗口');source_row.addWidget(self.fresh_history)
+        self.apply_btn=_button('应用并重载',primary=True);source_row.addWidget(self.apply_btn);layout.addLayout(source_row)
+        self.import_btn.clicked.connect(self._import);self.presets_btn.clicked.connect(self._presets);self.apply_btn.clicked.connect(self._apply)
         self.state = _label('', 'Muted'); self.state.setTextFormat(Qt.PlainText); self.state.setWordWrap(True); layout.addWidget(self.state)
         self.name = QLineEdit(); self.name.setPlaceholderText('人格名称'); layout.addWidget(self.name)
         output_row = QHBoxLayout(); output_row.addWidget(_label('QQ 测试输出', 'Caption'))
@@ -39,13 +47,13 @@ class SocialPage(BasePage):
             self.edit_tabs.addTab(editor, title)
             editor.textChanged.connect(self._edited)
         self.name.textEdited.connect(self._edited)
-        note = _label('保存会创建新的待测版本。已有窗口和已发布版本保持固定；认可需使用主人 QQ 的 /认可人格 命令。', 'Caption')
+        note = _label('保存生成新版本；“应用并重载”由本机主人直接选择目标生效，默认保留该窗口的历史。', 'Caption')
         note.setWordWrap(True); layout.addWidget(note)
         actions = QHBoxLayout(); self.test_btn = _button('新建本地测试窗口'); actions.addWidget(self.test_btn)
         self.command_btn = _button('主人 QQ 测试指令'); actions.addWidget(self.command_btn); actions.addStretch()
         self.diff_btn=_button('对比原版本');actions.insertWidget(2,self.diff_btn)
         self.input_btn=_button('查看主人测试输入');actions.insertWidget(3,self.input_btn)
-        self.save_btn = _button('另存为待测版本', primary=True); actions.addWidget(self.save_btn); layout.addLayout(actions)
+        self.save_btn = _button('另存为新版本'); actions.addWidget(self.save_btn); layout.addLayout(actions)
         self.tabs.addTab(persona, '人格版本')
         group = QWidget(); gl = QVBoxLayout(group)
         card = Card('按群设置'); form = QFormLayout(); card.body.addLayout(form); gl.addWidget(card)
@@ -80,6 +88,8 @@ class SocialPage(BasePage):
         self.shared_rules = PersonaSourcePage(services, shared=True)
         self.tabs.addTab(self.daily_persona, '日常人格')
         self.tabs.addTab(self.shared_rules, '共享规则原文')
+        from .schedules import SchedulePanel
+        self.schedules=SchedulePanel(services);self.tabs.addTab(self.schedules,'定时任务')
         self.tabs.currentChanged.connect(self._refresh_tab)
         self.reload_btn.clicked.connect(lambda: self._load_versions(force=True))
         self.versions.currentIndexChanged.connect(self._load_persona)
@@ -96,7 +106,7 @@ class SocialPage(BasePage):
 
     def _refresh_tab(self, index):
         page = self.tabs.widget(index)
-        if page in (self.members, self.daily_persona, self.shared_rules): page.refresh()
+        if page in (self.members, self.daily_persona, self.shared_rules, self.schedules): page.refresh()
 
     def refresh(self):
         if not self.versions.count():
@@ -110,14 +120,42 @@ class SocialPage(BasePage):
         current = self.selected
         self.versions.blockSignals(True); self.versions.clear()
         for p in rows:
-            self.versions.addItem(f"{p['name']} · {p['id'][:8]} · {'主人已认可' if p['approved'] else '待测'}", p['id'])
+            self.versions.addItem(f"{p['name']} · {p['id'][:8]} · {'主人已认可' if p['approved'] else '可应用'}", p['id'])
         index = self.versions.findData(current); self.versions.setCurrentIndex(max(0, index)); self.versions.blockSignals(False)
         self._load_persona()
         from storage import read_json
         selected = self.groups.currentData(); self.groups.blockSignals(True); self.groups.clear()
         for gid in read_json(self.services.root / 'channels/fish_qq/config.json').get('allowlist', {}).get('group_ids', []):
             self.groups.addItem(str(gid), str(gid))
+        target=self.apply_target.currentData();self.apply_target.clear();self.apply_target.addItem('主人私聊','owner')
+        for i in range(self.groups.count()):self.apply_target.addItem('群 '+self.groups.itemText(i),'group:'+self.groups.itemData(i))
+        self.apply_target.setCurrentIndex(max(0,self.apply_target.findData(target)))
         self.groups.setCurrentIndex(max(0, self.groups.findData(selected))); self.groups.blockSignals(False); self._load_group()
+
+    def _import(self):
+        from pathlib import Path
+        from persona_library import PersonaLibrary
+        filename,_=QFileDialog.getOpenFileName(self,'导入人格','','人格文件 (*.md *.txt *.json *.toml)')
+        if not filename:return
+        try:
+            path=Path(filename);rows=PersonaLibrary(self.services.root).import_text(path.read_text(encoding='utf-8-sig'),name=path.stem,source=str(path))
+            if self.dirty:self._drafts[self.selected]=(self.name.text(),self.body.toPlainText(),self.global_rules.toPlainText(),self.workspace_rules.toPlainText(),self.reply_mode.currentData())
+            self.dirty=False;self.selected=rows[0]['id'];self._load_versions();self._toast('已导入 '+str(len(rows))+' 个人格，选择目标后应用。')
+        except Exception as exc:self._toast(str(exc))
+
+    def _presets(self):
+        from persona_library import PersonaLibrary
+        try:
+            rows=PersonaLibrary(self.services.root).install_presets();self._load_versions();self._toast('社区预设已导入 '+str(len(rows))+' 个；正文和来源可直接查看。')
+        except Exception as exc:self._toast(str(exc))
+
+    def _apply(self):
+        if self.loading:return
+        if self.dirty:self._toast('请先保存当前修改，再应用此版本。');return
+        from persona_library import PersonaLibrary
+        revision=self.selected;target=self.apply_target.currentData();new=self.fresh_history.isChecked()
+        self._submit(lambda:PersonaLibrary(self.services.root).apply(revision,target,new=new),
+            lambda value:self._toast('已应用 '+value['name']+'；'+('新建窗口' if new else '保留历史')+'。'),on_done=self._load_group)
 
     def _load_persona(self):
         if not self.versions.currentData(): return
@@ -130,14 +168,18 @@ class SocialPage(BasePage):
             editor.blockSignals(True); editor.setPlainText(value); editor.blockSignals(False)
         self.name.setText(name); self.dirty = p['id'] in self._drafts
         self.reply_mode.blockSignals(True); self.reply_mode.setCurrentIndex(max(0,self.reply_mode.findData(mode))); self.reply_mode.blockSignals(False)
-        self.state.setText(f"版本 {p['id']}\n配置摘要 {p['digest'][:16]} · {'主人已认可' if p['approved'] else '等待主人测试与认可'}")
+        from persona_library import PersonaLibrary
+        source=next((x['source'] for x in PersonaLibrary(self.services.root).list() if x['id']==p['id']),'Fish 本地人格')
+        source_name='/'.join(source.split('/')[3:5]) if source.startswith('https://github.com/') else source
+        self.state.setToolTip(source)
+        self.state.setText(f"版本 {p['id'][:8]} · {'主人已认可' if p['approved'] else '可直接应用或先测试'}\n来源：{source_name}")
 
     def _save_persona(self):
         from social_context import SocialContext
         try:
             p = SocialContext(self.services.root).save_persona('qq', self.name.text(), self.body.toPlainText(), parent=self.selected,
                 global_rules=self.global_rules.toPlainText(), workspace_rules=self.workspace_rules.toPlainText(), owner_reply_mode=self.reply_mode.currentData())
-            self._drafts.pop(self.selected,None); self.dirty=False;self.selected = p['id']; self._load_versions(); self._toast('已创建待测版本。先在主人 QQ 测试并认可。')
+            self._drafts.pop(self.selected,None); self.dirty=False;self.selected = p['id']; self._load_versions(); self._toast('已创建新版本；可选择主人私聊或群应用。')
         except Exception as exc: self._toast(str(exc))
 
     def _test(self):
@@ -196,7 +238,7 @@ class SocialPage(BasePage):
         dep = SocialContext(self.services.root).deployment(gid)
         self.deployment.setText(('群发言已开启 · 人格 ' + dep['revision'][:8]) if dep['enabled'] else '群发言已停止；' + dep.get('reason', '发布记录保留。'))
         if trial:
-            self.deployment.setText('群测试进行中 · 人格 ' + trial['revision'][:8] + ' · 窗口 ' + trial['id'][:8] + '；长期学习关闭。')
+            self.deployment.setText(('群测试进行中' if cfg['listen'] and cfg['reply'] else '群测试已停止，记录保留')+' · 人格 ' + trial['revision'][:8] + ' · 窗口 ' + trial['id'][:8])
         from group_workflow import GroupWorkflow
         stages={'judge':'判断话题','skip':'继续旁听','silent':'继续旁听','cancel':'撤销候选','generate':'正在生成','sent':'已发送','failed':'未完成'}
         self.group_log.setPlainText('\n'.join(time.strftime('%H:%M:%S',time.localtime(r['created']))+' · '+stages.get(r['stage'],r['stage'])+' · '+r['reason']

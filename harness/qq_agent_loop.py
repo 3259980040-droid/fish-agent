@@ -312,10 +312,11 @@ class QQAgentLoop:
         from group_workflow import GroupWorkflow
         trial = GroupTests(self.root).current(str(payload.get('chat_id', '')).split(':')[-1])
         if trial:
-            workflow = self.group_test_workflows.get(trial['id'])
+            workflow_key=trial['id']+':'+trial['revision']
+            workflow = self.group_test_workflows.get(workflow_key)
             if workflow is None:
                 workflow = GroupWorkflow(self.root, trial=trial)
-                self.group_test_workflows[trial['id']] = workflow
+                self.group_test_workflows[workflow_key] = workflow
         else:
             workflow = self.social_workflow
         from group_dialogue import GroupDialogue
@@ -324,7 +325,10 @@ class QQAgentLoop:
             # Retain passive-listening behavior when no group version is active.
             await workflow.observe(self, payload)
             return
-        key = trial['id'] if trial else chat+':'+workflow.contexts.deployment(chat.split(':')[1])['revision']
+        key = trial['id']+':'+trial['revision'] if trial else chat+':'+workflow.contexts.deployment(chat.split(':')[1])['revision']
+        for old_key,old in list(self.group_dialogues.items()):
+            if old.chat==chat and old_key!=key:
+                await old.cancel();self.group_dialogues.pop(old_key,None)
         dialogue = self.group_dialogues.get(key)
         if dialogue is None:
             dialogue = GroupDialogue(self, workflow, chat)

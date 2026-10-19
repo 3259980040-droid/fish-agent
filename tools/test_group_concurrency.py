@@ -23,6 +23,23 @@ from dsh_web import DSHWebClient
 
 
 class ConcurrentTests(Fixture):
+    def test_recent_background_picture_uses_prompt_attachments_not_text_envelope(self):
+        self.setup_dialogue();self.d.workflow.policy.configure(self.chat,{'mode':'mention'})
+        picture=self.payload('刚才这张图','picture',direct=False)
+        picture['segments'].append({'type':'image','url':'https://example.test/picture.jpg'})
+        def media(segments,text,**kwargs):
+            return [{'type':'text','text':text}]+([{'type':'image','mediaType':'image/jpeg','data':'pixel-fixture'}] if any(s.get('type')=='image' for s in segments) else [])
+        async def run():
+            with patch('multimodal.MediaService.prepare_content',side_effect=media):
+                await self.d.observe(picture);await self.d.observe(self.payload('这图怎么接','ask'));await self.drain()
+        asyncio.run(run())
+        self.assertTrue(any(b.get('type')=='image' for b in self.clients[-1].content))
+        envelope=json.loads(list(self.contexts.values())[-1])
+        self.assertTrue(all(b.get('type')=='text' for m in envelope['history'] for b in m['content']))
+        from group_history import GroupHistory
+        after=GroupHistory(self.root,self.d.jobs,self.loop.store,self.chat,self.trial['id'],'another-persona')
+        self.assertEqual(after.key,self.d.history.key)
+
     def test_mention_without_words_is_a_valid_prompt(self):
         self.setup_dialogue()
         async def run():

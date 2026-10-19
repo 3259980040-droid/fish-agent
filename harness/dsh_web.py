@@ -44,6 +44,7 @@ class DSHWebClient:
         self.session.trust_env = False
         self.origin = launch_url.split("/?")[0]
         self.cookie = ""
+        self.activity = {}
         self._baseline_seq: dict[str, int] = {}
         configured = os.environ.get('FISH_DSH_FOLLOW_MAX_MIB', '1024').strip().lower()
         if configured in ('unlimited', 'none', '0'):
@@ -185,6 +186,15 @@ class DSHWebClient:
             recent = [record for record in page.get("records", [])
                       if record.get("type") == "event" and
                       int((record.get("event") or {}).get("seq", 0)) > start]
+            asked={};finished=set();active_tool=''
+            for record in recent:
+                event=record.get('event') or {};data=event.get('data') or {};kind=event.get('type')
+                if kind=='approval/asked':asked[data['id']]=data.get('toolName','')
+                elif kind=='approval/decided':finished.add(data['id'])
+                elif kind=='tool/call':active_tool=data.get('name','')
+                elif kind=='tool/result':active_tool=''
+            waiting=[tool for key,tool in asked.items() if key not in finished]
+            self.activity={'state':'waiting_approval','tool':waiting[-1]} if waiting else {'state':'tool','tool':active_tool} if active_tool else {'state':'generating'}
             ended = next(((record.get("event") or {}) for record in reversed(recent)
                           if (record.get("event") or {}).get("type") == "turn/end"), None)
             if ended:

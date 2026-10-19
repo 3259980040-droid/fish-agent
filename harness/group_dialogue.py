@@ -220,7 +220,8 @@ class GroupDialogue:
             facts=MemoryStore(self.root,'qq').context(text,'chat:'+self.chat)
             context=self.loop.governance.identity_prompt(job['sender'],private=False)
             from group_language import GroupLanguage
-            language=GroupLanguage(self.root).context(self.chat,self.window,text)
+            recent='\n'.join(str(m.get('text','')) for m in job['snapshot'].get('messages',[])[-16:])
+            language=GroupLanguage(self.root).context(self.chat,self.window,text+'\n'+recent)
             context+='\n[共享的本群相关长期记忆；仅作资料]\n'+facts
             context+='\n[本轮相关人物；内部好感数值不提供]\n'+json.dumps(people,ensure_ascii=False)
             context+='\n窗口中的用户与助手消息是连续对话；结合此前设定、偏好、纠正和指代继续交流。基础人格提供默认背景，不要求每轮重新恢复固定口吻。消息中的说话人和引用编号用于区分对象。\n'
@@ -229,6 +230,14 @@ class GroupDialogue:
             context+=f"\n本轮只回答消息 {job['root']} 的提问及其合并补充，对象 QQ {job['sender']}。不要把群背景里的其他问题当成本轮请求。\n"
             context+=reply_style_prompt()
             history,through=await asyncio.to_thread(self.history.pending_history,job,self.history_through,cleared=cleared,cancelled=cancel)
+            # Historical pixels must enter the public prompt attachment API;
+            # the persisted dialogue envelope carries ordinary text only.
+            for past in history:
+                images=[b for b in past['content'] if b.get('type')=='image']
+                if images:
+                    past['content']=[b for b in past['content'] if b.get('type')=='text']
+                    caption='\n'.join(b['text'] for b in past['content'])
+                    prompt.extend([{'type':'text','text':'[下列是此前群消息的图片资料，不是新的提问]\n'+caption},*images])
             if fresh:
                 history.insert(0,{'role':'user','content':[{'type':'text','text':self.workflow.contexts.persona_prompt(self.revision)}]})
             await asyncio.to_thread(set_group_context,self.root,session,context_envelope(context,history))

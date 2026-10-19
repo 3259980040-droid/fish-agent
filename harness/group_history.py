@@ -17,14 +17,17 @@ def user_message(payload):
     media = [s.get('type') for s in payload.get('segments', []) if s.get('type') in ('image', 'audio', 'video', 'file')]
     if media:
         text += '\n[历史附件类型：' + ', '.join(media) + '；此处未重新加载附件内容]'
-    return {'role': 'user', 'content': [{'type': 'text', 'text': '【群消息 ' + json.dumps(header, ensure_ascii=False) + '】\n' + text}]}
+    result={'role': 'user', 'content': [{'type': 'text', 'text': '【群消息 ' + json.dumps(header, ensure_ascii=False) + '】\n' + text}]}
+    images=[dict(s) for s in payload.get('segments',[]) if s.get('type')=='image']
+    if images:result['fish_history_media']=images[:2]
+    return result
 
 
 class GroupHistory:
     def __init__(self, root, jobs, store, chat, window, revision):
         self.root, self.jobs, self.store = root, jobs, store
         self.chat, self.window, self.revision = chat, window, revision
-        self.key = json.dumps([chat, window, revision], separators=(',', ':'))
+        self.key = json.dumps([chat, window, 'history-v2' if window else revision], separators=(',', ':'))
         self.path = jobs.path
         with database(self.path) as db:
             db.executescript('''
@@ -36,6 +39,14 @@ class GroupHistory:
             CREATE TABLE IF NOT EXISTS dialogue_summaries(
                 scope TEXT PRIMARY KEY, through_seq INTEGER, text TEXT, cleared REAL);
             ''')
+            # A persona reload keeps this window's ordinary dialogue. A new
+            # window still has a distinct key. Migrate existing rows once.
+            if window and not db.execute('SELECT 1 FROM dialogue_messages WHERE scope=? LIMIT 1',(self.key,)).fetchone():
+                for old in db.execute('SELECT DISTINCT scope FROM dialogue_messages').fetchall():
+                    parts=json.loads(old['scope'])
+                    if parts[:2] != [chat,window] or old['scope']==self.key: continue
+                    db.execute('''INSERT OR IGNORE INTO dialogue_messages(scope,source,role,message,created)
+                        SELECT ?,source,role,message,created FROM dialogue_messages WHERE scope=? ORDER BY seq''',(self.key,old['scope']))
         self.import_existing()
 
     def append(self, source, message, created=None):
@@ -114,6 +125,26 @@ class GroupHistory:
                     db.execute('INSERT OR REPLACE INTO dialogue_summaries VALUES(?,?,?,?)',
                                (self.key, rows[split-1]['seq'], prefix, cleared))
                 messages = messages[split:]
+                rows = rows[split:]
+        # Recent non-mention pictures reach the same model turn as real pixels.
+        # Persist only local attachment references; do not store base64 in the DB.
+        recent={i for i,m in list(enumerate(messages))[-12:] if m.get('fish_history_media')}
+        recent=set(sorted(recent)[-2:])
+        for index,message in enumerate(messages):
+            images=message.pop('fish_history_media',[])
+            if index not in recent:continue
+            stored=json.loads(json.dumps(message))
+            from multimodal import MediaService
+            service=MediaService(self.root,'qq')
+            for image in images:
+                local=bool(image.get('local_path'))
+                segment={'type':'image','path':image['local_path']} if local else image
+                content=service.prepare_content([segment],'[此群消息的实际历史图片]',local=local,cancelled=cancelled)
+                message['content'].extend(content)
+                if segment.get('local_path'):image['local_path']=segment['local_path']
+            source=rows[index]['source']
+            stored['fish_history_media']=images
+            with database(self.path) as db:db.execute('UPDATE dialogue_messages SET message=? WHERE scope=? AND source=?',(json.dumps(stored,ensure_ascii=False),self.key,source))
         if prefix:
             messages.insert(0, {'role': 'user', 'content': [{'type': 'text', 'text': '[本窗口较早对话的摘要]\n' + prefix}]})
         return messages, end

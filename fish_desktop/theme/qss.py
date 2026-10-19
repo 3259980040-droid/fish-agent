@@ -157,7 +157,7 @@ QLabel#BubbleMeta[state="warn"] {{ color: {COLORS['warning']}; }}
 """
 
 QSS += f"""
-QLineEdit, QComboBox, QSpinBox, QDateEdit {{ background: white; color: {COLORS['text']};
+QLineEdit, QComboBox, QSpinBox, QDateEdit, QDateTimeEdit, QTimeEdit {{ background: white; color: {COLORS['text']};
     border: 1px solid {COLORS['border']}; border-radius: 7px; padding: 7px 10px; min-height: 20px; }}
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus {{ border-color: {COLORS['primary']}; }}
 QComboBox QAbstractItemView {{ background: white; color: {COLORS['text']}; selection-background-color: #EAF0FF; }}

@@ -42,12 +42,12 @@ class LanguageTests(unittest.TestCase):
         self.assertEqual(s.learn(self.snapshot,[{**self.item,'message_id':'invented'}],self.owner,'window-a'),0)
         self.assertEqual(s.learn(self.snapshot,[self.item],self.owner,'window-a'),0)
 
-    def test_group_owner_relationship_does_not_grant_private_capabilities(self):
+    def test_verified_owner_has_management_in_group_and_private(self):
         write_json(self.root/'channels/fish_qq/config.json',{'allowlist':{'owner_id':self.owner}})
         policy=Governance(self.root)
-        self.assertIn('人物关系为主人',policy.identity_prompt(self.owner,private=False))
-        self.assertIn('无主人私聊管理权限',policy.identity_prompt(self.owner,private=False))
-        self.assertFalse(policy.permitted(self.owner,'memory.write',private=False))
+        self.assertIn('本轮来自主人账号',policy.identity_prompt(self.owner,private=False))
+        self.assertIn('fish_owner_admin',policy.identity_prompt(self.owner,private=False))
+        self.assertTrue(policy.permitted(self.owner,'memory.write',private=False))
         self.assertIn('普通聊天参与者',policy.identity_prompt('33333333',private=False))
 
     def test_peer_examples_are_candidates_and_cannot_overwrite_owner(self):
@@ -56,7 +56,7 @@ class LanguageTests(unittest.TestCase):
         s.learn({'chat_id':self.chat,'messages':[msg]},[{**self.item,'message_id':'m2','content':'错误新称呼'}],self.owner,'a')
         self.assertEqual(s.select(self.chat,'a','杏目')[0]['content'],self.item['content'])
         s.learn({'chat_id':self.chat,'messages':[msg]},[{**self.item,'message_id':'m2','trigger':'新梗'}],self.owner,'a')
-        self.assertEqual(s.select(self.chat,'a','新梗'),[])
+        self.assertEqual(s.select(self.chat,'a','新梗')[0]['status'],'candidate')
 
     def test_approved_candidate_is_retrieved_and_disabled_is_not_relearned(self):
         s=GroupLanguage(self.root);snap={**self.snapshot,'messages':[{**self.snapshot['messages'][0],'sender':{'id':'33333333'}}]}

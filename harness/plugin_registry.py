@@ -289,6 +289,15 @@ class PluginRegistry:
                     pass
 
     def _run(self, item, method, tool='', arguments=None, role='research', cancel=None):
+        if item.get('id')=='tulpa_owner':
+            # The UI and ToolHost use separate processes and SDK connections.
+            # One cross-process queue also covers persona stop/start batches.
+            from storage import settings_lock
+            with settings_lock(self.root/'data/integrations/tulpa/call-queue',timeout=120):
+                return self._run_unlocked(item,method,tool,arguments,role,cancel)
+        return self._run_unlocked(item,method,tool,arguments,role,cancel)
+
+    def _run_unlocked(self, item, method, tool='', arguments=None, role='research', cancel=None):
         cancel = cancel or threading.Event()
         if item['kind'].startswith('mcp_'):
             return asyncio.run(self._run_cancellable(self._mcp(item, method, tool, arguments, role), item['timeout'], cancel))
