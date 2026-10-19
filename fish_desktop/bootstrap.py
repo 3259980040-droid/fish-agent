@@ -72,6 +72,7 @@ def repair_runtime_paths(root):
 
 
 def locate_root():
+    activate_install_profile()
     configured = os.environ.get('FISH_HARNESS_HOME')
     if configured: return initialize(Path(configured))
     selected = selected_root()
@@ -87,6 +88,55 @@ def locate_root():
             return initialize(executable.parent / 'FishData')
         return initialize(Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData/Local')) / 'Fish')
     return Path(__file__).resolve().parents[1]
+
+
+def installed_profile():
+    """Recover an installed app's profile independently of its launching shell."""
+    if not getattr(sys, 'frozen', False): return None
+    for parent in Path(sys.executable).resolve().parents:
+        if parent.name.lower() == 'releases' and parent.parent.name.lower() == 'fishapp':
+            if (parent.parent / 'location.json').is_file():
+                return parent.parent.parent
+    return None
+
+
+def activate_install_profile():
+    profile = installed_profile()
+    if profile is not None:
+        os.environ['LOCALAPPDATA'] = str(profile)
+    return profile
+
+
+def refresh_desktop_entry(root):
+    """An installed GUI repairs its stable desktop shortcut after an upgrade."""
+    profile = installed_profile()
+    if os.name != 'nt' or profile is None: return
+    import base64
+    import subprocess
+    from storage import write_json
+    exe = Path(sys.executable).resolve()
+    quoted = lambda value: "'" + str(value).replace("'", "''") + "'"
+    script = '\n'.join([
+        "$ErrorActionPreference = 'Stop'",
+        '$entryShell = New-Object -ComObject WScript.Shell',
+        "$entryDesktop = [Environment]::GetFolderPath('Desktop')",
+        "$entryLink = $entryShell.CreateShortcut((Join-Path $entryDesktop '大肥鱼 Fish.lnk'))",
+        '$entryLink.TargetPath = ' + quoted(exe),
+        '$entryLink.WorkingDirectory = ' + quoted(root),
+        '$entryLink.IconLocation = ' + quoted(str(exe) + ',0'),
+        "$entryLink.Description = '大肥鱼 Fish'",
+        '$entryLink.Save()',
+    ])
+    result = {'ok': False, 'exe': str(exe), 'root': str(root), 'profile': str(profile)}
+    try:
+        subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden',
+                        '-EncodedCommand', base64.b64encode(script.encode('utf-16-le')).decode('ascii')],
+                       check=True, capture_output=True, timeout=12,
+                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        result['ok'] = True
+    except (OSError, subprocess.SubprocessError) as exc:
+        result['error'] = type(exc).__name__
+    write_json(Path(root) / 'data/diagnostics/desktop-entry.json', result)
 
 
 def location_file():

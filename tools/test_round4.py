@@ -28,6 +28,32 @@ def release(path, corrupt=False):
 
 
 class MaintenanceTests(unittest.TestCase):
+    def test_installed_program_recovers_profile_without_launch_environment(self):
+        from fish_desktop.bootstrap import initialize, locate_root
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp); root = initialize(work / 'personal')
+            profile = work / 'profile'; app = profile / 'FishApp'
+            app.mkdir(parents=True)
+            (app / 'location.json').write_text(json.dumps({'root': str(root)}), encoding='utf-8')
+            exe = app / 'releases/Fish-test/Fish.exe'; exe.parent.mkdir(parents=True); exe.touch()
+            with patch.dict(os.environ, {'LOCALAPPDATA': str(work / 'unrelated-global')}), \
+                    patch.object(sys, 'frozen', True, create=True), patch.object(sys, 'executable', str(exe)):
+                os.environ.pop('FISH_HARNESS_HOME', None)
+                self.assertEqual(locate_root(), root)
+                self.assertEqual(Path(os.environ['LOCALAPPDATA']), profile)
+
+    def test_explicit_data_root_wins_while_installed_profile_is_retained(self):
+        from fish_desktop.bootstrap import initialize, locate_root
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp); root = initialize(work / 'explicit')
+            profile = work / 'profile'; app = profile / 'FishApp'; app.mkdir(parents=True)
+            (app / 'location.json').write_text(json.dumps({'root': str(work / 'unused')}), encoding='utf-8')
+            exe = app / 'releases/Fish-test/Fish.exe'; exe.parent.mkdir(parents=True); exe.touch()
+            with patch.dict(os.environ, {'LOCALAPPDATA': str(work / 'global'), 'FISH_HARNESS_HOME': str(root)}), \
+                    patch.object(sys, 'frozen', True, create=True), patch.object(sys, 'executable', str(exe)):
+                self.assertEqual(locate_root(), root)
+                self.assertEqual(Path(os.environ['LOCALAPPDATA']), profile)
+
     def test_successful_maintenance_startup_remembers_data_for_later_manual_launch(self):
         self._maintenance_startup(True)
 

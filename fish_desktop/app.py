@@ -160,6 +160,7 @@ def main() -> int:
         if read_json(services.root / 'harness/setup.json', {'completed': True}).get('completed') is False:
             SetupWizard(services, window).exec()
         maintenance_result = os.environ.pop('FISH_MAINTENANCE_RESULT', '')
+        maintenance_ok = True
         if maintenance_result:
             from PySide6.QtWidgets import QMessageBox
             try:
@@ -171,9 +172,15 @@ def main() -> int:
                     from .bootstrap import select_root
                     select_root(services.root)
                     QMessageBox.information(window, '维护完成', '操作已完成。当前数据目录：\n' + str(services.root))
-                else: QMessageBox.warning(window, '维护未完成', str(result.get('error', '请检查维护记录')))
+                else:
+                    maintenance_ok = False
+                    QMessageBox.warning(window, '维护未完成', str(result.get('error', '请检查维护记录')))
             except (OSError, ValueError):
+                maintenance_ok = False
                 QMessageBox.warning(window, '维护结果', '维护记录无法读取，请查看备份与升级页面。')
+        if maintenance_ok:
+            from .bootstrap import refresh_desktop_entry
+            refresh_desktop_entry(services.root)
         services.start_background()
 
     def pump(ms: int) -> None:
