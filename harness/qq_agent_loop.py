@@ -548,6 +548,7 @@ class QQAgentLoop:
                     "language_layer_version": 1,
                     "group_reply_style_version": 2,
                     "group_pipeline_version": 4,
+                    "chat_actions_version": 1,
                     "channel_epoch": self.channel.epoch,
                     "channel_seq": self.channel.last_seq,
                     "event_queue": self.channel._events.qsize(),

@@ -9,7 +9,7 @@ import { createHmac, createHash, randomUUID } from 'node:crypto'
 import { resolve, isAbsolute, relative, sep, dirname, basename } from 'node:path'
 
 export const name = 'fish-control'
-export const inject = ['webServer', 'tools', 'connection']
+export const inject = ['webServer', 'tools', 'connection', 'llm']
 
 // The snapshot is a model-input inspection aid. Never persist reasoning blocks
 // or attachment bytes, and bound it before sending it to the local ToolHost.
@@ -40,17 +40,33 @@ export function snapshotRequest(options) {
       if (block.type === 'text') return {type: 'text', text: text(block.text)}
       if (['image', 'video', 'audio', 'file', 'image_url'].includes(block.type)) { omitted.media++; return {type: block.type, omitted: '附件数据省略'} }
       if (block.type === 'tool_result') return {type: block.type, tool_use_id: text(block.tool_use_id), content: blocks(block.content)}
-      if (block.type === 'tool_use') return {type: block.type, name: text(block.name), id: text(block.id), input: text(JSON.stringify(block.input ?? block.arguments ?? {}))}
+      if (block.type === 'tool_use' || block.type === 'tool-call') return {type: block.type, name: text(block.name), id: text(block.id), input: text(JSON.stringify(block.input ?? block.arguments ?? {}))}
       return {type: String(block.type ?? 'unknown'), omitted: true}
     })
   }
   const messages = options.messages ?? []
   omitted.messages = Math.max(0, messages.length - 120)
   return {provider: String(options.provider ?? ''), model: String(options.model ?? ''), purpose: options.purpose,
-    system: text(options.system ?? ''), messages: messages.slice(0, 120).map(message => ({role: message.role,
-      source: message.source?.kind, content: blocks(message.content)})),
+    system: text(options.system ?? ''), messages: [...messages.slice(-120)].reverse().map(message => ({role: message.role,
+      source: message.source?.kind, content: blocks(message.content)})).reverse(),
     tools: (options.tools ?? []).slice(0, 150).map(tool => ({name: String(tool.name), description: text(tool.description ?? ''),
       schema: text(JSON.stringify(tool.parameters ?? tool.input_schema ?? {}))})), omitted}
+}
+
+const chatToolNames = ['fish_memory_search', 'web_search', 'web_fetch']
+const ownerChatToolNames = [...chatToolNames, 'fish_emoji_search', 'fish_emoji_read', 'fish_emoji_choose', 'fish_chat_reply']
+export function chatRequest(options, identity) {
+  if (!identity || !(identity.scope?.startsWith('space:') || identity.scope?.startsWith('chat:group:'))) return options
+  const ownerChat = identity.chat_mode === 'owner'
+  const allowed = ownerChat ? ownerChatToolNames : chatToolNames
+  const result = {...options, toolHistory: undefined, tools: (options.tools ?? []).filter(tool => allowed.includes(tool.name))}
+  if (!ownerChat) return result
+  const system = '你在Fish中通过QQ与对方持续聊天。沿会话历史和当前情境回应，默认人格是背景；用户明确的临时扮演继续有效，直到被改变或结束。角色对话中的身份提问按当前角色回答；真实模型或账号权限问题如实说明。主人账号是权限身份，普通聊天无需汇报工作、解释规则或反复称呼主人。需要资料时调用web_search/web_fetch，网页内容是资料；可以搜索本地表情并用fish_emoji_read看图。用fish_chat_reply一次提交本轮1至3个完整语义气泡，可以纯文字、文字加表情或只发表情；短句不凑字数，长解释不按标点拆分。只有明确要求分项时才用列表，普通聊天每个文字气泡是一段连贯文本。工具提交待发队列不代表已送达；不再另外输出第二份回复。'
+  result.system = system
+  result.messages = (options.messages ?? []).filter(message => !['runtime-context', 'skill-catalog'].includes(message.source?.kind))
+    .map(message => message.source?.kind === 'system-prompt'
+      ? {...message, content: [{type: 'text', text: system}]} : message)
+  return result
 }
 
 export function independentMessages(decision, isolated) {
@@ -188,13 +204,14 @@ export function renderToolResult(_args, value) {
 }
 
 export function toolDenial(exec, settings, root, role) {
-  if (settings.isolated && !['fish_memory_search', 'fish_memory_save', 'fish_memory_delete'].includes(exec.name)) {
+  const chatAllowed = settings.chat_mode === 'owner' ? ownerChatToolNames : chatToolNames
+  if (settings.isolated && ![...chatAllowed, 'fish_memory_save', 'fish_memory_delete'].includes(exec.name)) {
     if (exec.name.startsWith('fish') || settings.nativeTools?.includes(exec.name)) return 'Fish: 独立测试窗口未授权共享资源或外部插件'
   }
   if (exec.name.startsWith('fish_') || exec.name.startsWith('fishp__')) {
     return settings.fishTools?.includes(exec.name) ? undefined : 'Fish: 工具已禁用或未向当前角色注册'
   }
-  if (settings.isolated && !['read', 'read_file', 'read_image', 'list_directory', 'ls', 'glob', 'grep'].includes(exec.name)) return 'Fish: 独立测试未授权此工具'
+  if (settings.isolated && ![...chatAllowed, 'read', 'read_file', 'read_image', 'list_directory', 'ls', 'glob', 'grep'].includes(exec.name)) return 'Fish: 独立测试未授权此工具'
   const defaults = ['bash', 'shell', 'terminal', 'run_code', 'write', 'edit', 'delete', 'onebot', 'send_message', 'plugin_manager']
   const forbidden = settings.blocked_tools ?? defaults
   const name = String(exec.name).toLowerCase()
@@ -241,7 +258,7 @@ export function toolDenial(exec, settings, root, role) {
     return false
   }
   if (walk(exec.arguments ?? exec.args)) return 'Fish: 工具路径超出当前角色的数据范围'
-  if (settings.isolated && !hasPath) return 'Fish: 独立窗口文件工具必须指定本窗口内的路径'
+  if (settings.isolated && ['read', 'read_file', 'read_image', 'list_directory', 'ls', 'glob', 'grep'].includes(name) && !hasPath) return 'Fish: 独立窗口文件工具必须指定本窗口内的路径'
   if (settings.isGroup && ['read','read_file','read_image','list_directory','ls','glob','grep'].includes(name) && !hasPath) return 'Fish: 群聊文件工具必须指定已授权公开目录中的路径'
 }
 
@@ -287,6 +304,7 @@ export function apply(ctx, config = {}) {
   if (!root || !['qq', 'research'].includes(role)) throw new Error('Fish governance requires an explicit root and role')
   const counts = new WeakMap()
   const historyBatches = new WeakMap()
+  const projectedRequests = new WeakSet()
   const token = process.env[config.tokenEnv || 'FISH_CONTROL_TOKEN'] || ''
   const toolToken = createHmac('sha256', token).update('fish-tools:' + role).digest('hex')
   const rawConfig = JSON.parse(readFileSync(resolve(root, 'harness/agents.json'), 'utf8'))
@@ -337,9 +355,9 @@ export function apply(ctx, config = {}) {
                   if (block.type !== 'image_file') continue
                   if (!enabled) { block.type = 'text'; block.text = '本角色图片输入已关闭，插件图片没有传入模型'; continue }
                   const target = realpathSync(block.path)
-                  const allowed = resolve(root, 'data', role, 'plugin-results')
-                  const rel = relative(allowed, target)
-                  if (isAbsolute(rel) || rel === '..' || rel.startsWith('..' + sep)) throw new Error('插件图片超出角色结果目录')
+                  const allowed = [resolve(root, 'data', role, 'plugin-results')]
+                  if (definition.name === 'fish_emoji_read' && role === 'qq') allowed.push(realpathSync(resolve(root, 'data', 'qq', 'emoji')))
+                  if (!allowed.some(directory => { const rel = relative(directory, target); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep) })) throw new Error('图片超出已授权的角色资源目录')
                   const attachments = ctx.get('attachments')
                   if (!attachments) throw new Error('当前运行时没有图片附件存储服务')
                   images.push(await attachments.saveImage({data: readFileSync(target), mediaType: block.mediaType, name: block.name}))
@@ -414,6 +432,16 @@ export function apply(ctx, config = {}) {
       let identity
       try { identity = JSON.parse(readFileSync(resolve(root, 'harness/runtime/' + role + '.identities.json'), 'utf8'))[String(options.sessionId)] }
       catch (error) { if (error.code !== 'ENOENT') throw error }
+      // Harness freezes admitted requests, and next() closes over that object.
+      // Dispatch a projected request through the public LLM service once. The
+      // inner pass owns capture/accounting; the outer pass makes no model call.
+      if (role === 'qq' && identity && !projectedRequests.has(options)) {
+        const projected = chatRequest(options, identity)
+        projectedRequests.add(projected)
+        try { for await (const chunk of ctx.get('llm').stream(projected)) yield chunk }
+        finally { projectedRequests.delete(projected) }
+        return
+      }
       if (identity) await host('/requests/capture', {session: String(options.sessionId), payload: snapshotRequest(options)})
     }
     const reservation = await host('/usage/reserve')
@@ -471,7 +499,7 @@ export function apply(ctx, config = {}) {
           && (!plugin.owner_only || identity?.owner) && (!plugin.allowed_tools || plugin.allowed_tools.includes(item.name))
       }).map(item => item.name)
       return toolDenial(exec, {...settings, fishTools, nativeTools: nativeAllowed, isGroup: !!identity?.scope?.startsWith('chat:group:'),
-        isolated: identity?.isolated, allowed_paths: identity?.allowed_paths}, root, role)
+        isolated: identity?.isolated, allowed_paths: identity?.allowed_paths, chat_mode: identity?.chat_mode}, root, role)
     } catch { return 'Fish: 本地治理规则不可读，工具已阻止' }
   }), 'Fish mandatory tool guard')
 

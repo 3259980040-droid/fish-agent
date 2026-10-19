@@ -1,18 +1,21 @@
 {
-  "name": "小鲸鱼 · Tulpa 私聊参考版 01",
+  "name": "小鲸鱼 · Tulpa 私聊动作版 02",
   "upstream": "https://github.com/fumingyang2004/Tulpa",
   "revision": "cf15cf5987466c97a493bf1f1771dae99b1fcac8",
   "license": "MIT",
   "source_files": [
     "chatlocal/prompts/mcp_chat/little_whale_v2.md",
-    "chatlocal/prompts/mcp_chat/examples.json"
+    "chatlocal/prompts/mcp_chat/examples.json",
+    "doc/MCP_CHAT_TURNS.md",
+    "doc/MCP_STICKERS.md"
   ],
   "adaptations": [
     "将群友聊天场景改为已核验主人账号的一对一私聊",
     "保留作者多轮例子的接梗、认栽和认真回应方式",
     "认真问题按需展开，短反应无最低字数，不强制动作或口癖",
     "临时口吻沿本窗口普通对话历史维持",
-    "移除当前私聊入口不能执行的其他项目工具与自主社交协议"
+    "将完整语义气泡队列、看图后选择表情及发送回执接入Fish实际工具",
+    "复用Harness原生web_search/web_fetch，不用关键词预检索替代模型工具"
   ],
   "output_mode": "final",
   "scope": "owner-qq isolated space only",

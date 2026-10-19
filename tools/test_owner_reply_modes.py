@@ -75,7 +75,7 @@ class ReplyModesTests(Fixture):
         from qq_agent_loop import QQAgentLoop
         from owner_tests import process
         store=SocialContext(self.root);p=store.save_persona('qq','test','body',owner_reply_mode=mode)
-        space=store.create_space('qq',revision=p['id'],origin='owner-qq');store.bind_runtime(space['id'],'test-'+p['id'])
+        space=store.create_space('qq',revision=p['id'],origin='owner-qq');store.bind_runtime(space['id'],'test-'+p['id']);store.select_owner_space(space['id'],self.owner)
         loop=QQAgentLoop(self.root);loop.channel=Mock(action=AsyncMock(return_value={'ok':True,'payload':{'message_id':'out-'+p['id']}}))
         conv=loop.store.get_or_create_conversation('test:'+space['id'],'qq');payload={'chat_id':chat_id or 'private:'+self.owner,'segments':[{'type':'text','text':'hello'}]}
         mid=loop.store.record_message(conv['id'],payload['chat_id'],self.owner,'inbound','in-'+p['id'],None,payload['segments'],'hello','queued')
@@ -84,7 +84,7 @@ class ReplyModesTests(Fixture):
             return {'ok':True,'text':'actual final','reasoning':'actual provider thought'}
         client=Mock(auth=AsyncMock(),baseline=AsyncMock(return_value=0),prompt=AsyncMock(),wait_response=AsyncMock(side_effect=response))
         if blocked:loop.governance.check_output=Mock(side_effect=PermissionError('blocked'))
-        with patch('owner_tests.DSHRuntimeAdapter.connect',return_value=client),patch('owner_tests.bind_session'):
+        with patch('owner_tests.DSHRuntimeAdapter.connect',return_value=client),patch('owner_tests.bind_session'),patch('tool_host.request',return_value={'bubbles':[], 'asset':''}):
             asyncio.run(process(loop,{'message_id':mid,'conversation':conv,'payload':payload,'space_id':space['id'],'text':'hello'}))
         return loop,client
 

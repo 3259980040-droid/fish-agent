@@ -56,6 +56,8 @@ async def process(loop, item):
     loop.cancel_event = asyncio.Event()
     loop.active_turn = turn
     session = space['session']
+    sent_count = 0
+    uncertain_send = False
     try:
         contexts.require_owner(loop.owner)
         if not loop.governance.permitted(loop.owner,'persona.test'):raise PermissionError('人格测试权限已关闭')
@@ -73,7 +75,9 @@ async def process(loop, item):
         media = MediaService(loop.root, 'qq')
         media.directory = contexts.directory(space['id']) / 'media'
         prompt = await asyncio.to_thread(media.prepare_content, item['payload'].get('segments', []), item['text'], cancelled=loop.cancel_event)
-        prompt[0]['text'] = loop.governance.identity_prompt(loop.owner) + MemoryStore(loop.root, 'qq').context(item['text'], space['scope']) + prompt[0]['text']
+        # Tool authority is enforced by the program. Do not turn every casual
+        # user message into a long administrative instruction in model history.
+        prompt[0]['text'] = '[当前入口：已核验主人账号的独立私聊。]\n' + MemoryStore(loop.root, 'qq').context(item['text'], space['scope']) + prompt[0]['text']
         if loop.cancel_event.is_set():
             raise InterruptedError('已取消')
         loop.governance.consume('calls')
@@ -85,24 +89,48 @@ async def process(loop, item):
                                            include_reasoning=reply_mode == 'thinking_excerpt')
         if result.get('cancelled') or loop.cancel_event.is_set():
             raise InterruptedError('已取消')
-        if not result.get('ok'):
+        from tool_host import request
+        draft = await asyncio.to_thread(request, loop.root, '/chat/take', {'session': session}, role='qq')
+        bubbles = draft.get('bubbles', [])
+        if not result.get('ok') and not bubbles:
             raise RuntimeError(result.get('error', '未取得完整回复'))
         contexts.require_owner(loop.owner)
         if not loop.governance.permitted(loop.owner,'persona.test'):raise PermissionError('人格测试权限已关闭，未发送')
         if loop.governance.config()['paused']:
             raise PermissionError('主人已暂停，测试回复未发送')
-        response = str(result['text']).strip()
+        response = str(result.get('text', '')).strip()
         from owner_reply import format_owner_reply
+        if bubbles and reply_mode != 'final':
+            text_bubbles = [b for b in bubbles if b.get('kind') == 'text']
+            if text_bubbles: text_bubbles[0]['text'] = format_owner_reply(text_bubbles[0]['text'], result.get('reasoning', ''), reply_mode)
         response = format_owner_reply(response, result.get('reasoning', ''), reply_mode)
         loop.governance.check_output(response)
-        segments = [{'type': 'text', 'text': response}]
-        outbound = loop.store.record_message(conv['id'], item['payload']['chat_id'], 'bot', 'outbound', '', None, segments, response, 'pending', runtime_session_id=session, runtime_turn_id=turn)
-        delivered = await loop._deliver_reply(item['payload']['chat_id'], segments, turn, cancelled=loop.cancel_event)
-        if not delivered.get('ok'):
-            loop.store.update_message(outbound, status='failed', error='测试回复发送失败，未自动重试')
-            raise RuntimeError('测试回复发送失败，未自动重试')
-        remote = str(delivered.get('payload', {}).get('message_id', ''))
-        loop.store.update_message(outbound, status='sent', channel_message_id=remote)
+        from chat_output import segments as bubble_segments, validate_bubbles, bubble_delay
+        if not bubbles:
+            # Legacy cards may still answer in final text. Their selected emoji
+            # must use the same transport path rather than being discarded.
+            bubbles = [{'kind': 'text', 'text': response}]
+            selected = await asyncio.to_thread(request, loop.root, '/emoji/take', {'session': session}, role='qq')
+            if selected.get('asset'): bubbles.append({'kind': 'sticker', 'emoji_id': selected['asset']})
+        bubbles = validate_bubbles(loop.root, bubbles)
+        remote = ''
+        def still_current():
+            selected = contexts.owner_space(loop.owner)
+            return bool(selected and selected['id'] == space['id'] and loop.governance.permitted(loop.owner, 'persona.test'))
+        for index, bubble in enumerate(bubbles):
+            if index: await asyncio.sleep(bubble_delay(bubbles[index-1]))
+            if not still_current() or loop.cancel_event.is_set(): raise InterruptedError('测试窗口已切换或本轮已取消')
+            segments = bubble_segments(bubble)
+            shown = bubble.get('text', '[表情]')
+            outbound = loop.store.record_message(conv['id'], item['payload']['chat_id'], 'bot', 'outbound', '', None, segments, shown, 'pending', runtime_session_id=session, runtime_turn_id=turn)
+            delivered = await loop._deliver_reply(item['payload']['chat_id'], segments, turn+':bubble:'+str(index), cancelled=loop.cancel_event, validate=still_current)
+            if not delivered.get('ok'):
+                uncertain_send = bool((delivered.get('error') or {}).get('may_have_sent'))
+                loop.store.update_message(outbound, status='failed', error='测试回复发送失败或状态不明，未自动重试')
+                raise RuntimeError('测试回复发送失败或状态不明，未自动重试')
+            remote = str(delivered.get('payload', {}).get('message_id', ''))
+            loop.store.update_message(outbound, status='sent', channel_message_id=remote)
+            sent_count += 1
         loop.store.update_message(mid, status='processed', runtime_session_id=session, runtime_turn_id=turn)
         loop.store.finish_turn(turn, 'done', assistant_message_id=remote)
         contexts.record_owner_reply(space['id'], loop.owner)
@@ -122,7 +150,7 @@ async def process(loop, item):
         loop.store.finish_turn(turn, status, error=error)
         if status == 'failed':
             loop.governance.audit('reply_failed', error)
-            if not loop.governance.config()['paused'] and loop.governance.is_owner(loop.owner):
+            if not sent_count and not uncertain_send and not loop.governance.config()['paused'] and loop.governance.is_owner(loop.owner):
                 try:
                     await loop.channel.action('send_message', {'chat_id': item['payload']['chat_id'],
                         'segments': [{'type': 'text', 'text': '这次回复未能完成，聊天记录仍保留。请查看 Fish 工作台的运行记录后重试。'}],

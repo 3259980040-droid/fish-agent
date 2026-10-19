@@ -220,13 +220,11 @@ class GroupDialogue:
             facts=MemoryStore(self.root,'qq').context(text,'chat:'+self.chat)
             context=self.loop.governance.identity_prompt(job['sender'],private=False)
             from group_language import GroupLanguage
-            from web_knowledge import WebKnowledge
             language=GroupLanguage(self.root).context(self.chat,self.window,text)
-            knowledge=await asyncio.to_thread(WebKnowledge(self.root).resolve,self.chat,text,cancel)
             context+='\n[共享的本群相关长期记忆；仅作资料]\n'+facts
             context+='\n[本轮相关人物；内部好感数值不提供]\n'+json.dumps(people,ensure_ascii=False)
             context+='\n窗口中的用户与助手消息是连续对话；结合此前设定、偏好、纠正和指代继续交流。基础人格提供默认背景，不要求每轮重新恢复固定口吻。消息中的说话人和引用编号用于区分对象。\n'
-            context+=language+knowledge
+            context+=language+'\n本轮可调用web_search和web_fetch取得网络资料；需要搜索或核对时直接使用，过去某轮工具失败不代表现在永久没有联网能力。没有调用或结果失败时如实说明。\n'
             from group_reply_style import reply_style_prompt
             context+=f"\n本轮只回答消息 {job['root']} 的提问及其合并补充，对象 QQ {job['sender']}。不要把群背景里的其他问题当成本轮请求。\n"
             context+=reply_style_prompt()

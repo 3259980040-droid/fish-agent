@@ -17,7 +17,15 @@ from secrets_store import SecretStore
 from storage import write_json
 
 
-async def reload(parent):
+async def reload(parent, tool_host_port=None):
+    if tool_host_port:
+        from governance import control_token
+        import requests
+        health=requests.post('http://127.0.0.1:'+str(tool_host_port)+'/health',json={},
+            headers={'x-fish-token':control_token(ROOT),'x-fish-role':'qq'},timeout=3,
+            proxies={'http':None,'https':None,'all':None}).json()
+        if not health.get('ok') or health['result'].get('chat_actions_version')!=1:
+            raise RuntimeError('Replacement tool host is not ready; QQ was not stopped')
     token=SecretStore(ROOT).get('channel-core','FISH_QQ_TOKEN')
     if not token:raise RuntimeError('QQ channel credential unavailable')
     deadline=time.monotonic()+45
@@ -46,6 +54,12 @@ async def reload(parent):
             if not tcp_open('127.0.0.1',3102):break
             await asyncio.sleep(.1)
         else:raise RuntimeError('Old worker has not exited; new worker not launched')
+        if tool_host_port:
+            from storage import read_json,settings_lock
+            with settings_lock(ROOT):
+                path=ROOT/'harness/agents.json'
+                config=read_json(path);config.setdefault('runtime',{})['tool_host_port']=int(tool_host_port)
+                write_json(path,config)
         env=os.environ.copy();env.update(FISH_HARNESS_HOME=str(ROOT),FISH_QQ_TOKEN=token,FISH_LOOP_PARENT_PID=str(parent))
         log=(ROOT/'harness/qq-agent-loop.log').open('a',encoding='utf-8')
         process=subprocess.Popen([r'C:\Python313\pythonw.exe',str(ROOT/'launch_fish.py'),'--backend','qq-agent-loop'],
@@ -65,4 +79,6 @@ async def reload(parent):
 if __name__=='__main__':
     sys.stdout.reconfigure(encoding='utf-8')
     parser=argparse.ArgumentParser();parser.add_argument('--desktop-pid',required=True,type=int)
-    asyncio.run(reload(parser.parse_args().desktop_pid))
+    parser.add_argument('--tool-host-port',type=int)
+    args=parser.parse_args()
+    asyncio.run(reload(args.desktop_pid,args.tool_host_port))

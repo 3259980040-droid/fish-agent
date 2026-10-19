@@ -42,8 +42,12 @@ def builtins(role):
     if role == 'qq':
         tools.extend([
             {'name': 'fish_emoji_search', 'description': '按当前聊天情绪搜索已收藏的表情包，只返回 ID 和客观描述。', 'parameters': schema({'context': string}, ['context'])},
+            {'name': 'fish_emoji_read', 'description': '查看本地表情原图和描述，选陌生表情前先看图。只接受搜索返回的本地 ID。', 'parameters': schema({'id': string}, ['id'])},
             {'name': 'fish_emoji_choose', 'description': '本次文字回复后附带一个合适表情。可不调用，避免刷屏；只有本地库内 ID 可用，发送频率由程序控制。', 'parameters': schema({'id': string}, ['id'])},
             {'name': 'fish_emoji_delete', 'description': '主人要求删除指定表情时调用；禁止该图片自动再次收藏。', 'parameters': schema({'id': string}, ['id'])},
+            {'name': 'fish_chat_reply', 'description': '主人独立私聊：一次提交完整回复，可含1至3个语义完整的文字气泡或已核对的本地表情。程序按顺序发送并记录回执；不要按标点拆句，不输出第二份回复。',
+             'parameters': schema({'bubbles': {'type': 'array', 'minItems': 1, 'maxItems': 3, 'items': schema({
+                 'kind': {'type': 'string', 'enum': ['text', 'sticker']}, 'text': string, 'emoji_id': string}, ['kind'])}}, ['bubbles'])},
         ])
     else:
         tools.extend([
@@ -65,6 +69,7 @@ class ToolHost:
             db.executescript('''CREATE TABLE IF NOT EXISTS identities(role TEXT,session TEXT,scope TEXT,owner INTEGER,desktop INTEGER,sender TEXT,updated REAL,PRIMARY KEY(role,session));
             CREATE TABLE IF NOT EXISTS emoji_choices(session TEXT PRIMARY KEY,asset TEXT,created REAL);''')
             db.execute('CREATE TABLE IF NOT EXISTS group_contexts(session TEXT PRIMARY KEY,scope TEXT,text TEXT,updated REAL)')
+            db.execute('CREATE TABLE IF NOT EXISTS chat_replies(session TEXT PRIMARY KEY,body TEXT,created REAL)')
         self.registry.publish()
         from research_autonomy import ResearchWorker
         self.research = ResearchWorker(self.root)
@@ -117,10 +122,13 @@ class ToolHost:
         with database(self.path) as db:
             db.execute('INSERT OR REPLACE INTO identities VALUES(?,?,?,?,?,?,?)', (role, session, scope, int(owner), int(desktop), sender, time.time()))
             db.execute('DELETE FROM emoji_choices WHERE session=?', (session,))
+            db.execute('DELETE FROM chat_replies WHERE session=?', (session,))
             identities = [dict(r) for r in db.execute('SELECT * FROM identities WHERE role=? ORDER BY updated DESC LIMIT 3000', (role,))]
             for identity in identities:
                 if identity['scope'].startswith('space:'):
                     identity['isolated'] = True
+                    private_space = SocialContext(self.root).space(identity['scope'][6:])
+                    identity['chat_mode'] = 'owner' if private_space['origin'] == 'owner-qq' else ''
                     identity['allowed_paths'] = [str(SocialContext(self.root).directory(identity['scope'][6:]).resolve())]
                 elif role == 'qq' and parse_child(identity['scope']):
                     group_id, window_id, task_id = parse_child(identity['scope'])
@@ -163,8 +171,23 @@ class ToolHost:
             current = GroupTests(self.root).current(group_trial[0])
             if not current or current['id'] != group_trial[1]:
                 raise PermissionError('群测试已结束或窗口已切换')
-        if (identity['scope'].startswith('space:') or group_trial or child) and name not in ('fish_memory_search', 'fish_memory_save', 'fish_memory_delete'):
+        private_chat = role == 'qq' and identity['owner'] and identity['scope'].startswith('space:')
+        chat_tools = ('fish_emoji_search', 'fish_emoji_read', 'fish_emoji_choose', 'fish_chat_reply')
+        if (identity['scope'].startswith('space:') or group_trial or child) and name not in ('fish_memory_search', 'fish_memory_save', 'fish_memory_delete') and not (private_chat and name in chat_tools):
             raise PermissionError('独立测试窗口仅开放本窗口记忆；共享资源和外部插件未向此窗口授权')
+        if name == 'fish_chat_reply':
+            if not private_chat:
+                raise PermissionError('聊天气泡提交仅用于主人独立私聊')
+            from chat_output import validate_bubbles
+            bubbles = validate_bubbles(self.root, arguments.get('bubbles'))
+            raw = json.dumps(bubbles, ensure_ascii=False)
+            with database(self.path) as db:
+                db.execute('BEGIN IMMEDIATE')
+                prior = db.execute('SELECT body FROM chat_replies WHERE session=?', (session,)).fetchone()
+                if prior and prior['body'] != raw:
+                    raise ValueError('本轮已提交完整回复，不能再追加或替换')
+                db.execute('INSERT OR IGNORE INTO chat_replies VALUES(?,?,?)', (session, raw, time.time()))
+            return {'ok': True, 'status': 'prepared', 'bubbles': len(bubbles), 'note': '已提交待发队列，发送器将核对入口后发送；无需再生成另一份回复。此回执不代表QQ已送达。'}
         if name.startswith('fish_interests_'):
             require('interests.write') if name.endswith('update') else require('status')
             from research_autonomy import ResearchControl
@@ -195,6 +218,16 @@ class ToolHost:
         if role == 'qq' and name == 'fish_emoji_search':
             from emoji_store import EmojiStore
             return EmojiStore(self.root).candidates(str(arguments['context']))
+        if role == 'qq' and name == 'fish_emoji_read':
+            from emoji_store import EmojiStore
+            library = EmojiStore(self.root)
+            row = next((r for r in library.list() if r['id'] == str(arguments['id'])), None)
+            if not row or library.inspect(row['path'])[0] != row['id']:
+                raise ValueError('表情不存在或原件校验失败')
+            import mimetypes
+            return {'id': row['id'], 'description': row['description'], 'tags': row['tags'],
+                    'content': [{'type': 'image_file', 'path': row['path'], 'name': Path(row['path']).name,
+                                 'mediaType': mimetypes.guess_type(row['path'])[0] or 'image/png'}]}
         if role == 'qq' and name == 'fish_emoji_delete':
             require('emoji.manage')
             from emoji_store import EmojiStore
@@ -222,7 +255,17 @@ class ToolHost:
 
     def dispatch(self, route, body, role, admin):
         if route == '/health':
-            return {'ok': True, 'root': hashlib.sha256(str(self.root.resolve()).encode()).hexdigest(), 'social_context_version': 1, 'social_roster_version': 1}
+            return {'ok': True, 'root': hashlib.sha256(str(self.root.resolve()).encode()).hexdigest(), 'social_context_version': 1, 'social_roster_version': 1, 'chat_actions_version': 1}
+        if route == '/chat/take':
+            if not admin:
+                raise PermissionError('只有消息控制器可以取得待发聊天气泡')
+            session = str(body['session'])
+            self.identity(role, session)
+            with database(self.path) as db:
+                db.execute('BEGIN IMMEDIATE')
+                row = db.execute('SELECT * FROM chat_replies WHERE session=?', (session,)).fetchone()
+                db.execute('DELETE FROM chat_replies WHERE session=?', (session,))
+            return {'bubbles': json.loads(row['body']) if row and row['created'] > time.time() - 600 else []}
         if route in ('/social/context/set', '/social/context'):
             identity = self.identity(role, str(body.get('session', '')))
             if role != 'qq' or not identity['scope'].startswith('chat:group:'):
@@ -319,7 +362,7 @@ class ToolHost:
                     # Each job retains its own failure; never silently retry paid calls.
                     continue
 
-    def serve(self):
+    def serve(self, *, background_workers=True, listen_port=None):
         host = self
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_):
@@ -353,11 +396,12 @@ class ToolHost:
                 self.send_header('Content-Length', str(len(payload)))
                 self.end_headers()
                 self.wfile.write(payload)
-        self.server = ThreadingHTTPServer(('127.0.0.1', port(self.root)), Handler)
+        self.server = ThreadingHTTPServer(('127.0.0.1', port(self.root) if listen_port is None else int(listen_port)), Handler)
         self.server.daemon_threads = True
         self.learning_thread = threading.Thread(target=self.worker, daemon=True, name='fish-learning')
         self.research_thread = threading.Thread(target=self.research.loop, daemon=True, name='fish-research')
-        self.learning_thread.start(); self.research_thread.start()
+        if background_workers:
+            self.learning_thread.start(); self.research_thread.start()
         threading.Thread(target=self.server.serve_forever, daemon=True, name='fish-tool-host').start()
 
 
