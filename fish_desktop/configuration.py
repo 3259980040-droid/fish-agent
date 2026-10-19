@@ -1,15 +1,14 @@
 """Editable role configuration and multimodal workbench."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+    QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout,
     QLineEdit, QListWidget, QPlainTextEdit, QProgressBar, QScrollArea,
-    QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
+    QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 from .pages import BasePage, _button, _label
 from .widgets import Card
@@ -24,16 +23,19 @@ def _input(placeholder="", password=False):
 
 
 class AgentsPage(BasePage):
-    def __init__(self, services):
+    def __init__(self, services, *, embedded=False):
         super().__init__(services)
         root = QVBoxLayout(self); root.setContentsMargins(28, 26, 28, 24); root.setSpacing(16)
-        self._header("Agent 配置", "你来定义性格与规则；每个角色独立保存模型与密钥。", root)
+        if embedded:
+            root.setContentsMargins(0, 0, 0, 0)
+        else:
+            self._header("模型与 API", "每个角色独立保存模型与密钥。人格统一在“人格与群聊”中编辑。", root)
         root.addWidget(self.toast)
         row = QHBoxLayout()
         self.roles = QListWidget(); self.roles.setObjectName("RoleList"); self.roles.setFixedWidth(165)
         self.roles.addItems(["大肥鱼\nQQ 角色", "研究员\nB 站与视频"])
         row.addWidget(self.roles)
-        card = Card("角色设置")
+        card = Card("模型连接")
         form = QFormLayout(); form.setSpacing(12)
         self.name = _input("角色名称"); self.model = _input("DeepSeek 模型名称")
         self.key = _input("留空保留已有密钥", True)
@@ -42,28 +44,22 @@ class AgentsPage(BasePage):
         form.addRow('API 地址', self.base_url)
         card.body.addLayout(form)
         self.key_note = _label("", "Caption"); card.body.addWidget(self.key_note)
-        self.tabs = QTabWidget()
-        self.persona = QPlainTextEdit(); self.persona.setPlaceholderText("身份、语气、习惯与示例对话…")
-        self.global_rules = QPlainTextEdit(); self.global_rules.setPlaceholderText("两个角色共同遵守的指令…")
-        self.tabs.addTab(self.persona, "本角色人格"); self.tabs.addTab(self.global_rules, "全局注入 · 两边共用")
-        card.body.addWidget(self.tabs, 1)
         actions = QHBoxLayout()
         self.save_btn = _button("保存设置", primary=True)
-        self.restart_btn = _button("重启该角色并应用")
-        actions.addWidget(self.save_btn); actions.addWidget(self.restart_btn); actions.addStretch()
+        actions.addWidget(self.save_btn); actions.addStretch()
         card.body.addLayout(actions)
-        card.body.addWidget(_label("保存不会打断当前对话。重启后加载新模型和人格。密钥由 Windows 加密保存。", "Caption"))
+        card.body.addWidget(_label("保存后，到工作台重启对应角色以加载新模型。密钥由 Windows 加密保存。", "Caption"))
+        card.body.addStretch()
         row.addWidget(card, 1); root.addLayout(row, 1)
         self._drafts = {}; self._current = None; self._loaded = False
         self.roles.currentRowChanged.connect(self._choose)
         self.save_btn.clicked.connect(self._save)
-        self.restart_btn.clicked.connect(self._restart)
         self.roles.setCurrentRow(0)
 
     def _values(self):
         return {"name": self.name.text(), "model": self.model.text(), "api_key": self.key.text(),
                 'base_url': self.base_url.text(),
-                "persona": self.persona.toPlainText(), "global": self.global_rules.toPlainText()}
+                }
 
     def _choose(self, row):
         if self._current and self._loaded:
@@ -80,7 +76,6 @@ class AgentsPage(BasePage):
         draft = self._drafts.get(aid, value)
         self.name.setText(draft["name"]); self.model.setText(draft["model"])
         self.base_url.setText(draft.get('base_url', 'https://api.deepseek.com'))
-        self.persona.setPlainText(draft["persona"]); self.global_rules.setPlainText(draft["global"])
         self.key.setText(draft.get("api_key", ""))
         self.key_note.setText("DeepSeek API 密钥：" + ("已配置" if value.get("key_set") else "未配置") + "；新密钥留空不会覆盖。")
         self._loaded = True
@@ -94,18 +89,6 @@ class AgentsPage(BasePage):
             self._drafts.pop(aid, None); self.key.clear()
             self._toast(result["message"])
         self._submit(lambda: self.services.save_agent(aid, values), saved)
-
-    def _restart(self):
-        if self.loading or not self._loaded:
-            return
-        aid = self._current
-        self._toast("正在重启该角色…")
-        self.restart_btn.setEnabled(False)
-        def work():
-            self.services.control_agent(aid, "stop")
-            return self.services.control_agent(aid, "start")
-        self._submit(work, lambda r: self._toast("重启完成" if r.get("ok") else str(r.get("reason", "未能启动，请查看运行记录"))),
-                     on_done=lambda: self.restart_btn.setEnabled(True))
 
     def refresh(self):
         # Do not overwrite in-progress edits on the navigation polling timer.

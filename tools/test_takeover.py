@@ -237,14 +237,13 @@ class TakeoverTests(unittest.TestCase):
                       for a in ("qq","research")]}))
         app=QApplication.instance() or QApplication([])
         window=MainWindow(FishServices(self.root),manage_shutdown=False);window.show()
-        editor=window.pages[3][1]
+        editor=window.page('设置').models
         for _ in range(50):
             QTest.qWait(50)
             if editor._loaded: break
         self.assertTrue(editor._loaded)
         window.navigate("Agent 配置")
         editor.name.setText("保存按钮测试")
-        editor.persona.setPlainText("请用简短温和的中文交流")
         QTest.mouseClick(editor.save_btn,Qt.LeftButton)
         for _ in range(60):
             QTest.qWait(50)
@@ -253,7 +252,7 @@ class TakeoverTests(unittest.TestCase):
         self.assertEqual(saved["agents"][0]["name"],"保存按钮测试")
         window.navigate("聊天")
         self.assertEqual(window.stack.currentWidget().__class__.__name__,"ChatPage")
-        self.assertEqual(window.nav.count(),9)
+        self.assertEqual(window.nav.count(),8)
         window._timer.stop()
         QTest.qWait(600);window.close();app.processEvents()
 

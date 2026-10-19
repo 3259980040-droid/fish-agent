@@ -1,7 +1,7 @@
 """Editable owner permissions, connections and advanced media options."""
-from PySide6.QtWidgets import QCheckBox, QComboBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QPlainTextEdit, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget, QScrollArea
-from .pages import BasePage, SettingsPage, _button, _label
-from .configuration import MultimodalPage, _input
+from PySide6.QtWidgets import QCheckBox, QComboBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QScrollArea
+from .pages import BasePage, _button, _label
+from .configuration import AgentsPage, MultimodalPage, _input
 from .widgets import Card
 from .data_settings import DataPage
 
@@ -25,7 +25,7 @@ class OwnerPage(BasePage):
             self.permissions[key] = check
             row.addWidget(check, index // 4, index % 4)
         form.addRow("私聊管理权限", row)
-        self.paused = QCheckBox("暂停 QQ 角色任务与回复")
+        self.paused = QCheckBox("暂停所有 QQ 回复与任务")
         form.addRow(self.paused)
         self.daily_limits = QComboBox()
         self.daily_limits.addItem('无上限（继续统计用量）', False)
@@ -49,15 +49,9 @@ class OwnerPage(BasePage):
         card.body.addLayout(form)
         card.body.addWidget(_label("主人任务认真执行，必要时允许详细回答；人格中的懒或顶嘴不能代替执行。管理权限由程序执行。", "Caption"))
         root.addWidget(card)
-        rules = Card("本地阻断规则", "每行一项。命中后不发出原回复，并在本地留下阻断原因。")
-        self.terms = QPlainTextEdit(); self.terms.setPlaceholderText("需要阻断的词或短语，每行一个")
-        self.terms.setMaximumHeight(100)
-        self.patterns = QPlainTextEdit(); self.patterns.setPlaceholderText("可选：正则表达式，每行一个")
-        self.patterns.setMaximumHeight(80)
-        rules.body.addWidget(self.terms); rules.body.addWidget(self.patterns)
-        self.save_btn = _button("保存主人权限与规则", primary=True)
-        rules.body.addWidget(self.save_btn)
-        root.addWidget(rules)
+        self.save_btn = _button("保存主人权限与用量", primary=True)
+        card.body.addWidget(self.save_btn)
+        root.addWidget(_label('回复阻断词与检测规则统一在“回复规则”中管理。', 'Caption'))
         self.state = _label("", "Caption")
         self.state.setWordWrap(True)
         root.addWidget(self.state)
@@ -80,8 +74,6 @@ class OwnerPage(BasePage):
         self.daily_limits.setCurrentIndex(self.daily_limits.findData(self._daily_limit_roles.get('qq', True)))
         for widget in (self.calls, self.replies, self.model_calls, self.tokens):
             widget.setEnabled(self.daily_limits.currentData())
-        self.terms.setPlainText("\n".join(cfg["blocked_text"]))
-        self.patterns.setPlainText("\n".join(cfg["block_patterns"]))
         audit = data.get("audit", [])
         mode='自定义每日上限' if self.daily_limits.currentData() else '无上限（用量继续统计）'
         self.state.setText('当前 QQ 每日用量：'+mode+'；今日处理轮数：' + str(data['usage'].get('calls', 0)) + '；最近记录：' + (audit[0]['reason'] if audit else '暂无'))
@@ -91,8 +83,7 @@ class OwnerPage(BasePage):
         if self.loading: return
         values = {"owner_permissions": [key for key, w in self.permissions.items() if w.isChecked()],
             "paused": self.paused.isChecked(), "max_daily_calls": self.calls.value(), "max_daily_replies": self.replies.value(),
-            "max_tool_calls_per_turn": self.tools.value(), "blocked_text": self.terms.toPlainText().splitlines(),
-            "block_patterns": self.patterns.toPlainText().splitlines()}
+            "max_tool_calls_per_turn": self.tools.value()}
         values.update(max_model_requests_daily=self.model_calls.value(), max_model_tokens_daily=self.tokens.value())
         values['daily_usage_limits'] = {**self._daily_limit_roles, 'qq': self.daily_limits.currentData()}
         owner = self.owner.text()
@@ -176,11 +167,13 @@ class SystemSettingsPage(BasePage):
         super().__init__(services)
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 26, 28, 24)
-        self._header("系统设置", "主人权限、连接和媒体选项。照片在普通聊天中默认理解。", root)
+        self._header("系统设置", "模型接口、主人权限、连接与数据。人格统一在“人格与群聊”中管理。", root)
         self.tabs = QTabWidget()
         self.owner_page = OwnerPage(services)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QScrollArea.NoFrame); scroll.setWidget(self.owner_page)
-        self.tabs.addTab(scroll, "主人与权限")
+        self.tabs.addTab(scroll, "主人与用量")
+        self.models = AgentsPage(services, embedded=True)
+        self.tabs.addTab(self.models, '模型与 API')
         connections = QScrollArea(); connections.setWidgetResizable(True); connections.setFrameShape(QScrollArea.NoFrame); connections.setWidget(ConnectionsPage(services))
         self.tabs.addTab(connections, "连接设置")
         media = MultimodalPage(services)
@@ -192,7 +185,8 @@ class SystemSettingsPage(BasePage):
         self.tabs.addTab(data, "数据与升级")
         from .guard_settings import GuardSettingsPage
         guard_scroll = QScrollArea(); guard_scroll.setWidgetResizable(True); guard_scroll.setFrameShape(QScrollArea.NoFrame)
-        guard_scroll.setWidget(GuardSettingsPage(services)); self.tabs.addTab(guard_scroll, "本地检测规则")
+        self.rules_page = GuardSettingsPage(services)
+        guard_scroll.setWidget(self.rules_page); self.tabs.addTab(guard_scroll, "回复规则")
         root.addWidget(self.tabs, 1)
         self.tabs.currentChanged.connect(self.refresh)
 

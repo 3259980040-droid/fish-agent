@@ -87,8 +87,9 @@ class GroupTrialTests(Fixture):
         if blocked:loop.governance.check_output=Mock(side_effect=PermissionError('blocked'))
         payload=self.payload('hello friend',sender='999999999',mid='in-'+trial['id'])
         async def run():
-            with patch('runtime_adapter.DSHRuntimeAdapter.connect',return_value=client),patch('tool_host.bind_session') as bind,patch('tool_host.set_group_context') as context:
-                await workflow.observe(loop,payload)
+            with patch('runtime_adapter.DSHRuntimeAdapter.connect',return_value=client),patch('tool_host.bind_session') as bind,patch('tool_host.set_group_context') as context,patch.object(loop.runtime,'cancel',return_value={'ok':True}):
+                loop.group_test_workflows[trial['id']]=workflow
+                await loop._on_group(payload)
                 await asyncio.gather(*list(loop.group_tasks))
                 return bind,context
         bind,context=asyncio.run(run())
@@ -100,11 +101,11 @@ class GroupTrialTests(Fixture):
         text=loop._deliver_reply.await_args.args[1][0]['text']
         self.assertEqual(text,'formal final')
         self.assertNotIn('include_reasoning',client.wait_response.await_args.kwargs)
-        self.assertEqual(bind.call_args.args[3],trial['test_scope'])
+        self.assertTrue(bind.call_args.args[3].startswith(trial['test_scope']+':task:'))
         with closing(loop.store.connect()) as db:
             rows=db.execute('SELECT direction,text FROM messages ORDER BY id').fetchall()
         self.assertEqual([r['direction'] for r in rows],['inbound','outbound'])
-        self.assertEqual(tests.contexts.space(trial['id'])['session'],'s-'+trial['id'])
+        self.assertEqual(tests.contexts.space(trial['id'])['session'],'')
 
     def test_b_adds_only_bounded_actual_reasoning_to_same_formal_reply(self):
         tests,trial,w,loop,client,bind,context=self.run_trial(mode='thinking_excerpt')
@@ -167,18 +168,24 @@ class GroupTrialTests(Fixture):
         a,_=self.candidates();tests=GroupTests(self.root);trial=tests.create(self.group,a['id'],self.owner)
         loop=self.loop();w=GroupWorkflow(self.root,trial=trial);w.policy.configure(self.chat,{'debounce_s':0})
         entered=asyncio.Event();release=asyncio.Event();seen=[]
-        async def fake_run(loop,chat):
-            seen.append(w.policy.snapshot(chat)['cursor'])
+        client=Mock(auth=AsyncMock(),create_session=AsyncMock(side_effect=['s-first','s-latest']),baseline=AsyncMock(return_value=0),prompt=AsyncMock())
+        async def response(*args,**kwargs):
+            seen.append(args[0])
             if len(seen)==1:
                 entered.set();await release.wait()
+            return {'ok':True,'text':'completed'}
+        client.wait_response=AsyncMock(side_effect=response)
+        loop._deliver_reply=AsyncMock(side_effect=[{'ok':True,'payload':{'message_id':'out-first'}},{'ok':True,'payload':{'message_id':'out-latest'}}])
+        loop.group_test_workflows[trial['id']]=w
         async def run():
-            with patch.object(w,'run',side_effect=fake_run):
-                await w.observe(loop,self.payload('first',mid='first'))
+            with patch('runtime_adapter.DSHRuntimeAdapter.connect',return_value=client),patch('tool_host.bind_session'),patch('tool_host.set_group_context'):
+                await loop._on_group(self.payload('first',mid='first'))
                 await entered.wait()
-                await w.observe(loop,self.payload('latest',mid='latest'))
+                await loop._on_group(self.payload('latest',mid='latest'))
                 release.set()
-                for _ in range(12):await asyncio.sleep(0)
-                self.assertEqual(seen,[1,2])
+                await asyncio.gather(*list(loop.group_tasks))
+                self.assertEqual(len(seen),2)
+                self.assertEqual(loop._deliver_reply.await_count,2)
         asyncio.run(run())
 
 

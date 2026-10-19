@@ -1,4 +1,4 @@
-"""大鱼 Fish 主窗口：紧凑 sidebar + 六页。"""
+"""Fish navigation; each setting has one primary editing location."""
 
 from __future__ import annotations
 
@@ -10,18 +10,15 @@ from PySide6.QtWidgets import (
     QMainWindow, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from .pages import (
-    AgentsPage, EventsPage, OverviewPage, QQPage, ResearchPage, SettingsPage,
-)
+from .pages import EventsPage, QQPage
 from .workspace import OverviewPage
-from .configuration import AgentsPage, MultimodalPage
 from .conversation import ChatPage
 from .system_settings import SystemSettingsPage
 from .resources import ResourcesPage
 from .social import SocialPage
 from .research import ResearchPage
 from .services import FishServices
-from .theme import COLORS, QSS, SPACE
+from .theme import COLORS, QSS
 from .widgets import Avatar, icon
 
 
@@ -73,7 +70,6 @@ class MainWindow(QMainWindow):
             ("概览", OverviewPage(services), "overview"),
             ("聊天", ChatPage(services), "fish"),
             ("研究", ResearchPage(services), "research"),
-            ("Agent 配置", AgentsPage(services), "agents"),
             ("大鱼", QQPage(services), "fish"),
             ('资源管理', ResourcesPage(services), 'agents'),
             ("事件", EventsPage(services), "events"),
@@ -81,7 +77,7 @@ class MainWindow(QMainWindow):
             ('人格与群聊', SocialPage(services), 'agents'),
         ]
         labels = {"概览": "工作台", "聊天": "对话", "大鱼": "QQ 消息", "研究": "视频研究",
-                  "Agent 配置": "角色设置", "事件": "运行记录", "设置": "系统设置"}
+                  "事件": "运行记录", "设置": "系统设置"}
         for name, _page, icon_name in self.pages:
             item = QListWidgetItem(icon(icon_name, 18, COLORS["secondary"]), labels.get(name, name))
             item.setSizeHint(QSize(0, 44))
@@ -100,7 +96,7 @@ class MainWindow(QMainWindow):
         self.nav.currentRowChanged.connect(self.switch_page)
         self.pages[0][1].navigate.connect(self.navigate)
         self.pages[2][1].followup.connect(self._research_followup)
-        self.pages[4][1].draftRequested.connect(self._qq_followup)
+        self.page('大鱼').draftRequested.connect(self._qq_followup)
         self.nav.setCurrentRow(0)
         self._timer = QTimer(self)
         self._timer.setInterval(3500)
@@ -131,10 +127,17 @@ class MainWindow(QMainWindow):
             page.refresh()
 
     def navigate(self, name: str) -> None:
+        if name == 'Agent 配置':
+            self.navigate('设置')
+            self.page('设置').tabs.setCurrentWidget(self.page('设置').models)
+            return
         for index, (title, _page, _icon) in enumerate(self.pages):
             if title == name:
                 self.switch_page(index)
                 return
+
+    def page(self, name):
+        return next(page for title, page, _icon in self.pages if title == name)
 
     def _research_followup(self, text):
         chat = self.pages[1][1]

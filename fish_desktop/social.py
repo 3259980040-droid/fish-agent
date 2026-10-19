@@ -64,7 +64,7 @@ class SocialPage(BasePage):
         self.quiet_end = QLineEdit(); self.quiet_end.setPlaceholderText('例如 08:00，与开始同时填写')
         form.addRow('主动静默开始', self.quiet_start); form.addRow('主动静默结束', self.quiet_end)
         self.deployment = _label('', 'Muted'); self.deployment.setWordWrap(True); card.body.addWidget(self.deployment)
-        row = QHBoxLayout(); self.group_save = _button('保存旁听与频率', primary=True); self.pause = _button('停止群发言', danger=True)
+        row = QHBoxLayout(); self.group_save = _button('保存旁听与频率', primary=True); self.pause = _button('停止此群回复', danger=True)
         row.addWidget(self.group_save); row.addWidget(self.pause); row.addStretch(); card.body.addLayout(row)
         self.clear_context = _button('清理此群旁听记录'); row.insertWidget(2,self.clear_context)
         self.publish = _button('将当前已认可版本发布到此群并开启发言'); card.body.addWidget(self.publish)
@@ -75,7 +75,12 @@ class SocialPage(BasePage):
         self.tabs.addTab(group_scroll, '群聊参与')
         from .members import MembersPanel
         self.members = MembersPanel(services); self.tabs.addTab(self.members, '成员管理')
-        self.tabs.currentChanged.connect(lambda index: self.members.refresh() if index==2 else None)
+        from .persona_sources import PersonaSourcePage
+        self.daily_persona = PersonaSourcePage(services)
+        self.shared_rules = PersonaSourcePage(services, shared=True)
+        self.tabs.addTab(self.daily_persona, '日常人格')
+        self.tabs.addTab(self.shared_rules, '共享规则原文')
+        self.tabs.currentChanged.connect(self._refresh_tab)
         self.reload_btn.clicked.connect(lambda: self._load_versions(force=True))
         self.versions.currentIndexChanged.connect(self._load_persona)
         self.save_btn.clicked.connect(self._save_persona); self.test_btn.clicked.connect(self._test)
@@ -88,6 +93,10 @@ class SocialPage(BasePage):
     def _edited(self):
         self.dirty = True
         self.state.setText('编辑中：保存后生成新版本；当前窗口和群发布版本不会被覆盖。')
+
+    def _refresh_tab(self, index):
+        page = self.tabs.widget(index)
+        if page in (self.members, self.daily_persona, self.shared_rules): page.refresh()
 
     def refresh(self):
         if not self.versions.count():

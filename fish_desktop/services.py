@@ -330,6 +330,30 @@ class FishServices:
     def persona_preview(self, agent_id: str) -> dict[str, Any]:
         return self.runtime.personas.preview(agent_id)
 
+    def _persona_source_path(self, source):
+        if source == 'global':
+            return self.root / 'harness/global/AGENTS.md'
+        agent = HarnessConfig(self.root).agent(source) if source in ('qq', 'research') else None
+        if agent is None:
+            raise ValueError('未知的人格来源')
+        return self.root / agent.persona
+
+    def persona_source(self, source):
+        import hashlib
+        path = self._persona_source_path(source)
+        raw = path.read_bytes() if path.exists() else b''
+        return {'text': raw.decode('utf-8'), 'digest': hashlib.sha256(raw).hexdigest()}
+
+    @locked_settings
+    def save_persona_source(self, source, text, digest):
+        from storage import commit_files
+        if not isinstance(text, str) or len(text) > 100000:
+            raise ValueError('人格或共享规则需为不超过100000字的文本')
+        if self.persona_source(source)['digest'] != digest:
+            raise ValueError('内容已在其他窗口修改，请重新载入后核对，未覆盖新内容。')
+        commit_files(self.root, {self._persona_source_path(source): text.encode('utf-8')})
+        return self.persona_source(source)
+
     def agent_editor(self, agent_id: str) -> dict[str, Any]:
         agent = self.config.agent(agent_id)
         if agent is None:
@@ -617,21 +641,6 @@ class FishServices:
         self.runtime.stop_all()
         from tool_host import shutdown_host
         shutdown_host(self.root)
-
-    def start_runtime(self) -> dict[str, Any]:
-        load_user_env()
-        if tcp_open("127.0.0.1", 3090):
-            return {"ok": True, "reason": "already running"}
-        result = self.runtime.start("qq")
-        proc = self.runtime.procs.get("qq")
-        if proc is not None:
-            _assign_job(self.job, proc)
-        return {"ok": bool(result.get("ok")), "result": result}
-
-    def stop_runtime(self) -> dict[str, Any]:
-        self.runtime.stop("qq")
-        kill_port(3090, self.root)
-        return {"ok": True}
 
     def cancel_turn(self) -> dict[str, Any]:
         return http_json("http://127.0.0.1:3102/cancel", method="POST", timeout=5, root=self.root) or {

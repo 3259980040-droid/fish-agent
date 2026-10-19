@@ -149,12 +149,6 @@ async def command(loop, payload, sender):
             for dialogue in getattr(loop, 'group_dialogues', {}).values():
                 if dialogue.chat == payload['chat_id']:
                     await dialogue.cancel()
-            workflows = [loop.social_workflow, *getattr(loop, 'group_test_workflows', {}).values()]
-            for workflow in workflows:
-                task = workflow.pending.get(payload['chat_id'])
-                if task and not task.done():
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
         if verb == '/人格版本':
             response = '\n'.join(p['id'][:8] + ' · ' + p['name'] for p in tests.contexts.personas('qq')[:30])
         elif verb == '/新建测试':

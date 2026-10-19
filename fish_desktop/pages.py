@@ -1,4 +1,4 @@
-"""Phase 4C 六页：View + Control Surface，不包含业务 SQL。"""
+"""Shared desktop components, QQ message history and event views."""
 
 from __future__ import annotations
 
@@ -8,14 +8,14 @@ from typing import Any
 from PySide6.QtCore import Qt, QTimer, QDate, Signal
 from PySide6.QtGui import QBrush, QColor, QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPlainTextEdit,
-    QPushButton, QScrollArea, QSizePolicy, QTabWidget, QTableWidget, QTableWidgetItem,
+    QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
     QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QLineEdit, QDateEdit, QCheckBox,
 )
 
 from .services import FishServices
 from .theme import COLORS, SPACE
-from .widgets import Avatar, Card, Divider, StatBlock, StatusPill, MessageBubble, icon
+from .widgets import Avatar, Card, Divider, StatusPill, MessageBubble, icon
 from .workers import Runner
 
 STATUS_CN = {
@@ -190,184 +190,6 @@ class BasePage(QWidget):
         return row
 
 
-class OverviewPage(BasePage):
-    def __init__(self, services: FishServices):
-        super().__init__(services)
-        self.page_title = "概览"
-        self.page_subtitle = "大鱼与研究的日常状态"
-        root = QVBoxLayout(self)
-        root.setContentsMargins(SPACE["page"], SPACE["page"], SPACE["page"], SPACE["page"])
-        root.setSpacing(SPACE["section"])
-
-        head = self._header("概览", "大鱼与研究的日常状态", root)
-        self.start_btn = _button("启动 Fish", primary=True)
-        self.stop_btn = _button("停止 Fish", danger=True)
-        self.refresh_btn = _button("刷新")
-        head.addWidget(self.start_btn)
-        head.addWidget(self.stop_btn)
-        head.addWidget(self.refresh_btn)
-        root.addWidget(self.toast)
-
-        hero = QGridLayout()
-        hero.setHorizontalSpacing(SPACE["card"])
-        hero.setVerticalSpacing(SPACE["card"])
-
-        fish_card = Card("大鱼 AGENT")
-        fish_top = QHBoxLayout()
-        fish_top.setSpacing(12)
-        fish_top.addWidget(Avatar(54))
-        fish_name = QVBoxLayout()
-        fish_name.setSpacing(2)
-        fish_name.addWidget(_label("大鱼", "SectionTitle"))
-        fish_name.addWidget(_label("QQ 私聊 · 主人专属", "Muted"))
-        fish_top.addLayout(fish_name)
-        fish_top.addStretch(1)
-        self.fish_pill = StatusPill("离线", "neutral")
-        fish_top.addWidget(self.fish_pill)
-        fish_card.body.addLayout(fish_top)
-        self.qq_values: dict[str, QLabel] = {}
-        for key, title in (("channel", "QQ 通道"), ("conversation", "当前会话"), ("reply", "最近回复")):
-            row = QHBoxLayout()
-            row.addWidget(_label(title, "Caption"))
-            row.addStretch(1)
-            value = _label("—")
-            value.setAlignment(Qt.AlignRight)
-            value.setWordWrap(True)
-            self.qq_values[key] = value
-            row.addWidget(value)
-            fish_card.body.addLayout(row)
-        hero.addWidget(fish_card, 0, 0, 1, 2)
-
-        research_card = Card("研究 AGENT")
-        research_top = QHBoxLayout()
-        research_top.addWidget(Avatar(34))
-        research_top.addWidget(_label("收藏夹研究", "Value"))
-        research_top.addStretch(1)
-        self.research_pill = StatusPill("—", "neutral")
-        research_top.addWidget(self.research_pill)
-        research_card.body.addLayout(research_top)
-        self.research_values: dict[str, QLabel] = {}
-        for key, title in (("sources", "视频源"), ("processed", "已处理"),
-                           ("failed", "失败"), ("sync", "最近同步")):
-            row = QHBoxLayout()
-            row.addWidget(_label(title, "Caption"))
-            row.addStretch(1)
-            value = _label("—")
-            self.research_values[key] = value
-            row.addWidget(value)
-            research_card.body.addLayout(row)
-        hero.addWidget(research_card, 0, 2)
-
-        health_card = Card("系统健康")
-        self.health_pills: dict[str, StatusPill] = {}
-        for key, title in (("runtime", "Runtime"), ("fishqq", "fish-qq"),
-                           ("napcat", "NapCat"), ("loop", "Agent Loop")):
-            row = QHBoxLayout()
-            row.addWidget(_label(title, "Value"))
-            row.addStretch(1)
-            pill = StatusPill("—", "neutral")
-            self.health_pills[key] = pill
-            row.addWidget(pill)
-            health_card.body.addLayout(row)
-        hero.addWidget(health_card, 1, 0, 1, 3)
-        hero.setColumnStretch(0, 1)
-        hero.setColumnStretch(1, 1)
-        hero.setColumnStretch(2, 1)
-        root.addLayout(hero)
-
-        activity_card = Card("最近活动")
-        activity_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.activity = _label("尚无记录", "Muted")
-        self.activity.setWordWrap(True)
-        activity_card.body.addWidget(self.activity)
-        activity_card.body.addStretch(1)
-        activity_footer = _label("状态来自本机 Core · 关闭窗口停止 Fish-owned，NapCat 保留", "Caption")
-        activity_card.body.addWidget(activity_footer)
-        root.addWidget(activity_card, 1)
-
-        self.start_btn.clicked.connect(self._start)
-        self.stop_btn.clicked.connect(self._stop)
-        self.refresh_btn.clicked.connect(self.refresh)
-
-    def _control(self, fn, label: str) -> None:
-        self._toast(f"{label}…", COLORS["warning"])
-        self.start_btn.setDisabled(True)
-        self.stop_btn.setDisabled(True)
-        self._submit(fn, self._control_result)
-
-    def _control_result(self, result: Any) -> None:
-        ok = bool(result.get("ok")) if isinstance(result, dict) else bool(result)
-        reason = result.get("reason") if isinstance(result, dict) else ""
-        self._toast("完成" if ok else f"失败：{reason or 'unknown'}",
-                    COLORS["success"] if ok else COLORS["danger"])
-        self.start_btn.setDisabled(False)
-        self.stop_btn.setDisabled(False)
-        QTimer.singleShot(100, self.refresh)
-
-    def _start(self) -> None:
-        self._control(self.services.start_fish, "启动 Fish")
-
-    def _stop(self) -> None:
-        self._control(self.services.stop_fish, "停止 Fish")
-
-    def refresh(self) -> None:
-        if self.loading:
-            return
-        self._submit(self.services.overview, self._apply)
-
-    def _apply(self, data: dict[str, Any]) -> None:
-        runtime = data["qq_runtime"]
-        loop = data.get("loop")
-        online = bool(runtime.get("state") == "running" and data["fishqq"] and loop)
-        self.fish_pill.set_text("在线" if online else "离线", "good" if online else "bad")
-        _set(self.qq_values["channel"], "已连接" if data["fishqq"] else "不可用",
-             COLORS["success"] if data["fishqq"] else COLORS["danger"])
-        conv = data.get("conversation") or {}
-        _set(self.qq_values["conversation"], str(conv.get("id") or "未建立"))
-        last = data.get("last_message") or {}
-        reply = (last.get("text") or "尚无回复") if last.get("direction") == "outbound" else "尚无回复"
-        _set(self.qq_values["reply"], str(reply)[:80])
-
-        counts = data.get("research_counts") or {}
-        sources = counts.get("sources", 0)
-        failed = 0
-        processed = 0
-        for status, number in data.get("source_counts", []):
-            if status == "failed":
-                failed += number
-            elif status == "done":
-                processed += number
-        self.research_pill.set_text(
-            status_cn((data.get("last_run") or {}).get("status", "—")),
-            state_pill((data.get("last_run") or {}).get("status")),
-        )
-        _set(self.research_values["sources"], str(sources))
-        _set(self.research_values["processed"], str(processed))
-        _set(self.research_values["failed"], str(failed))
-        _set(self.research_values["sync"], str((data.get("last_run") or {}).get("started_at") or "—"))
-
-        self.health_pills["runtime"].set_text(status_cn(runtime.get("state")),
-                                              state_pill(runtime.get("state")))
-        self.health_pills["fishqq"].set_text("就绪" if data["fishqq"] else "不可用",
-                                             "good" if data["fishqq"] else "bad")
-        self.health_pills["napcat"].set_text("已连接" if data["napcat"] else "未连接",
-                                             "good" if data["napcat"] else "bad")
-        self.health_pills["loop"].set_text("运行中" if loop else "已停止",
-                                           "good" if loop else "neutral")
-        if last:
-            lines = []
-            for message in (data.get("recent_messages") or [])[-5:]:
-                text = (message.get("text") or "").replace("\n", " ")
-                lines.append(
-                    f"{direction_cn(message.get('direction'))} · {status_cn(message.get('status'))} · "
-                    f"{message.get('ts') or ''}\n{text[:140]}"
-                )
-            self.activity.setText("\n\n".join(lines) if lines else
-                                  f"{direction_cn(last.get('direction'))} · {status_cn(last.get('status'))} · "
-                                  f"{last.get('ts')}\n{(last.get('text') or '')[:240]}")
-        else:
-            self.activity.setText("尚无 QQ 消息")
-        self._toast("已刷新")
 
 
 class QQPage(BasePage):
@@ -439,13 +261,8 @@ class QQPage(BasePage):
             row.addWidget(pill)
             status.body.addLayout(row)
         status.body.addWidget(Divider())
-        controls = QHBoxLayout()
-        self.start_btn = _button("启动运行时")
-        self.stop_btn = _button("停止运行时")
-        controls.addWidget(self.start_btn)
-        controls.addWidget(self.stop_btn)
-        status.body.addLayout(controls)
-        self.cancel_btn = _button("取消当前生成", danger=True)
+        status.body.addWidget(_label('启动与停止统一在工作台操作。', 'Caption'))
+        self.cancel_btn = _button("取消 QQ 在途任务", danger=True)
         status.body.addWidget(self.cancel_btn)
         status.body.addWidget(Divider())
         self.tech_btn = _tech_toggle("技术详情")
@@ -485,18 +302,7 @@ class QQPage(BasePage):
         root.addLayout(content, 1)
 
         self.refresh_btn.clicked.connect(self.refresh)
-        self.start_btn.clicked.connect(lambda: self._control(self.services.start_runtime, "启动运行时"))
-        self.stop_btn.clicked.connect(lambda: self._control(self.services.stop_runtime, "停止运行时"))
         self.cancel_btn.clicked.connect(self._cancel)
-
-    def _control(self, fn, text: str) -> None:
-        self._toast(f"{text}…", COLORS["warning"])
-        self._submit(fn, lambda result: self._control_done(result, text))
-
-    def _control_done(self, result: Any, text: str) -> None:
-        ok = bool(result.get("ok")) if isinstance(result, dict) else bool(result)
-        self._toast(f"{text} {'完成' if ok else '失败'}", COLORS["success"] if ok else COLORS["danger"])
-        QTimer.singleShot(100, self.refresh)
 
     def _cancel(self) -> None:
         self._toast("取消当前生成…", COLORS["warning"])
@@ -641,229 +447,8 @@ class QQPage(BasePage):
         self._submit(work, self.draftRequested.emit)
 
 
-class ResearchPage(BasePage):
-    def __init__(self, services: FishServices):
-        super().__init__(services)
-        self.page_title = "研究"
-        self.page_subtitle = "收藏夹与视频理解"
-        root = QVBoxLayout(self)
-        root.setContentsMargins(SPACE["page"], SPACE["page"], SPACE["page"], SPACE["page"])
-        root.setSpacing(SPACE["section"])
-
-        head = self._header("研究", "收藏夹与视频理解", root)
-        self.sync_btn = _button("同步收藏夹", primary=True)
-        self.refresh_btn = _button("刷新")
-        head.addWidget(self.sync_btn)
-        head.addWidget(self.refresh_btn)
-        root.addWidget(self.toast)
-
-        summary_card = Card("概览")
-        summary = QHBoxLayout()
-        self.fav_label = _label("—", "Value")
-        fav_box = QVBoxLayout()
-        fav_box.addWidget(_label("收藏夹", "Caption"))
-        fav_box.addWidget(self.fav_label)
-        summary.addLayout(fav_box)
-        summary.addStretch(1)
-        self.stats: dict[str, StatBlock] = {}
-        for key, title in (("total", "视频总数"), ("processed", "已处理"),
-                           ("partial", "部分完成"), ("failed", "失败"), ("sync", "最近同步")):
-            block = StatBlock(title)
-            self.stats[key] = block
-            summary.addWidget(block)
-        summary_card.body.addLayout(summary)
-        root.addWidget(summary_card)
-
-        sources = Card("视频列表")
-        self.table = Table(["标题", "状态", "观察级别", "模态", "重试", "警告 / 错误"])
-        self.table.setMinimumHeight(260)
-        sources.body.addWidget(self.table)
-        root.addWidget(sources, 1)
-
-        self.advanced_btn = _tech_toggle("派生记忆 / 同步记录")
-        root.addWidget(self.advanced_btn)
-        self.advanced_panel = QWidget()
-        adv = QHBoxLayout(self.advanced_panel)
-        adv.setContentsMargins(0, 0, 0, 0)
-        mem_card = Card("派生记忆")
-        self.memory = Table(["来源", "摘要"])
-        mem_card.body.addWidget(self.memory)
-        adv.addWidget(mem_card, 2)
-        run_card = Card("同步记录")
-        self.runs = Table(["开始", "状态", "处理", "失败"])
-        run_card.body.addWidget(self.runs)
-        adv.addWidget(run_card, 1)
-        self.advanced_panel.setVisible(False)
-        self.advanced_btn.toggled.connect(self.advanced_panel.setVisible)
-        root.addWidget(self.advanced_panel)
-
-        self.refresh_btn.clicked.connect(self.refresh)
-        self.sync_btn.clicked.connect(self._sync)
-
-    def _sync(self) -> None:
-        self._toast("调用现有研究流水线…", COLORS["warning"])
-        self.sync_btn.setDisabled(True)
-        self._submit(self.services.sync_research, self._sync_done,
-                     on_done=lambda: self.sync_btn.setDisabled(False))
-
-    def _sync_done(self, result: Any) -> None:
-        ok = bool(result.get("ok")) if isinstance(result, dict) else bool(result)
-        status = ((result.get("result") or {}).get("status") if isinstance(result, dict) else "") or ""
-        reason = result.get("reason") if isinstance(result, dict) else ""
-        word = "同步完成" if status == "completed" else "同步部分完成" if ok else "同步失败"
-        self._toast(f"{word}" if ok else f"{word}：{reason or result}",
-                    COLORS["success"] if ok else COLORS["danger"])
-        QTimer.singleShot(100, self.refresh)
-
-    def refresh(self) -> None:
-        if self.loading:
-            return
-        self._submit(self.services.research_snapshot, self._apply)
-
-    def _apply(self, data: dict[str, Any]) -> None:
-        fav = data.get("favorite") or {}
-        self.fav_label.setText(f"{fav.get('title', '未选择收藏夹')}  ·  media_id={fav.get('media_id', '—')}")
-        sources = data.get("sources", [])
-        counts = {"total": len(sources), "processed": 0, "partial": 0, "failed": 0}
-        for source in sources:
-            status = source.get("status")
-            if status == "done":
-                counts["processed"] += 1
-            elif status == "failed":
-                counts["failed"] += 1
-            elif status in ("partial", "metadata_only"):
-                counts["partial"] += 1
-        run = (data.get("runs") or [{}])[0]
-        for key, block in self.stats.items():
-            if key == "sync":
-                block.value.setText(status_cn(run.get("status", "—")))
-            else:
-                block.value.setText(str(counts.get(key, 0)))
-        rows = []
-        for source in sources:
-            rows.append([
-                str(source.get("title") or source.get("bvid") or ""),
-                status_cn(source.get("status")),
-                status_cn(source.get("observation_level")),
-                modalities_cn(source.get("processed_modalities")),
-                str(source.get("retry_count") or 0),
-                str(source.get("last_error") or source.get("warnings") or ""),
-            ])
-        self.table.fill(rows, [330, 90, 100, 180, 55, 220])
-        self.memory.fill([[str(m.get("source_id") or ""), str(m.get("summary") or "")[:260]]
-                          for m in data.get("memories", [])], [70, 520])
-        self.runs.fill([[str(r.get("started_at") or ""), status_cn(r.get("status")),
-                         str(r.get("processed") or 0), str(r.get("failed") or 0)]
-                        for r in data.get("runs", [])], [160, 90, 60, 60])
-        self._toast("已刷新")
 
 
-class AgentsPage(BasePage):
-    def __init__(self, services: FishServices):
-        super().__init__(services)
-        self.page_title = "Agent 配置"
-        self.page_subtitle = "人格、模型与工作区"
-        root = QVBoxLayout(self)
-        root.setContentsMargins(SPACE["page"], SPACE["page"], SPACE["page"], SPACE["page"])
-        root.setSpacing(SPACE["section"])
-
-        head = self._header("Agent 配置", "人格、模型与工作区", root)
-        self.refresh_btn = _button("刷新")
-        head.addWidget(self.refresh_btn)
-        root.addWidget(self.toast)
-
-        columns = QHBoxLayout()
-        columns.setSpacing(SPACE["card"])
-        self.cards: dict[str, dict[str, QLabel]] = {}
-        for agent_id, title in (("research", "研究 Agent"), ("qq", "QQ Agent")):
-            card = Card(title)
-            top = QHBoxLayout()
-            top.addWidget(Avatar(34))
-            top.addWidget(_label(title, "Value"))
-            top.addStretch(1)
-            state_pill = StatusPill("—", "neutral")
-            top.addWidget(state_pill)
-            card.body.addLayout(top)
-            values: dict[str, QLabel] = {}
-            for key, label_text in (
-                ("provider", "提供方"), ("model", "模型"), ("key", "API key"),
-                ("workspace", "工作区"), ("persona", "人格文件"),
-            ):
-                row = QHBoxLayout()
-                row.addWidget(_label(label_text, "Caption"))
-                row.addStretch(1)
-                value = _label("—")
-                value.setAlignment(Qt.AlignRight)
-                value.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                values[key] = value
-                row.addWidget(value)
-                card.body.addLayout(row)
-            values["runtime"] = state_pill
-            advanced_btn = _tech_toggle("高级 / 技术详情")
-            card.body.addWidget(advanced_btn)
-            advanced = QWidget()
-            adv_layout = QVBoxLayout(advanced)
-            adv_layout.setContentsMargins(0, 4, 0, 0)
-            adv_layout.setSpacing(4)
-            projection = _label("—", "Muted")
-            values["projection"] = projection
-            adv_layout.addWidget(projection)
-            button_row = QHBoxLayout()
-            preview_btn = _button("人格预览")
-            config_btn = _button("生效配置")
-            button_row.addWidget(preview_btn)
-            button_row.addWidget(config_btn)
-            adv_layout.addLayout(button_row)
-            advanced.setVisible(False)
-            advanced_btn.toggled.connect(advanced.setVisible)
-            preview_btn.clicked.connect(lambda _=False, aid=agent_id: self._preview(aid))
-            config_btn.clicked.connect(lambda _=False, aid=agent_id: self._config(aid))
-            card.body.addWidget(advanced)
-            self.cards[agent_id] = values
-            columns.addWidget(card, 1)
-        root.addLayout(columns)
-
-        self.output = QPlainTextEdit()
-        self.output.setReadOnly(True)
-        self.output.setMaximumHeight(220)
-        self.output.setPlaceholderText("人格预览 / 生效配置（不含 secret）")
-        root.addWidget(self.output)
-        root.addStretch(1)
-        self.refresh_btn.clicked.connect(self.refresh)
-
-    def refresh(self) -> None:
-        if self.loading:
-            return
-        self._submit(self.services.agents_snapshot, self._apply)
-
-    def _apply(self, data: dict[str, Any]) -> None:
-        for agent in data.get("agents", []):
-            values = self.cards.get(agent["id"])
-            if not values:
-                continue
-            key = agent.get("api_key") or {}
-            _set(values["provider"], str(agent.get("provider")))
-            _set(values["model"], str(agent.get("model")))
-            _set(values["key"], "set" if key.get("set") else "missing",
-                 COLORS["success"] if key.get("set") else COLORS["danger"])
-            _set(values["workspace"], str(agent.get("workspace")))
-            _set(values["persona"], str(agent.get("persona")))
-            _set(values["projection"], f"投影 {agent.get('preview_chars')} 字符 / 约 {agent.get('preview_tokens')} token")
-            values["runtime"].set_text(status_cn((agent.get("status") or {}).get("state")),
-                                       state_pill((agent.get("status") or {}).get("state")))
-        self._toast("已刷新")
-
-    def _preview(self, agent_id: str) -> None:
-        self._submit(lambda: self.services.persona_preview(agent_id), self._show_text)
-
-    def _config(self, agent_id: str) -> None:
-        self._submit(lambda: self.services.effective_config(agent_id), self._show_json)
-
-    def _show_text(self, result: dict[str, Any]) -> None:
-        self.output.setPlainText(result.get("text", ""))
-
-    def _show_json(self, result: dict[str, Any]) -> None:
-        self.output.setPlainText(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 class EventsPage(BasePage):
@@ -954,76 +539,3 @@ class EventsPage(BasePage):
             item.setForeground(2, QBrush(QColor(color)))
             item.addChild(QTreeWidgetItem([short_time, "详情", "", detail]))
             self.tree.addTopLevelItem(item)
-
-
-class SettingsPage(BasePage):
-    def __init__(self, services: FishServices):
-        super().__init__(services)
-        self.page_title = "设置"
-        self.page_subtitle = "配置与诊断"
-        root = QVBoxLayout(self)
-        root.setContentsMargins(SPACE["page"], SPACE["page"], SPACE["page"], SPACE["page"])
-        root.setSpacing(SPACE["section"])
-
-        head = self._header("设置", "配置与诊断", root)
-        self.refresh_btn = _button("刷新")
-        head.addWidget(self.refresh_btn)
-        root.addWidget(self.toast)
-
-        self.tabs = QTabWidget()
-        self.general = Table(["项目", "值"])
-        self.runtime = Table(["项目", "值"])
-        self.qq = Table(["项目", "值"])
-        self.research = Table(["项目", "值"])
-        diagnostics = QWidget()
-        diag_layout = QVBoxLayout(diagnostics)
-        diag_layout.setContentsMargins(12, 12, 12, 12)
-        self.diag = QPlainTextEdit()
-        self.diag.setReadOnly(True)
-        diag_layout.addWidget(self.diag)
-        self.tabs.addTab(self.general, "常规")
-        self.tabs.addTab(self.runtime, "运行时")
-        self.tabs.addTab(self.qq, "QQ / NapCat")
-        self.tabs.addTab(self.research, "数据位置")
-        self.tabs.addTab(diagnostics, "诊断")
-        root.addWidget(self.tabs, 1)
-        self.refresh_btn.clicked.connect(self.refresh)
-
-    def refresh(self) -> None:
-        if self.loading:
-            return
-        self._submit(self.services.settings_snapshot, self._apply)
-
-    def _apply(self, data: dict[str, Any]) -> None:
-        self.general.fill([
-            ["产品", "大鱼 Fish"],
-            ["版本", "2026.10 · UI 与多模态更新"],
-            ["项目根", str(self.services.root)],
-            ["关闭行为", "停止 Fish-owned，保留 NapCat"],
-            ["群回复", "off（正式默认）"],
-            ["说明", "PySide6 桌面客户端；长期 Memory 尚未实现"],
-        ], [120, 700])
-        self.runtime.fill([
-            ["DSH CLI", str(data.get("cli") or "")],
-            ["Node.js", str(data.get("node") or "")],
-            ["DSH 版本", str(data.get("version") or "")],
-            ["Profile", str(data.get("profile") or "")],
-            ["Homes", json.dumps(data.get("homes"), ensure_ascii=False)],
-            ["Ports", json.dumps(data.get("ports"), ensure_ascii=False)],
-        ], [120, 760])
-        self.qq.fill([
-            ["Owner", str(self.services.owner_id() or "<owner-qq>")],
-            ["NapCat", str(data.get("napcat") or "")],
-            ["fish-qq", str(data.get("fishqq") or "")],
-            ["Token", json.dumps(data.get("tokens"), ensure_ascii=False)],
-        ], [120, 760])
-        self.research.fill([
-            ["research.db", str((data.get("db") or {}).get("research") or "")],
-            ["qq.db", str((data.get("db") or {}).get("qq") or "")],
-            ["harness.db", str((data.get("db") or {}).get("harness") or "")],
-        ], [120, 760])
-        self.diag.setPlainText(json.dumps({
-            "health": data.get("health"), "homes": data.get("homes"),
-            "ports": data.get("ports"), "db": data.get("db"),
-        }, ensure_ascii=False, indent=2))
-        self._toast("只读诊断；token/API key 只显示 set/missing")

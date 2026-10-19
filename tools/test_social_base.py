@@ -192,28 +192,20 @@ class GroupTests(Fixture):
         loop=Mock(governance=Governance(self.root),channel=Mock(bot={'id':'20001'}),group_tasks=set())
         with patch('model_gateway.ModelGateway') as gateway:
             asyncio.run(workflow.observe(loop,self.payload(1)));gateway.assert_not_called()
-        self.assertFalse(workflow.pending)
+        self.assertFalse(loop.group_tasks)
 
-    def test_generation_is_cancelled_when_new_topic_or_pause_arrives(self):
+    def test_passive_workflow_never_owns_generation_even_with_deployment(self):
         from group_workflow import GroupWorkflow
         from qq_agent_loop import QQAgentLoop
         c=SocialContext(self.root);p=c.ensure_default('qq');space=c.create_space('qq',revision=p['id'],origin='owner-qq')
         c.record_owner_reply(space['id'],self.owner);c.approve(p['id'],self.owner);c.deploy(self.group,p['id'],self.owner,enabled=True)
-        async def check():
-            for mutate in ('topic','pause'):
-                loop=QQAgentLoop(self.root);workflow=loop.social_workflow
-                workflow.policy.configure(self.chat,{'listen':True,'reply':True,'debounce_s':0})
-                mid='trigger-'+mutate;payload=self.payload(mid,True);workflow.policy.observe(payload);workflow.latest[self.chat]=payload
-                client=Mock(auth=AsyncMock(),create_session=AsyncMock(return_value='session-'+mutate),baseline=AsyncMock(return_value=0),prompt=AsyncMock())
-                async def response(*args,**kwargs):
-                    if mutate=='topic':workflow.policy.observe(self.payload('new-topic',text='话题已经变化'))
-                    else:workflow.policy.configure(self.chat,{'reply':False})
-                    return {'ok':True,'text':'本应被撤销的候选'}
-                client.wait_response=AsyncMock(side_effect=response);loop._deliver_reply=AsyncMock(return_value={'ok':True})
-                with patch('runtime_adapter.DSHRuntimeAdapter.connect',return_value=client),patch('tool_host.bind_session'):
-                    await workflow.run(loop,self.chat)
-                loop._deliver_reply.assert_not_awaited()
-        asyncio.run(check())
+        loop=QQAgentLoop(self.root);workflow=loop.social_workflow
+        workflow.policy.configure(self.chat,{'listen':True,'reply':True})
+        with patch('runtime_adapter.DSHRuntimeAdapter.connect') as connect:
+            asyncio.run(workflow.observe(loop,self.payload('passive',True)))
+            connect.assert_not_called()
+        self.assertFalse(loop.group_tasks)
+        self.assertEqual(workflow.policy.snapshot(self.chat)['cursor'],1)
 
     def test_owner_test_only_records_acceptance_after_delivery(self):
         from qq_agent_loop import QQAgentLoop
