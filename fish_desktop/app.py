@@ -126,6 +126,7 @@ def main() -> int:
     parser.add_argument("--screenshot", default="")
     parser.add_argument("--page", default="")
     parser.add_argument("--ui-diagnostics", default="")
+    parser.add_argument('--start-qq', action='store_true', help='Start the configured QQ services with this GUI')
     args = parser.parse_args()
 
     if args.screenshot or args.ui_diagnostics:
@@ -182,6 +183,9 @@ def main() -> int:
             from .bootstrap import refresh_desktop_entry
             refresh_desktop_entry(services.root)
         services.start_background()
+        if args.start_qq:
+            import threading
+            threading.Thread(target=services.start_fish, daemon=True, name='fish-start-qq').start()
 
     def pump(ms: int) -> None:
         loop = QEventLoop()

@@ -1,4 +1,4 @@
-"""Opt-in provider thinking excerpts for verified-owner test replies only."""
+"""Bounded provider thinking excerpts for explicitly authorized trial replies."""
 import re
 from request_inspector import redact
 

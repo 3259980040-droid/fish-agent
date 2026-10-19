@@ -1,4 +1,18 @@
-"""PyInstaller 入口；GUI 与 --backend 都走同一 Fish.exe。"""
+"""Stable GUI/backend entry for both the source checkout and Fish.exe."""
+
+import sys
+import os
+from pathlib import Path
+
+if not getattr(sys, 'frozen', False):
+    source_root = Path(__file__).resolve().parent
+    os.environ.setdefault('FISH_HARNESS_HOME', str(source_root))
+    sys.path.insert(0, str(source_root / 'harness'))
+    import dependencies
+    if sys.stdout is None or sys.stderr is None:
+        stream = (source_root / 'harness/source-launch.log').open('a', encoding='utf-8', buffering=1)
+        sys.stdout = stream
+        sys.stderr = stream
 
 from fish_desktop.app import main
 

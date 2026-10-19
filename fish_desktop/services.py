@@ -564,8 +564,8 @@ class FishServices:
                 cmd = [sys.executable, "--backend", "fish-qq",
                        "--config", str(self.root / "channels" / "fish_qq" / "config.json")]
             else:
-                cmd = [sys.executable, "-m", "channels.fish_qq", "--config",
-                       "channels/fish_qq/config.json"]
+                cmd = [sys.executable, str(Path(__file__).resolve().parents[1] / 'launch_fish.py'), '--backend', 'fish-qq', '--config',
+                       str(self.root / 'channels/fish_qq/config.json')]
             self.fishqq_proc = subprocess.Popen(
                 cmd, cwd=str(self.root), env=env,
                 stdout=open(log, "a", encoding="utf-8"), stderr=subprocess.STDOUT,
@@ -581,8 +581,8 @@ class FishServices:
                 cmd = [sys.executable, "--backend", "qq-agent-loop"]
                 cwd = str(self.root)
             else:
-                cmd = [sys.executable, "qq_agent_loop.py"]
-                cwd = str(self.root / "harness")
+                cmd = [sys.executable, str(Path(__file__).resolve().parents[1] / 'launch_fish.py'), '--backend', 'qq-agent-loop']
+                cwd = str(self.root)
             self.loop_proc = subprocess.Popen(
                 cmd, cwd=cwd, env=env,
                 stdout=open(log, "a", encoding="utf-8"), stderr=subprocess.STDOUT,

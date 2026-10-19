@@ -26,11 +26,11 @@ class SocialPage(BasePage):
         layout.addLayout(top)
         self.state = _label('', 'Muted'); self.state.setTextFormat(Qt.PlainText); self.state.setWordWrap(True); layout.addWidget(self.state)
         self.name = QLineEdit(); self.name.setPlaceholderText('人格名称'); layout.addWidget(self.name)
-        output_row = QHBoxLayout(); output_row.addWidget(_label('主人 QQ 测试输出', 'Caption'))
+        output_row = QHBoxLayout(); output_row.addWidget(_label('QQ 测试输出', 'Caption'))
         self.reply_mode = QComboBox()
         self.reply_mode.addItem('只发正式回复', 'final')
         self.reply_mode.addItem('思考片段（最多 160 字）＋正式回复', 'thinking_excerpt')
-        self.reply_mode.setToolTip('思考片段取自 API 的实际返回，仅用于主人独立测试；不会发到群里。保存后形成新版本。')
+        self.reply_mode.setToolTip('思考片段取自 API 的实际返回，用于主人私聊测试或主人明确开启的群测试。正式群聊仍只发正文。保存后形成新版本。')
         output_row.addWidget(self.reply_mode, 1); layout.addLayout(output_row)
         self.reply_mode.currentIndexChanged.connect(self._edited)
         self.edit_tabs = QTabWidget(); layout.addWidget(self.edit_tabs, 1)
@@ -172,13 +172,17 @@ class SocialPage(BasePage):
         if not gid: self.deployment.setText('先在系统设置保存白名单群。'); return
         from group_policy import GroupPolicy
         from social_context import SocialContext
-        cfg = GroupPolicy(self.services.root).config('group:' + gid)
+        from group_tests import GroupTests
+        tests = GroupTests(self.services.root); trial = tests.current(gid)
+        cfg = (tests.policy(trial) if trial else GroupPolicy(self.services.root)).config('group:' + gid)
         self.listen.setChecked(cfg['listen']); self.mode.setCurrentIndex(max(0, self.mode.findData(cfg['mode'])))
         self.learn.setChecked(cfg['learn'])
         for k, spin in self.numbers.items(): spin.setValue(cfg[k])
         self.quiet_start.setText(cfg['quiet_start']); self.quiet_end.setText(cfg['quiet_end'])
         dep = SocialContext(self.services.root).deployment(gid)
         self.deployment.setText(('群发言已开启 · 人格 ' + dep['revision'][:8]) if dep['enabled'] else '群发言已停止；' + dep.get('reason', '发布记录保留。'))
+        if trial:
+            self.deployment.setText('群测试进行中 · 人格 ' + trial['revision'][:8] + ' · 窗口 ' + trial['id'][:8] + '；长期学习关闭。')
         from group_workflow import GroupWorkflow
         stages={'judge':'判断话题','skip':'继续旁听','silent':'继续旁听','cancel':'撤销候选','generate':'正在生成','sent':'已发送','failed':'未完成'}
         self.group_log.setPlainText('\n'.join(time.strftime('%H:%M:%S',time.localtime(r['created']))+' · '+stages.get(r['stage'],r['stage'])+' · '+r['reason']
@@ -189,6 +193,10 @@ class SocialPage(BasePage):
         try:
             cfg = {'listen': self.listen.isChecked(), 'learn':self.learn.isChecked(), 'mode': self.mode.currentData(), 'quiet_start': self.quiet_start.text().strip(), 'quiet_end': self.quiet_end.text().strip(), **{k: v.value() for k, v in self.numbers.items()}}
             GroupPolicy(self.services.root).configure('group:' + self.groups.currentData(), cfg)
+            from group_tests import GroupTests
+            tests = GroupTests(self.services.root); trial = tests.current(self.groups.currentData())
+            if trial:
+                tests.policy(trial).configure('group:' + self.groups.currentData(), {**cfg, 'learn': False})
             self._load_group(); self._toast('已保存此群的旁听与频率。')
         except Exception as exc: self._toast(str(exc))
 
@@ -197,11 +205,17 @@ class SocialPage(BasePage):
         from social_context import SocialContext
         gid = self.groups.currentData()
         GroupPolicy(self.services.root).configure('group:' + gid, {'reply': False}); SocialContext(self.services.root).pause_group(gid)
+        from group_tests import GroupTests
+        tests = GroupTests(self.services.root)
+        tests.leave(gid, SocialContext(self.services.root).owner())
         self._load_group(); self._toast('已停止此群发言，发送前会再次核对。')
 
     def _clear_context(self):
         from group_policy import GroupPolicy
         GroupPolicy(self.services.root).clear('group:'+self.groups.currentData())
+        from group_tests import GroupTests
+        tests=GroupTests(self.services.root); trial=tests.current(self.groups.currentData())
+        if trial: tests.policy(trial).clear('group:'+self.groups.currentData())
         self._load_group();self._toast('已清理此群旁听原文与摘要，并撤销在途候选。频率计数保留；长期记忆请到资源管理中处理。')
 
     def _publish(self):

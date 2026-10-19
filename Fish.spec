@@ -17,7 +17,7 @@ hiddenimports = [
     "governance", "harness.governance", "harness.guard", "desktop_chat", "runtime_adapter",
     'storage', 'harness.storage', 'dependencies', 'harness.dependencies', 'guard', 'emoji_store', 'harness.emoji_store',
     'memory_store', 'model_gateway', 'plugin_registry', 'plugin_media', 'tool_host', 'research_autonomy',
-    'social_context', 'request_inspector', 'owner_tests', 'owner_reply', 'group_policy', 'group_workflow',
+    'social_context', 'request_inspector', 'owner_tests', 'owner_reply', 'group_tests', 'group_policy', 'group_workflow',
     'social_roster', 'social_members',
     'bili_login', 'backup', 'setup_config', 'updater', 'process_tools', 'network_config', 'regex',
     'mcp', 'mcp.client.stdio', 'mcp.client.sse', 'mcp.client.streamable_http',

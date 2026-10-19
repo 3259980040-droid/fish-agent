@@ -17,8 +17,8 @@ RESERVATION_TTL_S = 180
 
 
 class GroupPolicy:
-    def __init__(self, root):
-        self.path = Path(root) / 'data/social/group-policy.db'
+    def __init__(self, root, *, path=None):
+        self.path = Path(path) if path else Path(root) / 'data/social/group-policy.db'
         with database(self.path) as db:
             db.executescript('''
             CREATE TABLE IF NOT EXISTS groups(chat TEXT PRIMARY KEY,config TEXT,cursor INTEGER DEFAULT 0,handled INTEGER DEFAULT 0,unanswered INTEGER DEFAULT 0);
@@ -81,7 +81,7 @@ class GroupPolicy:
                 elif segment.get('type') in ('image','audio','video'):
                     parts.append({'type': segment['type'], 'ref': str(segment.get('asset_id') or mid)[:160]})
             cursor = state['cursor'] + 1
-            data = {'message_id':mid, 'sender':{'id':str(sender.get('id',''))[:40],'name':str(sender.get('name',''))[:80]},
+            data = {'message_id':mid, 'sender':{'id':str(sender.get('id',''))[:40],'name':str(sender.get('name') or sender.get('display_name') or '')[:80]},
                     'text':text,'segments':parts,'reply_to':str(payload.get('reply_to') or '')[:200],
                     'direct':bool(payload.get('mentions_bot') or payload.get('reply_to_bot')), 'cursor':cursor,'ts':now}
             db.execute('INSERT INTO observations VALUES(?,?,?,?,?,?)', (chat,cursor,mid,text,json.dumps(data,ensure_ascii=False),now))

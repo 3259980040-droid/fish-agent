@@ -80,9 +80,19 @@ class ToolHost:
 
     def bind(self, role, session, scope, sender='', desktop=False):
         from social_context import SocialContext
+        from group_tests import GroupTests, parse_scope
         if role not in ('qq', 'research') or not session:
             raise ValueError('无效的角色或会话')
         isolated = str(scope).startswith('space:')
+        group_trial = parse_scope(scope)
+        if group_trial:
+            if role != 'qq' or desktop:
+                raise PermissionError('群测试身份不匹配')
+            tests = GroupTests(self.root)
+            current = tests.current(group_trial[0])
+            if not current or current['id'] != group_trial[1]:
+                raise PermissionError('群测试窗口未启用或已经切换')
+            tests.contexts.bind_runtime(current['id'], session)
         if isolated:
             space = SocialContext(self.root).space(str(scope)[6:])
             if space['role'] != role:
@@ -105,6 +115,14 @@ class ToolHost:
                 if identity['scope'].startswith('space:'):
                     identity['isolated'] = True
                     identity['allowed_paths'] = [str(SocialContext(self.root).directory(identity['scope'][6:]).resolve())]
+                elif role == 'qq' and parse_scope(identity['scope']):
+                    trial_group, trial_sid = parse_scope(identity['scope'])
+                    identity.update(isolated=True, allowed_paths=[], persona_revision='')
+                    try:
+                        trial_space = GroupTests(self.root).window(trial_group, trial_sid)
+                        identity.update(allowed_paths=[str(SocialContext(self.root).directory(trial_sid).resolve())], persona_revision=trial_space['revision'])
+                    except (ValueError, PermissionError):
+                        pass  # Old-owner/config windows remain closed, without blocking other bindings.
                 elif role == 'qq' and identity['scope'].startswith('chat:group:'):
                     deployment = SocialContext(self.root).deployment(identity['scope'].split(':')[2])
                     if deployment.get('enabled'):
@@ -120,7 +138,13 @@ class ToolHost:
         def require(capability):
             if not identity['owner'] or (not identity['desktop'] and (not Governance(self.root).is_owner(identity['sender']) or capability not in policy.config()['owner_permissions'])):
                 raise PermissionError('主人未授予此管理权限：' + capability)
-        if identity['scope'].startswith('space:') and name not in ('fish_memory_search', 'fish_memory_save', 'fish_memory_delete'):
+        from group_tests import GroupTests, parse_scope
+        group_trial = parse_scope(identity['scope'])
+        if group_trial:
+            current = GroupTests(self.root).current(group_trial[0])
+            if not current or current['id'] != group_trial[1]:
+                raise PermissionError('群测试已结束或窗口已切换')
+        if (identity['scope'].startswith('space:') or group_trial) and name not in ('fish_memory_search', 'fish_memory_save', 'fish_memory_delete'):
             raise PermissionError('独立测试窗口仅开放本窗口记忆；共享资源和外部插件未向此窗口授权')
         if name.startswith('fish_interests_'):
             require('interests.write') if name.endswith('update') else require('status')

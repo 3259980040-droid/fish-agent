@@ -177,6 +177,7 @@ class QQAgentLoop:
         self.active_test_session = None
         from group_workflow import GroupWorkflow
         self.social_workflow = GroupWorkflow(root)
+        self.group_test_workflows = {}
 
     async def start(self) -> None:
         if not self.owner:
@@ -232,6 +233,9 @@ class QQAgentLoop:
             return
         payload = frame.get("payload") or {}
         sender = str((payload.get("sender") or {}).get("id", ""))
+        from group_tests import command as group_test_command
+        if await group_test_command(self, payload, sender):
+            return
         from owner_tests import command
         if await command(self, payload, sender):
             return
@@ -273,7 +277,17 @@ class QQAgentLoop:
         log(f"owner inbound queued message_id={message_id} text_len={len(text)}")
 
     async def _on_group(self, payload: dict[str, Any]) -> None:
-        await self.social_workflow.observe(self, payload)
+        from group_tests import GroupTests
+        from group_workflow import GroupWorkflow
+        trial = GroupTests(self.root).current(str(payload.get('chat_id', '')).split(':')[-1])
+        if trial:
+            workflow = self.group_test_workflows.get(trial['id'])
+            if workflow is None:
+                workflow = GroupWorkflow(self.root, trial=trial)
+                self.group_test_workflows[trial['id']] = workflow
+            await workflow.observe(self, payload)
+        else:
+            await self.social_workflow.observe(self, payload)
 
     async def _worker(self) -> None:
         while not self._stop.is_set():
@@ -486,6 +500,8 @@ class QQAgentLoop:
                     "session_id": self.session_id,
                     "active_turn": self.active_turn,
                     "queue": self.queue.qsize(),
+                    "group_tasks": sum(not task.done() for task in self.group_tasks),
+                    "source_mode": not getattr(sys, 'frozen', False),
                     "bot": self.channel.bot,
                     "counts": self.store.counts(),
                 }, ensure_ascii=False).encode()

@@ -46,7 +46,7 @@ class MemoryStore:
     @staticmethod
     def is_test_scope(scope):
         """Isolated persona spaces are read-only for long-term memory."""
-        return str(scope).startswith('space:')
+        return str(scope).startswith('space:') or bool(re.fullmatch(r'chat:group:[0-9]{5,15}:test:[a-f0-9]{32}', str(scope)))
 
     def options(self):
         return {'auto_learning': True, **read_json(self.path.parent / 'memory-options.json')}
@@ -58,7 +58,7 @@ class MemoryStore:
 
     def retry_failed(self):
         with database(self.path) as db:
-            count = db.execute("UPDATE learning_jobs SET status='pending',error='',started=0 WHERE status='failed' AND scope NOT LIKE 'space:%' AND source NOT IN (SELECT source FROM exclusions)").rowcount
+            count = db.execute("UPDATE learning_jobs SET status='pending',error='',started=0 WHERE status='failed' AND scope NOT LIKE 'space:%' AND scope NOT LIKE 'chat:group:%:test:%' AND source NOT IN (SELECT source FROM exclusions)").rowcount
         return {'ok': True, 'count': count}
 
     @staticmethod
@@ -224,7 +224,7 @@ class MemoryStore:
         with database(self.path) as db:
             db.execute('BEGIN IMMEDIATE')
             db.execute("UPDATE learning_jobs SET status='failed',error='学习进程中断；可手动重试' WHERE status='running' AND started<?", (time.time()-600,))
-            row = db.execute("SELECT * FROM learning_jobs WHERE status='pending' AND scope NOT LIKE 'space:%' ORDER BY created LIMIT 1").fetchone()
+            row = db.execute("SELECT * FROM learning_jobs WHERE status='pending' AND scope NOT LIKE 'space:%' AND scope NOT LIKE 'chat:group:%:test:%' ORDER BY created LIMIT 1").fetchone()
             if not row:
                 return False
             db.execute("UPDATE learning_jobs SET status='running',started=? WHERE id=?", (time.time(), row['id']))
