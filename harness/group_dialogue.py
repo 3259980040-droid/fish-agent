@@ -145,6 +145,7 @@ class GroupDialogue:
     def valid(self, job, token=''):
         live=self.jobs.get(job['id'])
         return bool(live and live['state'] in ('generating','sending') and self.enabled()
+            and not self.workflow.policy.cleared_after(self.chat,job['created'])
             and (not token or self.workflow.policy.valid(token)))
 
     async def run(self, task_id, *, token=''):
@@ -159,6 +160,7 @@ class GroupDialogue:
             lock=self.thread_locks.setdefault(job['thread'],asyncio.Lock())
             async with lock, self.slots:
                 if not self.enabled():raise InterruptedError('窗口或群开关已改变')
+                if self.workflow.policy.cleared_after(self.chat,job['created']):raise InterruptedError('群上下文已清理')
                 while not self.workflow.within_budget(self.chat):
                     await asyncio.sleep(1)
                     if not self.enabled():raise InterruptedError('窗口或群开关已改变')

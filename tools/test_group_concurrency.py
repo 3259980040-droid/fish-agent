@@ -103,6 +103,15 @@ class ConcurrentTests(Fixture):
             await self.d.observe(self.payload('无关闲聊','b',sender='444444444',direct=False));release.set();await self.drain()
         asyncio.run(run());self.assertEqual(len(self.sent),1);self.assertEqual(self.sent[0]['reply_to'],'a')
 
+    def test_explicit_context_clear_cancels_inflight_reply(self):
+        self.setup_dialogue();started=asyncio.Event();release=asyncio.Event()
+        async def reply(c,kwargs):started.set();await release.wait();return {'ok':True,'text':'已清理上下文中的旧回答'}
+        self.on_reply=reply
+        async def run():
+            await self.d.observe(self.payload('原问题','a'));await started.wait()
+            self.d.workflow.policy.clear(self.chat);release.set();await self.drain()
+        asyncio.run(run());self.assertEqual(self.sent,[])
+
     def test_three_slots_without_dropping_waiting_people(self):
         self.setup_dialogue();active=0;peak=0;release=asyncio.Event()
         async def reply(c,kwargs):

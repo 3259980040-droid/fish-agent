@@ -27,6 +27,7 @@ class GroupPolicy:
             CREATE TABLE IF NOT EXISTS reservations(token TEXT PRIMARY KEY,chat TEXT,cursor INTEGER,kind TEXT,state TEXT,created REAL,finished REAL DEFAULT 0,UNIQUE(chat,cursor));
             CREATE UNIQUE INDEX IF NOT EXISTS one_live_group ON reservations(chat) WHERE state='active';
             CREATE TABLE IF NOT EXISTS summaries(chat TEXT PRIMARY KEY,cursor INTEGER,text TEXT,created REAL);
+            CREATE TABLE IF NOT EXISTS clears(chat TEXT PRIMARY KEY,created REAL);
             ''')
 
     @staticmethod
@@ -184,4 +185,10 @@ class GroupPolicy:
             db.execute('BEGIN IMMEDIATE'); self._state(db,chat); self._retire(db,chat,'cleared')
             db.execute('DELETE FROM observations WHERE chat=?',(chat,)); db.execute('DELETE FROM summaries WHERE chat=?',(chat,))
             db.execute('UPDATE groups SET handled=cursor WHERE chat=?',(chat,))
+            db.execute('INSERT OR REPLACE INTO clears VALUES(?,?)',(chat,time.time()))
         return {'ok':True}
+
+    def cleared_after(self, chat, created):
+        with database(self.path) as db:
+            row=db.execute('SELECT created FROM clears WHERE chat=?',(chat,)).fetchone()
+        return bool(row and row['created']>=created)
