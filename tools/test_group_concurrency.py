@@ -37,7 +37,7 @@ class ConcurrentTests(Fixture):
         async def run():
             await self.d.observe(self.payload('请反驳一个观点并展开理由','discussion'));await self.drain()
         asyncio.run(run())
-        context=list(self.contexts.values())[-1]
+        context=json.loads(list(self.contexts.values())[-1])['context']
         self.assertIn('20–500',context)
         self.assertIn('200–400',context)
         self.assertIn('不要每次都加动作',context)
@@ -86,7 +86,7 @@ class ConcurrentTests(Fixture):
             if not tasks:return
             await asyncio.wait_for(asyncio.gather(*tasks,return_exceptions=True),4)
 
-    def test_two_people_run_in_parallel_and_ready_reply_quotes_original(self):
+    def test_two_people_reply_in_order_and_reuse_window_session(self):
         self.setup_dialogue();release=asyncio.Event();started=asyncio.Event()
         async def reply(c,kwargs):
             if 'SLOW_A' in c.content[0]['text']:
@@ -97,12 +97,14 @@ class ConcurrentTests(Fixture):
             await self.d.observe(self.payload('SLOW_A','a'))
             await started.wait()
             await self.d.observe(self.payload('FAST_B','b',sender='444444444'))
-            await self.until(lambda:len(self.sent)==1)
-            self.assertEqual(self.sent[0]['reply_to'],'b')
+            await asyncio.sleep(.08)
+            self.assertEqual(len(self.clients),1)
+            self.assertEqual(self.sent,[])
             release.set();await self.drain()
         asyncio.run(run())
-        self.assertEqual([s['reply_to'] for s in self.sent],['b','a'])
-        self.assertEqual(len({c.create_session.return_value for c in self.clients}),2)
+        self.assertEqual([s['reply_to'] for s in self.sent],['a','b'])
+        self.assertEqual(sum(c.create_session.await_count for c in self.clients),1)
+        self.assertEqual(self.clients[0].prompt.await_args.args[0],self.clients[1].prompt.await_args.args[0])
         self.assertEqual(self.tests.contexts.space(self.trial['id'])['session'],'')
 
     def test_followup_plain_text_merges_before_generation_and_deduplicates(self):
@@ -134,7 +136,7 @@ class ConcurrentTests(Fixture):
             self.d.workflow.policy.clear(self.chat);release.set();await self.drain()
         asyncio.run(run());self.assertEqual(self.sent,[])
 
-    def test_three_slots_without_dropping_waiting_people(self):
+    def test_ordered_window_does_not_drop_waiting_people(self):
         self.setup_dialogue();active=0;peak=0;release=asyncio.Event()
         async def reply(c,kwargs):
             nonlocal active,peak
@@ -143,8 +145,9 @@ class ConcurrentTests(Fixture):
         self.on_reply=reply
         async def run():
             for n in range(5):await self.d.observe(self.payload('question'+str(n),str(n),sender=str(333333330+n)))
-            await self.until(lambda:peak==3);release.set();await self.drain()
-        asyncio.run(run());self.assertEqual(peak,3);self.assertEqual(len(self.sent),5)
+            await self.until(lambda:peak==1);release.set();await self.drain()
+        asyncio.run(run());self.assertEqual(peak,1);self.assertEqual(len(self.sent),5)
+        self.assertEqual([s['reply_to'] for s in self.sent],list(map(str,range(5))))
 
     def test_same_person_followup_waits_for_its_thread_and_reads_previous_reply(self):
         self.setup_dialogue();started=asyncio.Event();release=asyncio.Event();calls=[]
@@ -159,7 +162,11 @@ class ConcurrentTests(Fixture):
             await asyncio.sleep(.06);self.assertEqual(len(calls),1)
             release.set();await self.drain()
         asyncio.run(run());self.assertEqual(len(calls),2)
-        self.assertIn('线程回复1',list(self.contexts.values())[-1])
+        self.assertEqual(self.clients[0].prompt.await_args.args[0],self.clients[1].prompt.await_args.args[0])
+        from storage import database
+        with database(self.d.history.path) as db:
+            history=[r['message'] for r in db.execute('SELECT message FROM dialogue_messages WHERE scope=? ORDER BY seq',(self.d.history.key,))]
+        self.assertIn('线程回复1','\n'.join(history))
 
     def test_cancellation_during_send_keeps_uncertain_without_duplicate_notice(self):
         self.setup_dialogue();entered=asyncio.Event()

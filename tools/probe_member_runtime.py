@@ -16,6 +16,7 @@ from secrets_store import SecretStore
 from social_context import SocialContext
 from runtime_adapter import DSHRuntimeAdapter
 from tool_host import bind_session,set_group_context
+from group_history import context_envelope
 
 
 def main():
@@ -46,7 +47,9 @@ def main():
         await client.auth();directory=root/'data/qq/groups/probe';directory.mkdir(parents=True,exist_ok=True)
         session=await client.create_session(cwd=str(directory));bind_session(root,'qq',session,'chat:group:987654321','123456789')
         for mark in ('A','B'):
-            set_group_context(root,session,'EPHEMERAL_PROFILE_'+mark+'_7029')
+            history=[{'role':'user','content':[{'type':'text','text':'INITIAL_USER_SETTING_724'}]},
+                     {'role':'assistant','content':[{'type':'text','text':'EARLIER_ASSISTANT_REPLY_725'}]}] if mark=='A' else []
+            set_group_context(root,session,context_envelope('EPHEMERAL_PROFILE_'+mark+'_7029',history))
             baseline=await client.baseline(session);await client.prompt(session,[{'type':'text','text':'TURN_'+mark+'_6038'}])
             reply=await client.wait_response(session,baseline,timeout=90)
             assert reply.get('ok'),reply
@@ -59,10 +62,12 @@ def main():
         assert 'EPHEMERAL_PROFILE_A_7029' not in last,'old profile persisted in request'
         assert last.count('EPHEMERAL_PROFILE_B_7029')==1,'profile repeated'
         assert 'TURN_A_6038' in last,'ordinary conversation history lost'
+        assert last.count('INITIAL_USER_SETTING_724')==1,'initial ordinary user setting lost or duplicated'
+        assert any(m.get('role')=='assistant' and 'EARLIER_ASSISTANT_REPLY_725' in json.dumps(m) for m in formal[-1]['messages']),'historical assistant role lost'
         from request_inspector import RequestInspector
         captured=RequestInspector(root).latest('qq',session)['payload']['messages']
         assert captured[0]['role']=='system','context displaced the native system prefix'
-        result.update(ok=True,provider_requests=len(received),current_profile_once=True,previous_profile_removed=True,ordinary_history_retained=True)
+        result.update(ok=True,provider_requests=len(received),current_profile_once=True,previous_profile_removed=True,ordinary_history_retained=True,typed_history_restored=True)
     try:asyncio.run(probe())
     finally:
         manager.stop('qq');server.shutdown();server.server_close()

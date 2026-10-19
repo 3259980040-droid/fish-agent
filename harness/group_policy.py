@@ -189,6 +189,10 @@ class GroupPolicy:
         return {'ok':True}
 
     def cleared_after(self, chat, created):
+        cleared = self.cleared_at(chat)
+        return bool(cleared and cleared>=created)
+
+    def cleared_at(self, chat):
         with database(self.path) as db:
             row=db.execute('SELECT created FROM clears WHERE chat=?',(chat,)).fetchone()
-        return bool(row and row['created']>=created)
+        return float(row['created']) if row else 0

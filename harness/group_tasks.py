@@ -1,4 +1,4 @@
-"""Durable group reply jobs; shared facts, independently pinned model turns."""
+"""Durable reply targets and delivery state for shared-window conversations."""
 import json
 import re
 import time
@@ -59,11 +59,9 @@ class GroupTaskStore:
                 active=db.execute("SELECT id FROM jobs WHERE chat=? AND window=? AND sender=? AND state='generating' ORDER BY created DESC LIMIT 1",(chat,window,sender)).fetchone()
                 text=''.join(s.get('text','') for s in payload.get('segments',[]) if s.get('type')=='text').strip()
                 if not consecutive or not active or not re.match(r'^(补充|主要|还有|另外|我指的是|改成|更正)',text):return None
-            task=uuid.uuid4().hex;thread=task
+            task=uuid.uuid4().hex;thread=task;ref=None
             if quote:
                 ref=db.execute('SELECT j.* FROM jobs j LEFT JOIN inputs i ON i.job=j.id WHERE j.chat=? AND j.window=? AND (j.root=? OR j.remote=? OR i.message=?) ORDER BY j.created DESC LIMIT 1',(chat,window,quote,quote,quote)).fetchone()
-            else:
-                ref=db.execute("SELECT * FROM jobs WHERE chat=? AND window=? AND sender=? AND kind='direct' AND updated>? ORDER BY created DESC LIMIT 1",(chat,window,sender,now-120)).fetchone()
             if ref:thread=ref['thread']
             db.execute('INSERT INTO jobs(id,chat,window,revision,sender,root,thread,kind,state,payload,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
                 (task,chat,window,revision,sender,message,thread,kind,'queued',json.dumps([{'payload':payload,'local_id':local_id}],ensure_ascii=False),now,now))
@@ -80,11 +78,6 @@ class GroupTaskStore:
         if set(fields)-{'state','session','response','remote','error'}:raise ValueError('未知任务字段')
         with database(self.path) as db:
             db.execute('UPDATE jobs SET '+','.join(k+'=?' for k in fields)+',updated=? WHERE id=?',(*fields.values(),time.time(),task))
-
-    def history(self, job):
-        with database(self.path) as db:
-            rows=db.execute("SELECT root,sender,payload,response FROM jobs WHERE chat=? AND window=? AND thread=? AND state='sent' AND id<>? ORDER BY created DESC LIMIT 4",(job['chat'],job['window'],job['thread'],job['id'])).fetchall()
-        return [{'message_id':r['root'],'sender':r['sender'],'question':'\n'.join(s.get('text','') for p in json.loads(r['payload']) for s in p['payload'].get('segments',[]) if s.get('type')=='text')[:2000],'reply':r['response'][:1200]} for r in reversed(rows)]
 
     def recent_replies(self, chat, window):
         with database(self.path) as db:

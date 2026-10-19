@@ -547,7 +547,7 @@ class QQAgentLoop:
                     "source_mode": not getattr(sys, 'frozen', False),
                     "language_layer_version": 1,
                     "group_reply_style_version": 2,
-                    "group_pipeline_version": 3,
+                    "group_pipeline_version": 4,
                     "channel_epoch": self.channel.epoch,
                     "channel_seq": self.channel.last_seq,
                     "event_queue": self.channel._events.qsize(),

@@ -14,7 +14,7 @@ class DSHRuntimeAdapter:
             raise ValueError("未知角色")
         self.root, self.role, self.manager = root, role, manager
 
-    def connect(self, cancelled=None, *, require_isolation=False, require_group_context=False):
+    def connect(self, cancelled=None, *, require_isolation=False, require_group_context=False, require_group_history=False):
         from tool_host import ensure_host
         ensure_host(self.root)
         port = self.manager.config.runtime_port(self.role)
@@ -47,6 +47,8 @@ class DSHRuntimeAdapter:
                     raise PermissionError('当前角色仍使用不支持独立窗口隔离的运行时；请停止并重新启动该角色')
                 if require_group_context and data.get('social_roster_version') != 1:
                     raise PermissionError('群资料服务需要新版运行时，请停止并重新启动 QQ 角色')
+                if require_group_history and data.get('group_history_version') != 1:
+                    raise PermissionError('窗口连续对话需要更新 QQ 运行时后生效')
                 # Reuse an authenticated existing role process, with a separate
                 # session per conversation. Never stop another client's runtime.
                 return DSHWebClient(data["url"])

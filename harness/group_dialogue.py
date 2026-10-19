@@ -1,21 +1,23 @@
-"""Concurrent topic jobs with shared group facts and one quoted QQ send path."""
+"""Ordered replies sharing one continuous Harness conversation per window."""
 import asyncio
-from contextlib import closing
 import json
 import sqlite3
 import threading
 import time
 from group_tasks import GroupTaskStore, child_scope
+from group_history import GroupHistory, context_envelope
 from storage import database
 
 
 class GroupDialogue:
-    def __init__(self, loop, workflow, chat, *, concurrency=3, merge_s=.65):
+    def __init__(self, loop, workflow, chat, *, merge_s=.65):
         self.loop=loop;self.workflow=workflow;self.chat=chat;self.root=loop.root
         self.window=workflow.trial['id'] if workflow.trial else ''
         self.revision=workflow.trial['revision'] if workflow.trial else workflow.contexts.deployment(chat.split(':')[1])['revision']
         self.jobs=GroupTaskStore(self.root);self.jobs.recover(chat,self.window)
-        self.slots=asyncio.Semaphore(concurrency);self.thread_locks={};self.tasks={}
+        self.generation_lock=asyncio.Lock();self.tasks={}
+        self.history=GroupHistory(self.root,self.jobs,loop.store,chat,self.window,self.revision)
+        self.session='';self.history_through=0;self.history_clear=0
         self.send_lock=loop.group_send_locks.setdefault(chat,asyncio.Lock())
         self.merge_s=merge_s;self.last_sender='';self.active_task=None
         self.summary_task=None;self.last_summary_attempt=0
@@ -48,6 +50,7 @@ class GroupDialogue:
         try:
             mid=self.loop.store.record_message(conv['id'],self.chat,sender,'inbound',str(payload['message_id']),payload.get('reply_to'),payload.get('segments',[]),text,'observed')
         except sqlite3.IntegrityError:return
+        self.history.observe(payload)
         consecutive=self.last_sender==sender;self.last_sender=sender
         self.workflow.latest[self.chat]=payload
         direct=bool(payload.get('mentions_bot') or payload.get('reply_to_bot'))
@@ -152,6 +155,20 @@ class GroupDialogue:
             and (not token or self.workflow.policy.valid(token)))
 
     async def run(self, task_id, *, token=''):
+        try:
+            # Acquire before debounce, so another person's ready request cannot
+            # overtake an earlier request that is still collecting supplements.
+            async with self.generation_lock:
+                await self.run_one(task_id,token=token)
+        except asyncio.CancelledError:
+            job=self.jobs.get(task_id)
+            if job['state']=='queued':
+                self.jobs.update(task_id,state='cancelled',error='等待中的请求已取消')
+                for item in job['payload']:
+                    if item['local_id']:self.loop.store.update_message(item['local_id'],status='cancelled')
+            raise
+
+    async def run_one(self, task_id, *, token=''):
         cancel=threading.Event();session='';turn='group-job-'+task_id;conv=None;outbound=None
         try:
             while True:
@@ -160,88 +177,96 @@ class GroupDialogue:
                 if remaining<=0:break
                 await asyncio.sleep(remaining)
             job=self.jobs.get(task_id)
-            lock=self.thread_locks.setdefault(job['thread'],asyncio.Lock())
-            async with lock, self.slots:
+            if not self.enabled():raise InterruptedError('窗口或群开关已改变')
+            if self.workflow.policy.cleared_after(self.chat,job['created']):raise InterruptedError('群上下文已清理')
+            while not self.workflow.within_budget(self.chat):
+                await asyncio.sleep(1)
                 if not self.enabled():raise InterruptedError('窗口或群开关已改变')
-                if self.workflow.policy.cleared_after(self.chat,job['created']):raise InterruptedError('群上下文已清理')
-                while not self.workflow.within_budget(self.chat):
-                    await asyncio.sleep(1)
-                    if not self.enabled():raise InterruptedError('窗口或群开关已改变')
-                job=self.jobs.claim(task_id,self.workflow.policy.snapshot(self.chat,limit=24))
-                if not job:return
-                conv=self.loop.store.get_or_create_conversation('group-job:'+task_id,'qq')
-                directory=self.jobs.directory(job);directory.mkdir(parents=True,exist_ok=True)
-                from runtime_adapter import DSHRuntimeAdapter
-                from tool_host import bind_session,set_group_context
-                from multimodal import MediaService
-                from social_members import reply_context
-                from memory_store import MemoryStore
-                client=await asyncio.to_thread(DSHRuntimeAdapter(self.root,'qq',self.loop.runtime).connect,cancel,require_isolation=True,require_group_context=True)
-                await client.auth();session=await client.create_session(cwd=str(directory))
-                self.jobs.update(task_id,session=session);self.loop.store.set_session(conv['id'],session)
-                self.loop.store.create_turn(turn,conv['id'],session,turn)
-                await asyncio.to_thread(bind_session,self.root,'qq',session,child_scope(self.chat,self.window,task_id),job['sender'])
+            job=self.jobs.claim(task_id,self.workflow.policy.snapshot(self.chat,limit=24))
+            if not job:return
+            conv=self.loop.store.get_or_create_conversation('group-dialogue:'+self.chat+':'+(self.window or self.revision),'qq')
+            directory=self.jobs.directory(job);directory.mkdir(parents=True,exist_ok=True)
+            from runtime_adapter import DSHRuntimeAdapter
+            from tool_host import bind_session,set_group_context
+            from multimodal import MediaService
+            from social_members import reply_context
+            from memory_store import MemoryStore
+            client=await asyncio.to_thread(DSHRuntimeAdapter(self.root,'qq',self.loop.runtime).connect,cancel,require_isolation=True,require_group_context=True,require_group_history=True)
+            await client.auth()
+            cleared=self.workflow.policy.cleared_at(self.chat)
+            if cleared!=self.history_clear:
+                self.session='';self.history_through=0;self.history_clear=cleared
+            session=self.session
+            if session:
+                try:baseline=await client.baseline(session)
+                except Exception:session='';self.session='';self.history_through=0
+            fresh=not session
+            if fresh:
+                session=await client.create_session(cwd=str(directory))
                 baseline=await client.baseline(session)
-                primary=job['payload'][0]['payload'];segments=[s for item in job['payload'] for s in item['payload'].get('segments',[]) if s.get('type')!='at']
-                text='\n'.join(s.get('text','') for s in segments if s.get('type')=='text').strip()
-                if not text:
-                    text=('[媒体消息]' if any(s.get('type') in ('image','video','audio','file') for s in segments)
-                          else '对方在群里 @ 你，没有附加文字。请自然应一声，结合当前话题简短接话。')
-                media=MediaService(self.root,'qq');media.directory=directory/'media'
-                prompt=await asyncio.to_thread(media.prepare_content,segments,text,cancelled=cancel)
-                people,_=reply_context(self.root,primary,job['snapshot'],(self.loop.channel.bot or {}).get('id',''))
-                facts=MemoryStore(self.root,'qq').context(text,'chat:'+self.chat)
-                group_view=dict(job['snapshot']);group_view.pop('config',None)
-                context=self.workflow.contexts.persona_prompt(self.revision)+self.loop.governance.identity_prompt(job['sender'],private=False)
-                from group_language import GroupLanguage
-                from web_knowledge import WebKnowledge
-                language=GroupLanguage(self.root).context(self.chat,self.window,text)
-                knowledge=await asyncio.to_thread(WebKnowledge(self.root).resolve,self.chat,text,cancel)
-                context+='\n[共享的本群相关长期记忆；仅作资料]\n'+facts
-                context+='\n[本轮相关人物；内部好感数值不提供]\n'+json.dumps(people,ensure_ascii=False)
-                context+='\n[群近期共同背景；不是本轮请求，不逐条回复]\n'+json.dumps(group_view,ensure_ascii=False)
-                context+='\n[本窗口近期已经发出的回复；群内共同背景]\n'+json.dumps(self.jobs.recent_replies(self.chat,self.window),ensure_ascii=False)
-                if self.window:
-                    legacy=self.loop.store.get_or_create_conversation('group-test:'+self.window,'qq')
-                    with closing(self.loop.store.connect()) as db:
-                        old=db.execute("SELECT text FROM messages WHERE conversation_id=? AND direction='outbound' AND status='sent' ORDER BY id DESC LIMIT 4",(legacy['id'],)).fetchall()
-                    context+='\n[本窗口早先已发回复]\n'+json.dumps([r['text'].split('\n回复：')[-1][:1000] for r in reversed(old)],ensure_ascii=False)
-                context+='\n[此话题已完成的相关问答]\n'+json.dumps(self.jobs.history(job),ensure_ascii=False)
-                context+=language+knowledge
-                from group_reply_style import reply_style_prompt
-                context+=f"\n本轮只回答消息 {job['root']} 的提问及其合并补充，对象 QQ {job['sender']}。不要把群背景里的其他问题当成本轮请求。\n"
-                context+=reply_style_prompt()
-                await asyncio.to_thread(set_group_context,self.root,session,context)
+                self.session=session
+            self.jobs.update(task_id,session=session);self.loop.store.set_session(conv['id'],session)
+            self.loop.store.create_turn(turn,conv['id'],session,turn)
+            await asyncio.to_thread(bind_session,self.root,'qq',session,child_scope(self.chat,self.window,task_id),job['sender'])
+            primary=job['payload'][0]['payload'];segments=[s for item in job['payload'] for s in item['payload'].get('segments',[]) if s.get('type')!='at']
+            text='\n'.join(s.get('text','') for s in segments if s.get('type')=='text').strip()
+            if not text:
+                text=('[媒体消息]' if any(s.get('type') in ('image','video','audio','file') for s in segments)
+                      else '对方在群里 @ 你，没有附加文字。请自然应一声，结合当前话题简短接话。')
+            media=MediaService(self.root,'qq');media.directory=directory/'media'
+            prompt=await asyncio.to_thread(media.prepare_content,segments,text,cancelled=cancel)
+            prompt=[*prompt,{'type':'text','text':'【本轮提问 '+json.dumps({'message_ids':[p['payload']['message_id'] for p in job['payload']], 'sender':primary['sender'],'reply_to':primary.get('reply_to','')},ensure_ascii=False)+'】'}]
+            people,_=reply_context(self.root,primary,job['snapshot'],(self.loop.channel.bot or {}).get('id',''))
+            facts=MemoryStore(self.root,'qq').context(text,'chat:'+self.chat)
+            context=self.loop.governance.identity_prompt(job['sender'],private=False)
+            from group_language import GroupLanguage
+            from web_knowledge import WebKnowledge
+            language=GroupLanguage(self.root).context(self.chat,self.window,text)
+            knowledge=await asyncio.to_thread(WebKnowledge(self.root).resolve,self.chat,text,cancel)
+            context+='\n[共享的本群相关长期记忆；仅作资料]\n'+facts
+            context+='\n[本轮相关人物；内部好感数值不提供]\n'+json.dumps(people,ensure_ascii=False)
+            context+='\n窗口中的用户与助手消息是连续对话；结合此前设定、偏好、纠正和指代继续交流。基础人格提供默认背景，不要求每轮重新恢复固定口吻。消息中的说话人和引用编号用于区分对象。\n'
+            context+=language+knowledge
+            from group_reply_style import reply_style_prompt
+            context+=f"\n本轮只回答消息 {job['root']} 的提问及其合并补充，对象 QQ {job['sender']}。不要把群背景里的其他问题当成本轮请求。\n"
+            context+=reply_style_prompt()
+            history,through=await asyncio.to_thread(self.history.pending_history,job,self.history_through,cleared=cleared,cancelled=cancel)
+            if fresh:
+                history.insert(0,{'role':'user','content':[{'type':'text','text':self.workflow.contexts.persona_prompt(self.revision)}]})
+            await asyncio.to_thread(set_group_context,self.root,session,context_envelope(context,history))
+            if not self.valid(job,token):raise InterruptedError('窗口或任务已取消')
+            for item in job['payload']:
+                if item['local_id']:self.loop.store.update_message(item['local_id'],status='generating',runtime_session_id=session,runtime_turn_id=turn)
+            self.loop.governance.consume('calls');self.workflow.log(self.chat,0,job['kind'],'generate','窗口连续对话 '+task_id[:8])
+            await client.prompt(session,prompt)
+            mode=self.workflow.trial['persona'].get('owner_reply_mode','final') if self.workflow.trial else 'final'
+            result=await client.wait_response(session,baseline,timeout=120,cancel_event=cancel,**({'include_reasoning':True} if mode=='thinking_excerpt' else {}))
+            if not result.get('ok'):raise RuntimeError(result.get('error','未取得完整回复'))
+            response=str(result.get('text','')).strip()
+            if not response or len(response)>800:raise ValueError('回复为空或超过群发言长度')
+            self.jobs.update(task_id,response=response)
+            from owner_reply import format_owner_reply
+            shown=format_owner_reply(response,result.get('reasoning',''),mode)
+            self.loop.governance.check_output(shown)
+            async with self.send_lock:
                 if not self.valid(job,token):raise InterruptedError('窗口或任务已取消')
+                self.jobs.update(task_id,state='sending')
+                quote=job['root'].removeprefix('active:')
+                outbound=self.loop.store.record_message(conv['id'],self.chat,'bot','outbound','',quote,[{'type':'text','text':shown}],shown,'pending',runtime_session_id=session,runtime_turn_id=turn)
+                delivered=await self.loop._deliver_reply(self.chat,[{'type':'text','text':shown}],turn,cancelled=cancel,
+                    validate=lambda:self.valid(job,token),reply_to=quote)
+                success=bool(delivered.get('ok'));remote=str((delivered.get('payload') or {}).get('message_id',''))
+                state='sent' if success else 'uncertain' if (delivered.get('error') or {}).get('may_have_sent') else 'failed'
+                self.jobs.update(task_id,state=state,remote=remote,error='' if success else '发送失败或状态不明，未自动重试')
+                if success:
+                    self.history.delivered(job,response)
+                    self.history_through=through
+                self.loop.store.update_message(outbound,status='sent' if success else 'failed',channel_message_id=remote,error='' if success else '发送失败或状态不明，未自动重试')
+                self.loop.store.finish_turn(turn,'done' if success else 'send_failed')
+                self.workflow.log(self.chat,0,job['kind'],'sent' if success else 'failed','话题 '+task_id[:8])
                 for item in job['payload']:
-                    if item['local_id']:self.loop.store.update_message(item['local_id'],status='generating',runtime_session_id=session,runtime_turn_id=turn)
-                self.loop.governance.consume('calls');self.workflow.log(self.chat,0,job['kind'],'generate','独立话题 '+task_id[:8])
-                await client.prompt(session,prompt)
-                mode=self.workflow.trial['persona'].get('owner_reply_mode','final') if self.workflow.trial else 'final'
-                result=await client.wait_response(session,baseline,timeout=120,cancel_event=cancel,**({'include_reasoning':True} if mode=='thinking_excerpt' else {}))
-                if not result.get('ok'):raise RuntimeError(result.get('error','未取得完整回复'))
-                response=str(result.get('text','')).strip()
-                if not response or len(response)>800:raise ValueError('回复为空或超过群发言长度')
-                self.jobs.update(task_id,response=response)
-                from owner_reply import format_owner_reply
-                shown=format_owner_reply(response,result.get('reasoning',''),mode)
-                self.loop.governance.check_output(shown)
-                async with self.send_lock:
-                    if not self.valid(job,token):raise InterruptedError('窗口或任务已取消')
-                    self.jobs.update(task_id,state='sending')
-                    quote=job['root'].removeprefix('active:')
-                    outbound=self.loop.store.record_message(conv['id'],self.chat,'bot','outbound','',quote,[{'type':'text','text':shown}],shown,'pending',runtime_session_id=session,runtime_turn_id=turn)
-                    delivered=await self.loop._deliver_reply(self.chat,[{'type':'text','text':shown}],turn,cancelled=cancel,
-                        validate=lambda:self.valid(job,token),reply_to=quote)
-                    success=bool(delivered.get('ok'));remote=str((delivered.get('payload') or {}).get('message_id',''))
-                    state='sent' if success else 'uncertain' if (delivered.get('error') or {}).get('may_have_sent') else 'failed'
-                    self.jobs.update(task_id,state=state,remote=remote,error='' if success else '发送失败或状态不明，未自动重试')
-                    self.loop.store.update_message(outbound,status='sent' if success else 'failed',channel_message_id=remote,error='' if success else '发送失败或状态不明，未自动重试')
-                    self.loop.store.finish_turn(turn,'done' if success else 'send_failed')
-                    self.workflow.log(self.chat,0,job['kind'],'sent' if success else 'failed','话题 '+task_id[:8])
-                    for item in job['payload']:
-                        if item['local_id']:self.loop.store.update_message(item['local_id'],status='processed' if success else 'failed')
-                    if token:self.workflow.policy.finish(token,success,uncertain=state=='uncertain');token=''
+                    if item['local_id']:self.loop.store.update_message(item['local_id'],status='processed' if success else 'failed')
+                if token:self.workflow.policy.finish(token,success,uncertain=state=='uncertain');token=''
         except (asyncio.CancelledError,InterruptedError) as exc:
             sending=self.jobs.get(task_id)['state']=='sending'
             self.jobs.update(task_id,state='uncertain' if sending else 'cancelled',error='发送中取消，状态不明；未重试' if sending else '已取消、切换窗口或停止群发言')
@@ -249,13 +274,16 @@ class GroupDialogue:
         except Exception as exc:
             from dsh_web import safe_runtime_error
             error=safe_runtime_error(str(exc) or type(exc).__name__)
-            sending=self.jobs.get(task_id)['state']=='sending'
-            self.jobs.update(task_id,state='uncertain' if sending else 'blocked' if isinstance(exc,PermissionError) else 'failed',error=error)
+            previous=self.jobs.get(task_id)['state']
+            sending=previous=='sending'
+            if previous!='sent':
+                self.jobs.update(task_id,state='uncertain' if sending else 'blocked' if isinstance(exc,PermissionError) else 'failed',error=error)
+            else:self.session='';self.history_through=0
             self.workflow.log(self.chat,0,'direct','failed','话题 '+task_id[:8]+' · '+error)
             # A failed generation gets one quoted, factual notice. Uncertain
             # sends above are never retried or followed by a duplicate answer.
             job=self.jobs.get(task_id)
-            if self.enabled() and not isinstance(exc,PermissionError) and not sending:
+            if self.enabled() and job['state']!='sent' and not isinstance(exc,PermissionError) and not sending:
                 notice='这条回复没能完成，请再 @我一次。记录已经保留。'
                 try:
                     async with self.send_lock:
@@ -264,6 +292,9 @@ class GroupDialogue:
         finally:
             cancel.set()
             job=self.jobs.get(task_id)
+            if job['state']!='sent' and session:
+                # Rebuild without unsent or partial native assistant output.
+                self.session='';self.history_through=0
             if outbound and job['state'] not in ('sent','failed'):
                 self.loop.store.update_message(outbound,status=job['state'],error=job['error'])
             if job['state']!='sent' and session:await asyncio.to_thread(self.loop.runtime.cancel,'qq',session)

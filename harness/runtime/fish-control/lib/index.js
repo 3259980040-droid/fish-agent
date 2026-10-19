@@ -150,6 +150,36 @@ export function replaceGroupContext(session, text) {
   }
 }
 
+export function decodeDialogueContext(text) {
+  if (!String(text).startsWith('{')) return {context: text, history: []}
+  let value
+  try { value = JSON.parse(text) } catch { return {context: text, history: []} }
+  if (value.fish_dialogue_version !== 1) return {context: text, history: []}
+  if (typeof value.context !== 'string' || !Array.isArray(value.history)) throw new Error('窗口历史格式错误')
+  for (const message of value.history) {
+    if (!['user', 'assistant'].includes(message.role) || !Array.isArray(message.content)
+        || message.content.some(block => block.type !== 'text' || typeof block.text !== 'string')) throw new Error('窗口历史消息格式错误')
+  }
+  return value
+}
+
+// Restore ordinary messages into Harness's own surface. Reserve its empty
+// system head first; the loop will replace it with the assembled prompt.
+// This also lets native compaction see history before deriving the next call.
+export function appendDialogueHistory(session, messages, turn = 1, step = 1) {
+  if (!messages.length) return
+  if (!session.surface.nodes.length) {
+    session.append('system/message', {turn, step, message: {id: randomUUID(), role: 'system',
+      content: [], source: {kind: 'system-prompt'}}}, {surfaceOp: 'append'})
+  }
+  for (const item of messages) {
+    const message = {id: randomUUID(), role: item.role, content: item.content,
+      source: item.role === 'assistant' ? {kind: 'model', provider: 'fish-history', model: 'delivered'} : {kind: 'fish-dialogue-history'}}
+    if (item.role === 'assistant') session.append('assistant/message', {turn, step, stream: [], message}, {surfaceOp: 'append'})
+    else session.append('user/message', message, {surfaceOp: 'append'})
+  }
+}
+
 export function renderToolResult(_args, value) {
   const images = value && typeof value === 'object' && Array.isArray(value.fish_images) ? value.fish_images : []
   const textValue = value && typeof value === 'object' && !Array.isArray(value) ? {...value} : value
@@ -256,6 +286,7 @@ export function apply(ctx, config = {}) {
   const role = process.env.FISH_AGENT_ID
   if (!root || !['qq', 'research'].includes(role)) throw new Error('Fish governance requires an explicit root and role')
   const counts = new WeakMap()
+  const historyBatches = new WeakMap()
   const token = process.env[config.tokenEnv || 'FISH_CONTROL_TOKEN'] || ''
   const toolToken = createHmac('sha256', token).update('fish-tools:' + role).digest('hex')
   const rawConfig = JSON.parse(readFileSync(resolve(root, 'harness/agents.json'), 'utf8'))
@@ -330,7 +361,7 @@ export function apply(ctx, config = {}) {
     await refreshTools()
     return next()
   })
-  ctx.on('agent/pre-step', async ({agent}, next) => {
+  ctx.on('agent/pre-step', async ({agent, turn, step}, next) => {
     let identities = {}
     try { identities = JSON.parse(readFileSync(resolve(root, 'harness/runtime/' + role + '.identities.json'), 'utf8')) }
     catch (error) { if (error.code !== 'ENOENT') throw error }
@@ -339,7 +370,17 @@ export function apply(ctx, config = {}) {
     const isolated = role === 'qq' && identity?.scope?.startsWith('space:')
     let personaState
     // Clear stale profiles BEFORE native compaction reads history.
-    if (group) replaceGroupContext(agent.session, '')
+    let groupContext
+    if (group) {
+      replaceGroupContext(agent.session, '')
+      const context = await host('/social/context', {session: String(agent.id)})
+      groupContext = decodeDialogueContext(context.text)
+      const batch = createHash('sha256').update(context.text).digest('hex')
+      if (historyBatches.get(agent) !== batch) {
+        appendDialogueHistory(agent.session, groupContext.history, turn, step)
+        historyBatches.set(agent, batch)
+      }
+    }
     // Isolated sessions get one durable persona context node before request
     // derivation. It is deliberately not prepended to every user turn.
     if (isolated) {
@@ -353,12 +394,11 @@ export function apply(ctx, config = {}) {
     }
     let decision = acceptPersonaContext(await next(), personaState)
     if (group && decision.kind === 'enter') {
-      const context = await host('/social/context', {session: String(agent.id)})
       const exists = [...agent.session.surface.nodes].some(seq => agent.session.eventAt(seq)?.data?.source?.kind === 'fish-group-context')
-      if (exists) replaceGroupContext(agent.session, context.text)
+      if (exists) replaceGroupContext(agent.session, groupContext.context)
       // The initial system message is committed by the loop before the accepted
       // batch. Entering first context through that batch preserves its node 0.
-      else decision = {...decision, messages: [groupContextMessage(context.text), ...decision.messages]}
+      else decision = {...decision, messages: [groupContextMessage(groupContext.context), ...decision.messages]}
     }
     return independentMessages(decision, identity?.isolated || !!identity?.persona_revision)
   }, {prepend: true})
@@ -457,7 +497,7 @@ export function apply(ctx, config = {}) {
         }
         const url = new URL(req.url, 'http://127.0.0.1')
         if (url.pathname === '/fish/connect') {
-          sendJson(res, 200, { ok: true, role, root_id: rootId, guard_active: true, control_version: 3, social_context_version: 1, social_roster_version: 1, url: ctx.connection.authenticatedUrl(ctx.webServer.getOrigin() + '/') })
+          sendJson(res, 200, { ok: true, role, root_id: rootId, guard_active: true, control_version: 3, social_context_version: 1, social_roster_version: 1, group_history_version: 1, url: ctx.connection.authenticatedUrl(ctx.webServer.getOrigin() + '/') })
           return
         }
         if (url.pathname === '/fish/status') {
