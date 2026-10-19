@@ -23,6 +23,15 @@ from dsh_web import DSHWebClient
 
 
 class ConcurrentTests(Fixture):
+    def test_mention_without_words_is_a_valid_prompt(self):
+        self.setup_dialogue()
+        async def run():
+            await self.d.observe(self.payload(' \n ','blank-at'));await self.drain()
+        asyncio.run(run())
+        self.assertEqual(len(self.sent),1)
+        self.assertIn('没有附加文字',self.clients[0].content[0]['text'])
+        self.assertEqual(self.sent[0]['reply_to'],'blank-at')
+
     def setup_dialogue(self,mode='final'):
         self.tests=GroupTests(self.root)
         p=self.tests.contexts.save_persona('qq','same fish','同一个人格',owner_reply_mode=mode)

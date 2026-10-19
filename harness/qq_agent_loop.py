@@ -32,19 +32,24 @@ def log(message: str) -> None:
 
 
 class ChannelClient:
-    def __init__(self, url: str, token: str, on_event):
+    def __init__(self, url: str, token: str, on_event, checkpoint=None):
         self.url = url
         self.token = token
         self.on_event = on_event
         self.ws = None
         self.epoch = None
         self.last_seq = 0
+        self.checkpoint = Path(checkpoint) if checkpoint else None
+        if self.checkpoint and self.checkpoint.exists():
+            saved=json.loads(self.checkpoint.read_text(encoding='utf-8'))
+            self.epoch=saved.get('epoch');self.last_seq=int(saved.get('seq',0))
         self.bot = None
         self.futures: dict[str, asyncio.Future] = {}
         self._seq = 0
         self._task: asyncio.Task | None = None
         self._event_task: asyncio.Task | None = None
         self._events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._processing = False
         self._stop = asyncio.Event()
 
     async def start(self) -> None:
@@ -66,13 +71,18 @@ class ChannelClient:
         # An event handler may itself send a message and await its receipt.
         while not self._stop.is_set():
             frame = await self._events.get()
+            self._processing = True
             try:
                 await self.on_event(frame)
+                if self.checkpoint and frame.get('epoch') and frame.get('seq'):
+                    from storage import write_json
+                    write_json(self.checkpoint,{'epoch':frame['epoch'],'seq':int(frame['seq'])})
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 log(f"fish-qq event failed: {type(exc).__name__}: {exc}")
             finally:
+                self._processing = False
                 self._events.task_done()
 
     async def _run(self) -> None:
@@ -152,6 +162,7 @@ class QQAgentLoop:
             os.environ.get("FISH_QQ_URL", "ws://127.0.0.1:3101/ws"),
             os.environ.get("FISH_QQ_TOKEN", ""),
             self.on_event,
+            checkpoint=root/'harness/runtime/qq-channel-cursor.json',
         )
         self.dsh: DSHWebClient | None = None
         self.session_id: str | None = None
@@ -180,6 +191,7 @@ class QQAgentLoop:
         self.group_test_workflows = {}
         self.group_dialogues = {}
         self.group_send_locks = {}
+        self.maintenance_task = None
 
     async def start(self) -> None:
         if not self.owner:
@@ -188,6 +200,7 @@ class QQAgentLoop:
         self.session_id = self.conversation.get("runtime_session_id")
         await self.channel.start()
         self.worker = asyncio.create_task(self._worker(), name="qq-agent-worker")
+        self.maintenance_task = asyncio.create_task(self._maintenance(), name='qq-local-data-maintenance')
         self.control_server = await asyncio.start_server(self._control, "127.0.0.1", 3102)
         try:
             await self.ensure_runtime()
@@ -198,6 +211,9 @@ class QQAgentLoop:
     async def stop(self) -> None:
         self._stop.set()
         self.cancel_event.set()
+        if self.maintenance_task:
+            self.maintenance_task.cancel()
+            await asyncio.gather(self.maintenance_task,return_exceptions=True)
         tasks = list(self.group_tasks)
         for task in tasks: task.cancel()
         if tasks: await asyncio.gather(*tasks, return_exceptions=True)
@@ -212,6 +228,17 @@ class QQAgentLoop:
                 pass
         await self.channel.stop()
         self.runtime.stop(self.agent_id)
+
+    async def _maintenance(self):
+        from data_retention import DataRetention
+        from group_language import GroupLanguage
+        GroupLanguage(self.root)
+        while not self._stop.is_set():
+            try:
+                await asyncio.to_thread(DataRetention(self.root).run)
+            except Exception as exc:
+                self.governance.audit('data_maintenance_failed',type(exc).__name__)
+            await asyncio.sleep(300)
 
     async def ensure_runtime(self) -> None:
         from runtime_adapter import DSHRuntimeAdapter
@@ -235,6 +262,8 @@ class QQAgentLoop:
             return
         payload = frame.get("payload") or {}
         sender = str((payload.get("sender") or {}).get("id", ""))
+        from group_language import command as language_command
+        if await language_command(self,payload,sender):return
         from group_tests import command as group_test_command
         if await group_test_command(self, payload, sender):
             return
@@ -516,6 +545,11 @@ class QQAgentLoop:
                     "queue": self.queue.qsize(),
                     "group_tasks": sum(not task.done() for task in self.group_tasks),
                     "source_mode": not getattr(sys, 'frozen', False),
+                    "language_layer_version": 1,
+                    "channel_epoch": self.channel.epoch,
+                    "channel_seq": self.channel.last_seq,
+                    "event_queue": self.channel._events.qsize(),
+                    "event_busy": self.channel._processing,
                     "runtime_follow_max_bytes": getattr(self.dsh, 'follow_max_bytes', None),
                     "group_topic_jobs": sum(len(d.tasks) for d in self.group_dialogues.values()),
                     "bot": self.channel.bot,
@@ -545,11 +579,31 @@ async def main_async() -> int:
     root = Path(os.environ.get("FISH_HARNESS_HOME", str(Path(__file__).resolve().parent.parent)))
     loop = QQAgentLoop(root)
     await loop.start()
+    async def watch_desktop():
+        parent=int(os.environ.get('FISH_LOOP_PARENT_PID','0'))
+        if not parent or os.name!='nt':return
+        import ctypes
+        from ctypes import wintypes
+        kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+        kernel.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD]
+        kernel.OpenProcess.restype=wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes=[wintypes.HANDLE,wintypes.DWORD]
+        kernel.CloseHandle.argtypes=[wintypes.HANDLE]
+        handle=kernel.OpenProcess(0x00100000,False,parent)
+        if not handle:loop._stop.set();return
+        try:
+            while not loop._stop.is_set():
+                if kernel.WaitForSingleObject(handle,0)!=258:loop._stop.set();return
+                await asyncio.sleep(2)
+        finally:kernel.CloseHandle(handle)
+    desktop_watch=asyncio.create_task(watch_desktop())
     try:
         await loop._stop.wait()
     except KeyboardInterrupt:
         pass
     finally:
+        desktop_watch.cancel()
+        await asyncio.gather(desktop_watch,return_exceptions=True)
         await loop.stop()
     return 0
 
