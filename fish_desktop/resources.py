@@ -40,9 +40,10 @@ class MemoryPage(BasePage):
         controls = QHBoxLayout()
         self.auto_learning = QCheckBox('从新聊天中自动学习长期记忆')
         self.learning_note = _label('', 'Caption'); self.learning_note.setWordWrap(True)
+        self.test_note = _label('', 'Caption'); self.test_note.setWordWrap(True)
         apply_learning = _button('保存学习开关'); retry_learning = _button('重试失败记录')
         controls.addWidget(self.auto_learning); controls.addWidget(apply_learning); controls.addWidget(retry_learning); controls.addStretch()
-        layout.addLayout(controls); layout.addWidget(self.learning_note)
+        layout.addLayout(controls); layout.addWidget(self.learning_note); layout.addWidget(self.test_note)
         apply_learning.clicked.connect(self._learning_save); retry_learning.clicked.connect(self._learning_retry)
         split = QSplitter(Qt.Horizontal)
         left = Card('长期记忆')
@@ -75,8 +76,10 @@ class MemoryPage(BasePage):
         self.search_btn.clicked.connect(self.refresh); self.query.returnPressed.connect(self.refresh)
         self.list.currentRowChanged.connect(self._select)
         self.save_btn.clicked.connect(self._save); self.delete_btn.clicked.connect(self._delete)
+        self.scope.currentIndexChanged.connect(self._update_scope_guard)
         self.review = QCheckBox('显示待确认候选'); top.addWidget(self.review); self.review.toggled.connect(self.refresh)
         self.confirm_btn = _button('确认所选候选'); row.insertWidget(2,self.confirm_btn); self.confirm_btn.clicked.connect(self._confirm)
+        self._update_scope_guard()
 
     def store(self):
         from memory_store import MemoryStore
@@ -127,16 +130,34 @@ class MemoryPage(BasePage):
         if target < 0:
             self.scope.addItem(row['scope'], row['scope']); target = self.scope.count()-1
         self.scope.setCurrentIndex(target)
+        self._update_scope_guard()
         self.subject.setText(row.get('subject','')); self.aliases.setText('，'.join(row.get('aliases',[])))
         self.memory_kind.setCurrentIndex(max(0,self.memory_kind.findData(row.get('kind','fact')))); self.expires.setText(str(row.get('expires',0)))
         self.source.setPlainText(f"来源：{row['source']}\n证据类别：{row.get('evidence','manual')} · 状态：{row.get('status','active')}\n置信度：{row['confidence']:.2f}\n\n{row['source_text']}")
 
+    def _is_test_scope(self):
+        return str(self.scope.currentData() or '').startswith('space:')
+
+    def _update_scope_guard(self):
+        readonly = self._is_test_scope()
+        self.save_btn.setEnabled(not readonly)
+        self.confirm_btn.setEnabled(not readonly)
+        self.delete_btn.setEnabled(not readonly and bool(self.mid))
+        self.test_note.setText(
+            '独立测试空间：长期记忆只读。这里只显示已有测试资料，不会写入、确认、删除或重学正式记忆。'
+            if readonly else ''
+        )
+
     def _new(self):
         self.mid = ''; self.list.clearSelection(); self.text.clear(); self.category.setText('偏好'); self.scope.setCurrentIndex(0); self.source.clear()
         self.subject.clear(); self.aliases.clear(); self.expires.setText('0'); self.memory_kind.setCurrentIndex(0)
+        self._update_scope_guard()
 
     def _save(self):
         if self.loading: return
+        if self._is_test_scope():
+            self._toast('独立测试空间长期记忆只读，不能写入正式记忆库。')
+            return
         store, mid, text, category, scope = self.store(), self.mid, self.text.toPlainText(), self.category.text(), self.scope.currentData()
         if not text.strip(): self._toast('请先填写需要保存的记忆内容。'); return
         self.save_btn.setEnabled(False)
@@ -153,6 +174,9 @@ class MemoryPage(BasePage):
     def _confirm(self):
         row = next((r for r in self.rows if r['id']==self.mid),None)
         if not row or self.loading: return
+        if str(row.get('scope','')).startswith('space:'):
+            self._toast('独立测试空间长期记忆只读，不能确认候选记忆。')
+            return
         store=self.store()
         def confirmed(_):
             self.loading=False;self._toast('候选已确认，下轮可检索。');self.refresh()
@@ -160,6 +184,9 @@ class MemoryPage(BasePage):
 
     def _delete(self):
         if not self.mid or self.loading: return
+        if self._is_test_scope():
+            self._toast('独立测试空间长期记忆只读，不能删除正式记忆。')
+            return
         store, mid = self.store(), self.mid
         def done(_):
             self._new(); self._toast('已删除，并禁止原内容或来源重新学习。'); self.loading = False; self.refresh()

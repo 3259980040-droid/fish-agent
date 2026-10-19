@@ -58,6 +58,68 @@ export function independentMessages(decision, isolated) {
   return {...decision, messages: decision.messages.filter(message => message.source?.kind !== 'agent-instructions')}
 }
 
+// A test/desktop space owns exactly one persona context node. It is inserted
+// before the current request is derived, and a later compaction may shadow it;
+// the pre-step hook reinserts it when the surface no longer carries the node.
+function personaContextMessage(value, revision = '', retired = false) {
+  return Object.freeze({id: randomUUID(), role: 'user',
+    source: Object.freeze({kind: retired ? 'fish-persona-context-retired' : 'fish-persona-context', revision: String(revision || '')}),
+    content: Object.freeze([Object.freeze({type: 'text', text: value || (retired ? '' : '[人格上下文缺失]')})])})
+}
+
+function messageText(message) {
+  const content = message?.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.map(block => block?.type === 'text' ? String(block.text ?? '') : '').join('')
+}
+
+function hasLegacyPersona(session) {
+  for (const seq of session.surface.nodes) {
+    const event = session.eventAt(seq)
+    if (event?.data?.source?.kind !== 'user') continue
+    const text = messageText(event.data)
+    if (text.includes('<compacted-summary>')) continue
+    if (text.includes('[当前独立会话的人格与规则快照')) return true
+  }
+  return false
+}
+
+export function ensurePersonaContext(session, text, revision = '') {
+  if (!text || !String(text).trim()) throw new Error('人格上下文为空，拒绝静默使用其他人格')
+  const nodes = [...session.surface.nodes].filter(seq =>
+    session.eventAt(seq)?.data?.source?.kind === 'fish-persona-context')
+  if (!nodes.length && hasLegacyPersona(session)) {
+    throw new Error('旧测试会话包含重复人格头，请新建测试空间，不要复用旧会话')
+  }
+  for (const seq of nodes) {
+    const source = session.eventAt(seq)?.data?.source
+    const bound = String(source?.revision || '')
+    if (bound && bound !== String(revision)) {
+      throw new Error('测试空间人格版本与会话不一致，请新建测试空间')
+    }
+  }
+  if (nodes.length > 1) {
+    let first = true
+    for (const seq of nodes) {
+      session.append('user/message', personaContextMessage(first ? text : '', revision, !first),
+        {surfaceOp: {op: 'replace', startSeq: seq, endSeq: seq}, sourceEventSeqs: [seq]})
+      first = false
+    }
+    return {inserted: false, consolidated: true}
+  }
+  if (nodes.length === 1) {
+    const source = session.eventAt(nodes[0])?.data?.source
+    const bound = String(source?.revision || '')
+    if (bound && bound !== String(revision)) {
+      throw new Error('测试空间人格版本与会话不一致，请新建测试空间')
+    }
+    return {inserted: false, consolidated: false}
+  }
+  session.append('user/message', personaContextMessage(text, revision), {surfaceOp: 'append'})
+  return {inserted: true, consolidated: false}
+}
+
 // Use Harness's logged surface replacement API: raw logs remain inspectable,
 // but previous profiles no longer occupy the next request or its summary.
 function groupContextMessage(value) {
@@ -263,8 +325,20 @@ export function apply(ctx, config = {}) {
     catch (error) { if (error.code !== 'ENOENT') throw error }
     const identity = identities[String(agent.id)]
     const group = role === 'qq' && identity?.scope?.startsWith('chat:group:')
+    const isolated = role === 'qq' && identity?.scope?.startsWith('space:')
     // Clear stale profiles BEFORE native compaction reads history.
     if (group) replaceGroupContext(agent.session, '')
+    // Isolated sessions get one durable persona context node before request
+    // derivation. It is deliberately not prepended to every user turn.
+    if (isolated) {
+      let persona
+      try {
+        persona = await host('/social/persona', {session: String(agent.id)})
+      } catch (error) {
+        throw new Error('人格上下文加载失败：' + String(error?.message ?? error))
+      }
+      ensurePersonaContext(agent.session, String(persona.text ?? ''), String(persona.revision ?? ''))
+    }
     let decision = await next()
     if (group && decision.kind === 'enter') {
       const context = await host('/social/context', {session: String(agent.id)})

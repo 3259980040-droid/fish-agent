@@ -156,8 +156,6 @@ class DesktopChat:
             content = media.prepare_content(imported, text or "请理解这张图片。", local=True, cancelled=self.cancel_event)
             from memory_store import MemoryStore
             content[0]["text"] = self.policy.identity_prompt(desktop=True) + MemoryStore(self.root, self.role).context(text, scope) + content[0]['text']
-            if space:
-                content[0]['text'] = SocialContext(self.root).prompt(space['id']) + content[0]['text']
             if self.cancel_event.is_set():
                 raise InterruptedError("已取消")
             self.policy.consume("calls")

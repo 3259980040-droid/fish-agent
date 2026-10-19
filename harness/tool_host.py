@@ -137,10 +137,14 @@ class ToolHost:
             return MemoryStore(self.root, role).search(str(arguments.get('query', '')), scope=identity['scope'], limit=12)
         if name == 'fish_memory_save':
             require('memory.write')
+            if identity['scope'].startswith('space:'):
+                raise PermissionError('独立测试空间长期记忆只读，不能写入正式记忆库')
             return MemoryStore(self.root, role).save(str(arguments['text']), category=str(arguments.get('category', '约定')),
                 scope=identity['scope'], source='manual', source_text='主人通过会话 ' + session + ' 明确要求保存')
         if name == 'fish_memory_delete':
             require('memory.delete')
+            if identity['scope'].startswith('space:'):
+                raise PermissionError('独立测试空间长期记忆只读，不能删除正式记忆库')
             rows = MemoryStore(self.root, role).search(scope=identity['scope'], limit=200)
             if not any(r['id'] == arguments['id'] for r in rows):
                 raise PermissionError('记忆不存在或当前会话不可见')
@@ -192,6 +196,15 @@ class ToolHost:
                 row=db.execute('SELECT * FROM group_contexts WHERE session=? AND scope=?',(identity['session'],identity['scope'])).fetchone()
             if not row or time.time()-row['updated'] > 180: raise PermissionError('本轮群资料不存在或已过期')
             return {'text': row['text']}
+        if route == '/social/persona':
+            identity = self.identity(role, str(body.get('session', '')))
+            if role != 'qq' or not identity['scope'].startswith('space:'):
+                raise PermissionError('人格快照仅用于已绑定的隔离测试空间')
+            from social_context import SocialContext
+            sid = identity['scope'][6:]
+            contexts = SocialContext(self.root)
+            space = contexts.space(sid)
+            return {'revision': space['revision'], 'text': contexts.prompt(sid)}
         if route == '/catalog':
             return {'tools': builtins(role) + self.registry.catalog(role), 'native_tools': self.registry.native_catalog(role)}
         if route == '/bind':

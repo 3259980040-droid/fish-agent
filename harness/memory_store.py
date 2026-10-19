@@ -43,6 +43,11 @@ class MemoryStore:
                 db.execute("ALTER TABLE learning_jobs ADD COLUMN subject TEXT DEFAULT ''")
             db.execute('CREATE INDEX IF NOT EXISTS memories_scope_subject ON memories(scope,subject,status,updated)')
 
+    @staticmethod
+    def is_test_scope(scope):
+        """Isolated persona spaces are read-only for long-term memory."""
+        return str(scope).startswith('space:')
+
     def options(self):
         return {'auto_learning': True, **read_json(self.path.parent / 'memory-options.json')}
 
@@ -53,7 +58,7 @@ class MemoryStore:
 
     def retry_failed(self):
         with database(self.path) as db:
-            count = db.execute("UPDATE learning_jobs SET status='pending',error='',started=0 WHERE status='failed' AND source NOT IN (SELECT source FROM exclusions)").rowcount
+            count = db.execute("UPDATE learning_jobs SET status='pending',error='',started=0 WHERE status='failed' AND scope NOT LIKE 'space:%' AND source NOT IN (SELECT source FROM exclusions)").rowcount
         return {'ok': True, 'count': count}
 
     @staticmethod
@@ -72,6 +77,8 @@ class MemoryStore:
             raise ValueError('记忆内容需为 1–4000 字')
         if not re.fullmatch(r'(owner|public|chat:[a-zA-Z0-9:_-]{1,160}|space:[a-f0-9]{32})', scope):
             raise ValueError('无效的记忆可见范围')
+        if self.is_test_scope(scope):
+            raise PermissionError('独立测试空间长期记忆只读，不能写入正式记忆库')
         if subject and not re.fullmatch(r'(qq:[0-9]{5,15}|fiction:[^\r\n]{1,80})', str(subject)): raise ValueError('主体需为 QQ 账号或明确虚构人物')
         aliases = [] if aliases is None else aliases
         if not isinstance(aliases,list) or len(aliases)>20 or any(not isinstance(v,str) or not 1<=len(v)<=80 for v in aliases): raise ValueError('别称最多 20 项，每项 1–80 字')
@@ -122,6 +129,8 @@ class MemoryStore:
             row = db.execute('SELECT * FROM memories WHERE id=?', (memory_id,)).fetchone()
             if not row:
                 raise ValueError('记忆不存在')
+            if self.is_test_scope(row['scope']):
+                raise PermissionError('独立测试空间长期记忆只读，不能删除正式记忆')
             if prevent_relearn:
                 db.execute('INSERT OR IGNORE INTO exclusions VALUES(?,?,?)',
                            (self.scoped_digest(row['text'],row['scope']), row['source'], time.time()))
@@ -159,6 +168,8 @@ class MemoryStore:
         return [r for r in self.search(scope=scope,include_candidates=True,limit=200) if r['status']=='candidate']
 
     def confirm(self, memory_id, *, scope):
+        if self.is_test_scope(scope):
+            raise PermissionError('独立测试空间长期记忆只读，不能确认候选记忆')
         with database(self.path) as db:
             row = db.execute('SELECT * FROM memories WHERE id=? AND scope=?',(memory_id,scope)).fetchone()
             if not row: raise PermissionError('记忆不存在或范围不匹配')
@@ -185,7 +196,9 @@ class MemoryStore:
         with database(self.path) as db:
             return [dict(r) for r in db.execute('SELECT * FROM exclusions ORDER BY created DESC')]
 
-    def allow_relearn(self, digest):
+    def allow_relearn(self, digest, *, scope=None):
+        if scope and self.is_test_scope(scope):
+            raise PermissionError('独立测试空间长期记忆只读，不能解除正式记忆禁学')
         with database(self.path) as db:
             db.execute('DELETE FROM exclusions WHERE digest=?', (digest,))
         return {'ok': True}
@@ -196,6 +209,8 @@ class MemoryStore:
                     'errors': [dict(r) for r in db.execute("SELECT source,error FROM learning_jobs WHERE status='failed' ORDER BY created DESC LIMIT 10")]}
 
     def enqueue(self, source, text, scope='owner', *, subject=''):
+        if self.is_test_scope(scope):
+            return {'ok': True, 'skipped': 'test-space-readonly'}
         if not text.strip() or not self.options()['auto_learning']:
             return
         with database(self.path) as db:
@@ -209,7 +224,7 @@ class MemoryStore:
         with database(self.path) as db:
             db.execute('BEGIN IMMEDIATE')
             db.execute("UPDATE learning_jobs SET status='failed',error='学习进程中断；可手动重试' WHERE status='running' AND started<?", (time.time()-600,))
-            row = db.execute("SELECT * FROM learning_jobs WHERE status='pending' ORDER BY created LIMIT 1").fetchone()
+            row = db.execute("SELECT * FROM learning_jobs WHERE status='pending' AND scope NOT LIKE 'space:%' ORDER BY created LIMIT 1").fetchone()
             if not row:
                 return False
             db.execute("UPDATE learning_jobs SET status='running',started=? WHERE id=?", (time.time(), row['id']))

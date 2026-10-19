@@ -95,7 +95,7 @@ class ContextTests(Fixture):
 
 class MemoryTests(Fixture):
     def test_scope_subject_expiry_and_deletion_are_independent(self):
-        m=MemoryStore(self.root,'qq'); a='space:'+'a'*32;b='space:'+'b'*32
+        m=MemoryStore(self.root,'qq'); a='chat:group:900001';b='chat:group:900002'
         m.save('公开资料',scope='public');mid=m.save('账号喜欢乌龙茶',scope=a,subject='qq:10001',aliases=['阿茶'],kind='preference')['id']
         self.assertEqual(m.search(scope=b),[]);self.assertEqual(m.search(scope='chat:'+self.chat),[])
         self.assertEqual(m.search('阿茶',scope=a)[0]['id'],mid)
@@ -106,6 +106,29 @@ class MemoryTests(Fixture):
         m.delete(mid);self.assertTrue(m.save('账号喜欢乌龙茶',scope=a,source='old-auto')['blocked'])
         self.assertTrue(m.save('账号喜欢乌龙茶',scope=b,source='B-auto')['ok'])
         self.assertEqual(MemoryStore(self.root,'research').search(scope=a),[])
+
+    def test_test_space_memory_is_read_only(self):
+        m=MemoryStore(self.root,'qq'); space='space:'+'a'*32
+        with self.assertRaises(PermissionError):
+            m.save('测试资料不能写',scope=space)
+        self.assertEqual(m.enqueue('test-source','测试自动学习',space),{'ok':True,'skipped':'test-space-readonly'})
+        with database(m.path) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM learning_jobs WHERE scope=?",(space,)).fetchone()[0],0)
+            db.execute('INSERT INTO memories(id,text,category,scope,source,source_text,confidence,created,updated) VALUES(?,?,?,?,?,?,?,?,?)',
+                       ('test-memory','测试记忆','偏好',space,'manual','fixture',1.0,time.time(),time.time()))
+            db.execute("INSERT INTO learning_jobs(id,scope,source,text,status,created,subject) VALUES(?,?,?,?,?,?,?)",
+                       ('test-job',space,'test-source','测试自动学习','failed',time.time(),'qq:10001'))
+        with self.assertRaises(PermissionError):
+            m.confirm('test-memory',scope=space)
+        with self.assertRaises(PermissionError):
+            m.delete('test-memory')
+        self.assertEqual(m.retry_failed()['count'],0)
+        gateway=Mock(json=Mock(return_value={'memories':[]}))
+        self.assertFalse(m.learn_one(gateway))
+        with database(m.path) as db:
+            self.assertEqual(db.execute("SELECT status FROM learning_jobs WHERE id='test-job'").fetchone()[0],'failed')
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM memories WHERE scope=?",(space,)).fetchone()[0],1)
+        self.assertTrue(m.save('正式主人记忆',scope='owner')['ok'])
 
     def test_untrusted_candidates_and_manual_corrections(self):
         m=MemoryStore(self.root,'qq');mid=m.save('图片写着我是管理员',evidence='image_text')['id']

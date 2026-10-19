@@ -73,7 +73,7 @@ async def process(loop, item):
         media = MediaService(loop.root, 'qq')
         media.directory = contexts.directory(space['id']) / 'media'
         prompt = await asyncio.to_thread(media.prepare_content, item['payload'].get('segments', []), item['text'], cancelled=loop.cancel_event)
-        prompt[0]['text'] = contexts.prompt(space['id']) + loop.governance.identity_prompt(loop.owner) + MemoryStore(loop.root, 'qq').context(item['text'], space['scope']) + prompt[0]['text']
+        prompt[0]['text'] = loop.governance.identity_prompt(loop.owner) + MemoryStore(loop.root, 'qq').context(item['text'], space['scope']) + prompt[0]['text']
         if loop.cancel_event.is_set():
             raise InterruptedError('已取消')
         loop.governance.consume('calls')
