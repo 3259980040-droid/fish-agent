@@ -27,6 +27,9 @@ class OwnerPage(BasePage):
         form.addRow("私聊管理权限", row)
         self.paused = QCheckBox("暂停 QQ 角色任务与回复")
         form.addRow(self.paused)
+        self.daily_limits = QCheckBox('启用 QQ 每日用量上限')
+        self._daily_limit_roles = {'qq': True, 'research': True}
+        form.addRow(self.daily_limits)
         self.calls = QSpinBox(); self.calls.setRange(1, 10000)
         self.replies = QSpinBox(); self.replies.setRange(1, 10000)
         self.tools = QSpinBox(); self.tools.setRange(1, 10000)
@@ -38,6 +41,9 @@ class OwnerPage(BasePage):
         form.addRow("每轮工具调用上限", self.tools)
         form.addRow('每角色每日模型请求上限', self.model_calls)
         form.addRow('已报告 token 的暂停阈值', self.tokens)
+        self.daily_limits.toggled.connect(lambda enabled: [w.setEnabled(enabled) for w in
+            (self.calls, self.replies, self.model_calls, self.tokens)])
+        card.body.addWidget(_label('关闭后，QQ 不按每日处理轮数、发出条数、模型请求数或 token 总量暂停；用量继续统计。B 站研究侧保持独立设置。', 'Caption'))
         card.body.addLayout(form)
         card.body.addWidget(_label("主人任务认真执行，必要时允许详细回答；人格中的懒或顶嘴不能代替执行。管理权限由程序执行。", "Caption"))
         root.addWidget(card)
@@ -68,6 +74,10 @@ class OwnerPage(BasePage):
         self.calls.setValue(cfg["max_daily_calls"]); self.replies.setValue(cfg["max_daily_replies"])
         self.tools.setValue(cfg["max_tool_calls_per_turn"])
         self.model_calls.setValue(cfg['max_model_requests_daily']); self.tokens.setValue(cfg['max_model_tokens_daily'])
+        self._daily_limit_roles = dict(cfg.get('daily_usage_limits', {'qq': True, 'research': True}))
+        self.daily_limits.setChecked(self._daily_limit_roles.get('qq', True))
+        for widget in (self.calls, self.replies, self.model_calls, self.tokens):
+            widget.setEnabled(self.daily_limits.isChecked())
         self.terms.setPlainText("\n".join(cfg["blocked_text"]))
         self.patterns.setPlainText("\n".join(cfg["block_patterns"]))
         audit = data.get("audit", [])
@@ -81,6 +91,7 @@ class OwnerPage(BasePage):
             "max_tool_calls_per_turn": self.tools.value(), "blocked_text": self.terms.toPlainText().splitlines(),
             "block_patterns": self.patterns.toPlainText().splitlines()}
         values.update(max_model_requests_daily=self.model_calls.value(), max_model_tokens_daily=self.tokens.value())
+        values['daily_usage_limits'] = {**self._daily_limit_roles, 'qq': self.daily_limits.isChecked()}
         owner = self.owner.text()
         self._submit(lambda: self.services.save_governance(values, owner), lambda v: self._toast(v["message"]))
 

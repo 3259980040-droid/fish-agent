@@ -27,11 +27,18 @@ CAPABILITIES = {"status": "查看状态", "pause": "暂停回复", "resume": "�
                 "memory.write": "保存记忆", "memory.delete": "删除记忆", "interests.write": "调整研究兴趣", "emoji.manage": "管理表情库",
                 'persona.test':'选择人格测试窗口','persona.approve':'认可人格版本'}
 DEFAULTS = {"version": 3, "owner_permissions": list(CAPABILITIES), "paused": False, "paused_roles": {"qq": False, "research": False},
+            "daily_usage_limits": {"qq": True, "research": True},
             "max_daily_calls": 150, "max_daily_replies": 150, "max_tool_calls_per_turn": 12,
             "max_model_requests_daily": 300, "max_model_tokens_daily": 2000000,
             "blocked_tools": ["bash", "shell", "terminal", "run_code", "write", "edit", "delete", "onebot", "send_message", "plugin_manager"],
             "allowed_tools": ["read", "read_file", "read_image", "list_directory", "ls", "glob", "grep", "web_search", "web_fetch", "search", "fetch"],
             "blocked_text": [], "block_patterns": [], "owner_priority": True}
+
+
+def daily_limits_enabled(settings: dict, role: str) -> bool:
+    """Only an explicit per-role false disables daily budgets; counters remain."""
+    limits = settings.get('daily_usage_limits', {})
+    return not (isinstance(limits, dict) and limits.get(role) is False)
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -71,6 +78,7 @@ class Governance:
             if "paused_roles" not in raw:
                 result["paused_roles"] = {role: bool(raw.get("paused", False)) for role in ("qq", "research")}
         result["paused"] = bool(result["paused_roles"].get(self.agent_id, False))
+        result['daily_usage_limits'] = {role: daily_limits_enabled(result, role) for role in ('qq', 'research')}
         return result
 
     def owner_id(self) -> str:
@@ -82,7 +90,14 @@ class Governance:
     @locked_settings
     def save(self, updates: dict, owner_id: str | None = None) -> dict:
         cfg = self.config()
+        daily_limits = dict(cfg['daily_usage_limits'])
+        if 'daily_usage_limits' in updates:
+            values = updates['daily_usage_limits']
+            if not isinstance(values, dict) or any(k not in daily_limits or type(v) is not bool for k, v in values.items()):
+                raise ValueError('每日用量开关必须按 QQ 和研究角色分别设置为开启或关闭')
+            daily_limits.update(values)
         cfg.update({k: v for k, v in updates.items() if k in cfg})
+        cfg['daily_usage_limits'] = daily_limits
         if "paused" in updates:
             cfg["paused_roles"][self.agent_id] = bool(updates["paused"])
         cfg["owner_permissions"] = [v for v in cfg["owner_permissions"] if v in CAPABILITIES]
@@ -134,13 +149,14 @@ class Governance:
 
     def consume(self, kind: str) -> None:
         field = {"calls": "max_daily_calls", "replies": "max_daily_replies"}[kind]
-        limit = self.config()[field]
+        cfg = self.config()
+        limit = cfg[field]
         day = time.strftime("%Y-%m-%d")
         with closing(self.connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT count FROM usage WHERE day=? AND kind=?", (day, kind)).fetchone()
             count = row[0] if row else 0
-            if count >= limit:
+            if daily_limits_enabled(cfg, self.agent_id) and count >= limit:
                 raise PermissionError("今天的调用上限已到" if kind == "calls" else "今天的回复上限已到")
             conn.execute("INSERT INTO usage(day,kind,count) VALUES(?,?,?) ON CONFLICT(day,kind) DO UPDATE SET count=excluded.count", (day, kind, count + 1))
             conn.commit()

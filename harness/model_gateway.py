@@ -18,6 +18,7 @@ class ModelLedger:
             db.execute('CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY,day TEXT,origin TEXT,status TEXT,input_tokens INTEGER DEFAULT 0,output_tokens INTEGER DEFAULT 0,created REAL)')
 
     def reserve(self, origin):
+        from governance import daily_limits_enabled
         settings = read_json(self.root / 'harness/control.json')
         maximum = int(settings.get('max_model_requests_daily', 300))
         tokens = int(settings.get('max_model_tokens_daily', 2000000))
@@ -25,7 +26,7 @@ class ModelLedger:
         with database(self.path) as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT COUNT(*),COALESCE(SUM(input_tokens+output_tokens),0) FROM requests WHERE day=?', (day,)).fetchone()
-            if row[0] >= maximum or row[1] >= tokens:
+            if daily_limits_enabled(settings, self.role) and (row[0] >= maximum or row[1] >= tokens):
                 raise PermissionError('今日模型请求或已报告的 token 用量达到上限')
             rid = uuid.uuid4().hex
             db.execute('INSERT INTO requests(id,day,origin,status,created) VALUES(?,?,?,?,?)', (rid, day, origin[:100], 'reserved', time.time()))
@@ -41,10 +42,14 @@ class ModelLedger:
             db.execute('UPDATE requests SET status=?,input_tokens=MAX(input_tokens,?),output_tokens=MAX(output_tokens,?) WHERE id=?', (status, max(0, i), max(0, o), rid))
 
     def snapshot(self):
+        from governance import daily_limits_enabled
         with database(self.path) as db:
             row = db.execute('SELECT COUNT(*) requests,COALESCE(SUM(input_tokens),0) input_tokens,COALESCE(SUM(output_tokens),0) output_tokens FROM requests WHERE day=?', (date.today().isoformat(),)).fetchone()
             pending = db.execute("SELECT COUNT(*) FROM requests WHERE day=? AND status IN ('reserved','unknown')", (date.today().isoformat(),)).fetchone()[0]
-        return {**dict(row), 'unreported': pending, 'note': 'token 按服务商回传统计；未回传及并行在途请求可能超出 token 阈值，请求次数为硬上限。'}
+        enabled = daily_limits_enabled(read_json(self.root / 'harness/control.json'), self.role)
+        note = ('token 按服务商回传统计；未回传及并行在途请求可能超出 token 阈值，请求次数为硬上限。' if enabled
+                else '本角色每日用量限制已关闭；调用次数和服务商回传 token 继续累计统计。')
+        return {**dict(row), 'unreported': pending, 'daily_limits_enabled': enabled, 'note': note}
 
 
 class ModelGateway:
