@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import socket
 import shutil
 import sqlite3
@@ -118,7 +119,18 @@ def kill_port(port: int, root: Path = PROJECT) -> bool:
             continue
         command = str(info.get("CommandLine", "")).lower()
         executable = str(info.get("ExecutablePath", "")).lower()
-        owned_backend = (str(root.resolve()).lower() in executable and executable.endswith("fish.exe") and "--backend" in command)
+        # Installed releases live outside the data root. The transport's exact
+        # --config argument still establishes which project's process this is.
+        owns_config = False
+        try:
+            arguments = [part.strip('"') for part in shlex.split(command, posix=False)]
+            owns_config = (arguments[arguments.index('--backend') + 1] == 'fish-qq'
+                and arguments[arguments.index('--config') + 1]
+                == str((root / 'channels/fish_qq/config.json').resolve()).lower())
+        except (ValueError, IndexError):
+            pass
+        owned_backend = (executable.endswith("fish.exe") and "--backend" in command
+                         and (str(root.resolve()).lower() in executable or owns_config))
         owned_runtime = False
         if port in (3080, 3090) and "dsh" in command and f"--port {port}" in command:
             token_path = root / "harness" / "runtime" / "control.token"

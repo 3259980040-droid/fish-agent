@@ -6,6 +6,8 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'harness')]
@@ -122,6 +124,20 @@ class QQControlsTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, 'disconnected'):
             await asyncio.wait_for(task, 1)
         self.assertEqual(self.loop.channel.futures, {})
+
+    async def test_installed_transport_shutdown_requires_matching_data_config(self):
+        from fish_desktop.services import kill_port
+        import subprocess
+        executable = r'F:\Applications\Fish\Fish.exe'
+        for config_root, expected in ((self.root, True), (self.root.parent / 'another-project', False)):
+            command = subprocess.list2cmdline([executable, '--backend', 'fish-qq', '--config',
+                                               str(config_root / 'channels/fish_qq/config.json')])
+            replies = [SimpleNamespace(stdout='TCP 127.0.0.1:3101 0.0.0.0:0 LISTENING 43210'),
+                       SimpleNamespace(stdout=json.dumps({'ExecutablePath': executable, 'CommandLine': command})),
+                       SimpleNamespace(returncode=0)]
+            with patch('fish_desktop.services.subprocess.run', side_effect=replies) as run:
+                self.assertEqual(kill_port(3101, self.root), expected)
+            self.assertEqual(any(call.args[0][0] == 'taskkill' for call in run.call_args_list), expected)
 
 
 if __name__ == '__main__':
