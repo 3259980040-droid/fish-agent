@@ -38,8 +38,13 @@ def outbound_tool(name):
 
 def tool_allowed(plugin, tool):
     name = tool['name']
-    if outbound_tool(name): return False
     selected = plugin.get('allowed_tools')
+    # Tulpa's real send queue is reauthorized against the current private route
+    # for every call. Other plugin writers keep their existing restrictions.
+    tulpa = (plugin.get('id') == 'tulpa_owner' and plugin.get('approved_chat_sender') is True
+             and plugin.get('kind') == 'mcp_http' and plugin.get('owner_only') is True
+             and plugin.get('roles') == ['qq'] and plugin.get('url') == 'http://127.0.0.1:18778/mcp')
+    if outbound_tool(name) and not (tulpa and selected is not None and name in selected): return False
     if selected is not None: return name in selected
     hints = tool.get('annotations') or {}
     return hints.get('readOnlyHint') is True or (not hints.get('destructiveHint') and bool(re.search(r'(^|_)(get|list|read|search|query|fetch|analyze|extract|describe|inspect|echo|calculate|transcribe|recognize)(_|$)', name, re.I)))
@@ -83,6 +88,7 @@ class PluginRegistry:
         self.log = root / 'data/plugin-events.db'
         self.active = {}
         self.lock = threading.RLock()
+        self.tulpa_call_lock = threading.Lock()
         self.manager = manager
         with database(self.log) as db:
             db.execute('CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,ts REAL,plugin TEXT,role TEXT,action TEXT,ok INTEGER,detail TEXT)')
@@ -256,7 +262,12 @@ class PluginRegistry:
             result = await session.call_tool(tool, arguments or {})
             if result.isError:
                 raise RuntimeError('MCP 工具报告执行失败；可检查插件自身日志')
-            return result.model_dump(mode='json', exclude_none=True)
+            value = result.model_dump(mode='json', exclude_none=True)
+            if item.get('id') == 'tulpa_owner' and value.get('content'):
+                # Tulpa supplies the same JSON twice (text and structured).
+                # Preserve original content/image blocks, not duplicate history.
+                value.pop('structuredContent', None)
+            return value
 
     async def _run_cancellable(self, coroutine, timeout, cancel):
         task = asyncio.create_task(coroutine)
@@ -462,8 +473,10 @@ class PluginRegistry:
         for role in ('qq', 'research'):
             write_json(self.root / f'harness/runtime/{role}.tools.json', {'tools': self.catalog(role)})
 
-    def execute(self, alias, arguments, role, *, owner=False, cancel=None):
+    def execute(self, alias, arguments, role, *, owner=False, cancel=None, chat_authorized=False):
         _, pid, tool = alias.split('__', 2)
+        if pid == 'tulpa_owner' and not chat_authorized:
+            raise PermissionError('原版 Tulpa 需要已核验的当前主人私聊入口')
         item = next((p for p in self.entries() if p['id'] == pid), None)
         if not item or not item['enabled'] or role not in item['roles']:
             raise PermissionError('插件已禁用或未授权给当前角色')
@@ -480,18 +493,35 @@ class PluginRegistry:
         policy = Governance(self.root, role)
         if policy.config()['paused']:
             raise PermissionError('此角色已暂停')
-        policy.check_output(json.dumps(arguments, ensure_ascii=False))
+        if pid == 'tulpa_owner':
+            # Protocol prompts, quoted examples and received chat are input
+            # data, not outgoing QQ text. Check only text actually being sent.
+            if tool == 'send_chat_reply':
+                for bubble in arguments.get('bubbles', []):
+                    if bubble.get('kind') == 'text':
+                        policy.check_output(str(bubble.get('text', '')))
+        else:
+            policy.check_output(json.dumps(arguments, ensure_ascii=False))
         cancel = cancel or threading.Event()
         key = pid + ':' + __import__('uuid').uuid4().hex
         with self.lock:
             self.active[key] = cancel
         try:
-            result = self._run(item, 'call', tool, arguments, role, cancel)
+            if pid == 'tulpa_owner':
+                # Each SDK connection starts its JSON-RPC counter at zero.
+                # Tulpa detects duplicate IDs per grant, including across
+                # connections, so concurrent calls must use its single queue.
+                with self.tulpa_call_lock:
+                    if cancel.is_set(): raise InterruptedError('插件调用已停止')
+                    result = self._run(item, 'call', tool, arguments, role, cancel)
+            else:
+                result = self._run(item, 'call', tool, arguments, role, cancel)
             from plugin_media import normalize_result
             result = normalize_result(self.root, role, result)
             if len(json.dumps(result, ensure_ascii=False).encode()) > 2 * 1024 * 1024:
                 raise ValueError('插件结果超过 2MB，请在插件配置中减少返回内容')
-            policy.check_output(json.dumps(result, ensure_ascii=False))
+            if pid != 'tulpa_owner':
+                policy.check_output(json.dumps(result, ensure_ascii=False))
             self.event(pid, role, tool, True)
             return result
         except Exception as exc:

@@ -129,6 +129,9 @@ class ToolHost:
                     identity['isolated'] = True
                     private_space = SocialContext(self.root).space(identity['scope'][6:])
                     identity['chat_mode'] = 'owner' if private_space['origin'] == 'owner-qq' else ''
+                    from tulpa_owner import matches
+                    if identity['owner'] and not identity['desktop'] and matches(self.root, private_space):
+                        identity['chat_mode'] = 'tulpa'
                     identity['allowed_paths'] = [str(SocialContext(self.root).directory(identity['scope'][6:]).resolve())]
                 elif role == 'qq' and parse_child(identity['scope']):
                     group_id, window_id, task_id = parse_child(identity['scope'])
@@ -172,8 +175,16 @@ class ToolHost:
             if not current or current['id'] != group_trial[1]:
                 raise PermissionError('群测试已结束或窗口已切换')
         private_chat = role == 'qq' and identity['owner'] and identity['scope'].startswith('space:')
+        from tulpa_owner import PREFIX, require_route
+        tulpa_chat = private_chat and name.startswith(PREFIX)
+        if tulpa_chat:
+            require_route(self.root, identity)
+            if name == PREFIX + 'wait_chat_messages':
+                # Fish owns inbound event wakeups. Keep the original ACK and
+                # learning protocol without occupying a model turn for 150s.
+                arguments = {**arguments, 'timeout_seconds': 1, 'minimum_wait_seconds': 0}
         chat_tools = ('fish_emoji_search', 'fish_emoji_read', 'fish_emoji_choose', 'fish_chat_reply')
-        if (identity['scope'].startswith('space:') or group_trial or child) and name not in ('fish_memory_search', 'fish_memory_save', 'fish_memory_delete') and not (private_chat and name in chat_tools):
+        if (identity['scope'].startswith('space:') or group_trial or child) and name not in ('fish_memory_search', 'fish_memory_save', 'fish_memory_delete') and not (private_chat and name in chat_tools) and not tulpa_chat:
             raise PermissionError('独立测试窗口仅开放本窗口记忆；共享资源和外部插件未向此窗口授权')
         if name == 'fish_chat_reply':
             if not private_chat:
@@ -248,7 +259,8 @@ class ToolHost:
                 raise ValueError('调用 ID 重复，未重复执行')
             self.cancelled[key] = (cancel, session)
         try:
-            return self.registry.execute(name, arguments, role, owner=bool(identity['owner']), cancel=cancel)
+            return self.registry.execute(name, arguments, role, owner=bool(identity['owner']), cancel=cancel,
+                                         chat_authorized=tulpa_chat)
         finally:
             with self.lock:
                 self.cancelled.pop(key, None)
@@ -290,7 +302,11 @@ class ToolHost:
             sid = identity['scope'][6:]
             contexts = SocialContext(self.root)
             space = contexts.space(sid)
-            return {'revision': space['revision'], 'text': contexts.prompt(sid)}
+            text = contexts.prompt(sid)
+            from tulpa_owner import matches, prompt as tulpa_prompt
+            if matches(self.root, space):
+                text += '\n\n' + tulpa_prompt(self.root)
+            return {'revision': space['revision'], 'text': text}
         if route == '/catalog':
             return {'tools': builtins(role) + self.registry.catalog(role), 'native_tools': self.registry.native_catalog(role)}
         if route == '/bind':

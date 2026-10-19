@@ -582,6 +582,13 @@ async def main_async() -> int:
     root = Path(os.environ.get("FISH_HARNESS_HOME", str(Path(__file__).resolve().parent.parent)))
     loop = QQAgentLoop(root)
     await loop.start()
+    async def restore_tulpa():
+        try:
+            from tulpa_owner import ensure_service
+            await asyncio.to_thread(ensure_service, root)
+        except Exception as exc:
+            loop.governance.audit('tulpa_service_unavailable', type(exc).__name__)
+    tulpa_restore = asyncio.create_task(restore_tulpa())
     async def watch_desktop():
         parent=int(os.environ.get('FISH_LOOP_PARENT_PID','0'))
         if not parent or os.name!='nt':return
@@ -605,6 +612,7 @@ async def main_async() -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        tulpa_restore.cancel()
         desktop_watch.cancel()
         await asyncio.gather(desktop_watch,return_exceptions=True)
         await loop.stop()

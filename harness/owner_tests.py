@@ -78,6 +78,8 @@ async def process(loop, item):
         # Tool authority is enforced by the program. Do not turn every casual
         # user message into a long administrative instruction in model history.
         prompt[0]['text'] = '[当前入口：已核验主人账号的独立私聊。]\n' + MemoryStore(loop.root, 'qq').context(item['text'], space['scope']) + prompt[0]['text']
+        from tulpa_owner import matches
+        tulpa = matches(loop.root, space)
         if loop.cancel_event.is_set():
             raise InterruptedError('已取消')
         loop.governance.consume('calls')
@@ -89,6 +91,15 @@ async def process(loop, item):
                                            include_reasoning=reply_mode == 'thinking_excerpt')
         if result.get('cancelled') or loop.cancel_event.is_set():
             raise InterruptedError('已取消')
+        if tulpa:
+            # Original MCP sends and records its own receipts, including timer
+            # wakes. Never echo final text or fall back to the Fish sender.
+            if not result.get('ok'):
+                raise RuntimeError(result.get('error', '原版 MCP 处理未完成'))
+            loop.store.update_message(mid, status='processed', runtime_session_id=session, runtime_turn_id=turn)
+            loop.store.finish_turn(turn, 'done')
+            contexts.record_owner_reply(space['id'], loop.owner)
+            return
         from tool_host import request
         draft = await asyncio.to_thread(request, loop.root, '/chat/take', {'session': session}, role='qq')
         bubbles = draft.get('bubbles', [])
@@ -150,7 +161,7 @@ async def process(loop, item):
         loop.store.finish_turn(turn, status, error=error)
         if status == 'failed':
             loop.governance.audit('reply_failed', error)
-            if not sent_count and not uncertain_send and not loop.governance.config()['paused'] and loop.governance.is_owner(loop.owner):
+            if not locals().get('tulpa') and not sent_count and not uncertain_send and not loop.governance.config()['paused'] and loop.governance.is_owner(loop.owner):
                 try:
                     await loop.channel.action('send_message', {'chat_id': item['payload']['chat_id'],
                         'segments': [{'type': 'text', 'text': '这次回复未能完成，聊天记录仍保留。请查看 Fish 工作台的运行记录后重试。'}],

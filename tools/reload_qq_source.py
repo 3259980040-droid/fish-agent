@@ -17,7 +17,13 @@ from secrets_store import SecretStore
 from storage import write_json
 
 
-async def reload(parent, tool_host_port=None):
+async def reload(parent, tool_host_port=None, refresh_tool_host_pid=None):
+    if refresh_tool_host_pid:
+        # Only an explicitly identified standalone service may be replaced.
+        command=subprocess.check_output(['powershell.exe','-NoProfile','-Command',
+            f"(Get-CimInstance Win32_Process -Filter 'ProcessId = {int(refresh_tool_host_pid)}').CommandLine"],text=True)
+        if str(ROOT/'harness/tool_host_service.py').lower() not in command.lower() or '--port 3104' not in command:
+            raise RuntimeError('The selected process is not this checkout\'s standalone ToolHost')
     if tool_host_port:
         from governance import control_token
         import requests
@@ -54,6 +60,32 @@ async def reload(parent, tool_host_port=None):
             if not tcp_open('127.0.0.1',3102):break
             await asyncio.sleep(.1)
         else:raise RuntimeError('Old worker has not exited; new worker not launched')
+        if refresh_tool_host_pid:
+            import ctypes
+            from ctypes import wintypes
+            kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+            kernel.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD]
+            kernel.OpenProcess.restype=wintypes.HANDLE
+            kernel.TerminateProcess.argtypes=[wintypes.HANDLE,wintypes.UINT]
+            kernel.CloseHandle.argtypes=[wintypes.HANDLE]
+            handle=kernel.OpenProcess(1,False,int(refresh_tool_host_pid))
+            if not handle:raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                if not kernel.TerminateProcess(handle,0):raise ctypes.WinError(ctypes.get_last_error())
+            finally:kernel.CloseHandle(handle)
+            for _ in range(40):
+                if not tcp_open('127.0.0.1',3104):break
+                await asyncio.sleep(.1)
+            else:raise RuntimeError('Old standalone ToolHost has not exited')
+            env=os.environ.copy();env['FISH_HARNESS_HOME']=str(ROOT)
+            with (ROOT/'harness/tool-host-service.log').open('a',encoding='utf-8') as output:
+                subprocess.Popen([r'C:\Python313\pythonw.exe',str(ROOT/'harness/tool_host_service.py'),
+                    '--parent',str(parent),'--port','3104'],cwd=str(ROOT),env=env,stdout=output,
+                    stderr=subprocess.STDOUT,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            for _ in range(60):
+                if tcp_open('127.0.0.1',3104):break
+                await asyncio.sleep(.25)
+            else:raise RuntimeError('Replacement ToolHost did not become ready')
         if tool_host_port:
             from storage import read_json,settings_lock
             with settings_lock(ROOT):
@@ -80,5 +112,6 @@ if __name__=='__main__':
     sys.stdout.reconfigure(encoding='utf-8')
     parser=argparse.ArgumentParser();parser.add_argument('--desktop-pid',required=True,type=int)
     parser.add_argument('--tool-host-port',type=int)
+    parser.add_argument('--refresh-tool-host-pid',type=int)
     args=parser.parse_args()
-    asyncio.run(reload(args.desktop_pid,args.tool_host_port))
+    asyncio.run(reload(args.desktop_pid,args.tool_host_port,args.refresh_tool_host_pid))
