@@ -82,6 +82,7 @@ packaging/build-source.json
 # One-off/personal reports
 FISH-*.md
 !FISH-QUICKSTART.md
+!docs/Fish-使用说明书.md
 FISH_*.md
 PHASE-*.md
 CURRENT_STATE.md
