@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "fallback": "这个话题我不接。说点别的？",
+  "categories": [
+    {
+      "id": "cyber_attack",
+      "name": "网络攻击",
+      "severity": "critical",
+      "action": "block",
+      "patterns": [
+        "ddos",
+        "dos攻击",
+        "cc攻击",
+        "sql注入",
+        "拖库",
+        "撞库",
+        "爆破",
+        "渗透.*(网站|服务器|平台|系统)",
+        "攻击.*(网站|服务器|平台|系统)",
+        "打崩",
+        "免杀",
+        "木马",
+        "勒索软件",
+        "提权",
+        "黑客.*(教学|教程|带你)"
+      ]
+    },
+    {
+      "id": "self_harm",
+      "name": "自伤",
+      "severity": "critical",
+      "action": "block",
+      "patterns": [
+        "自杀",
+        "自残",
+        "不想活",
+        "结束生命",
+        "轻生"
+      ]
+    },
+    {
+      "id": "illegal",
+      "name": "违法",
+      "severity": "high",
+      "action": "block",
+      "patterns": [
+        "毒品",
+        "枪支",
+        "代开发票",
+        "洗钱",
+        "赌博网站",
+        "开盒",
+        "人肉搜索"
+      ]
+    },
+    {
+      "id": "prompt_injection",
+      "name": "提示注入",
+      "severity": "high",
+      "action": "block",
+      "patterns": [
+        "忽略(以上|之前|所有).*(指令|规则|设定)",
+        "你现在是",
+        "开发者模式",
+        "越狱模式",
+        "输出.*(系统提示|prompt|设定)"
+      ]
+    },
+    {
+      "id": "hate",
+      "name": "仇恨言论",
+      "severity": "critical",
+      "action": "block",
+      "patterns": [
+        "(中国人|华人|中华民族|中国).{0,8}(都该死|都是.{0,3}畜生|都是.{0,3}劣等|都是.{0,3}垃圾)",
+        "(杀光|灭绝|屠杀).{0,8}(中国人|华人|中华民族)"
+      ],
+      "terms_file": "local_terms.txt"
+    }
+  ]
+}

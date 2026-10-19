@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>大肥鱼 · Mission Control</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #111821;
+    --panel-2: #0e141b;
+    --line: #1f2a35;
+    --text: #e6edf3;
+    --muted: #8b98a5;
+    --green: #3ddc97;
+    --amber: #f5a524;
+    --red: #ff5c5c;
+    --blue: #5aa9ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    color: var(--text);
+    background:
+      radial-gradient(1100px 520px at 15% -10%, #14232e 0%, transparent 60%),
+      radial-gradient(900px 500px at 95% 0%, #1a1626 0%, transparent 55%),
+      var(--bg);
+    font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; padding: 18px 28px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(11, 15, 20, .82);
+    backdrop-filter: blur(10px);
+  }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .logo {
+    width: 46px; height: 46px; border-radius: 14px;
+    display: grid; place-items: center; font-size: 24px;
+    background: linear-gradient(160deg, #163041, #0d1a24);
+    border: 1px solid #24404f;
+  }
+  h1 { margin: 0; font-size: 19px; letter-spacing: .2px; }
+  h1 span { color: var(--muted); font-weight: 500; }
+  .brand p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+  .head-right { display: flex; align-items: center; gap: 14px; }
+  .live {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 5px 10px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted);
+    font-size: 11px; letter-spacing: 1.4px;
+  }
+  .live i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  .live.on { color: var(--green); border-color: #1f4a38; }
+  .live.on i { background: var(--green); box-shadow: 0 0 10px var(--green); }
+
+  main {
+    display: grid; grid-template-columns: repeat(12, 1fr);
+    gap: 16px; padding: 20px 28px 36px; max-width: 1460px; margin: 0 auto;
+  }
+  .card {
+    grid-column: span 4;
+    background: linear-gradient(180deg, var(--panel), var(--panel-2));
+    border: 1px solid var(--line); border-radius: 16px;
+    padding: 18px; min-width: 0;
+  }
+  .card.wide { grid-column: span 12; }
+  .card h2 {
+    margin: 0 0 14px; font-size: 12px; font-weight: 600;
+    color: var(--muted); letter-spacing: 1.2px; text-transform: uppercase;
+  }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .ok-text { color: var(--green); }
+  .bad-text { color: var(--red); }
+  .big { font-size: 34px; font-weight: 650; letter-spacing: -.5px; margin-bottom: 10px; }
+  .big .muted { font-size: 16px; font-weight: 400; }
+
+  .rows { display: flex; flex-direction: column; gap: 12px; }
+  .row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 12px; border: 1px solid var(--line);
+    border-radius: 12px; background: #0c1219;
+  }
+  .row-title { font-size: 14px; font-weight: 600; }
+  .row-right { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .row-right a { color: var(--blue); text-decoration: none; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot.ok { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .dot.bad { background: var(--red); box-shadow: 0 0 8px var(--red); }
+
+  .bar { height: 9px; border-radius: 999px; background: #0a0f15; border: 1px solid var(--line); overflow: hidden; margin: 4px 0 10px; }
+  .bar i { display: block; height: 100%; border-radius: 999px; transition: width .4s ease; }
+  .bar i.green { background: linear-gradient(90deg, #2bbf83, var(--green)); }
+  .bar i.amber { background: linear-gradient(90deg, #c9821a, var(--amber)); }
+  .bar i.red { background: linear-gradient(90deg, #c43f3f, var(--red)); }
+
+  .stat { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px dashed #1a242e; font-size: 13px; }
+  .stat:last-of-type { border-bottom: 0; }
+  .stat span { color: var(--muted); }
+  .stat b { font-weight: 600; }
+  .triple { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 14px 0 6px; }
+  .triple div { text-align: center; padding: 10px 6px; border: 1px solid var(--line); border-radius: 12px; background: #0c1219; }
+  .triple b { display: block; font-size: 22px; }
+  .triple span { font-size: 11px; color: var(--muted); }
+  .last { margin-top: 12px; font-size: 13px; }
+  .last .muted { display: block; margin-bottom: 4px; font-size: 11px; }
+
+  .tags { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 14px; }
+  .tag {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 9px; border-radius: 999px;
+    border: 1px solid var(--line); background: #0c1219;
+    font-size: 12px; color: #c7d2dc;
+  }
+  .tag b { color: var(--blue); font-weight: 600; }
+
+  pre {
+    margin: 10px 0 0; padding: 12px; max-height: 230px; overflow: auto;
+    border: 1px solid var(--line); border-radius: 12px;
+    background: #0a0f15; color: #c7d2dc;
+    font: 12px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace;
+    white-space: pre-wrap; word-break: break-word;
+  }
+
+  .alert { padding: 10px 12px; border-radius: 10px; margin-bottom: 8px; font-size: 13px; border-left: 3px solid var(--line); background: #0c1219; }
+  .alert.warn { border-left-color: var(--amber); color: #f3d59a; }
+  .alert.danger { border-left-color: var(--red); color: #ffb3b3; }
+  .alert.info { border-left-color: var(--blue); color: #b9d7ff; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: .8px; text-transform: uppercase; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  td { padding: 10px; border-bottom: 1px dashed #18222c; vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  td.reply { color: var(--green); }
+  td:nth-child(1) { width: 70px; }
+  td:nth-child(2) { width: 110px; color: #c7d2dc; }
+
+  footer {
+    display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
+    padding: 0 28px 28px; color: var(--muted); font-size: 12px;
+  }
+  footer a { color: var(--blue); text-decoration: none; }
+  code { color: #c7d2dc; }
+
+  @media (max-width: 1100px) {
+    .card { grid-column: span 6; }
+    .card.wide { grid-column: span 12; }
+  }
+  @media (max-width: 720px) {
+    header { padding: 14px 16px; flex-wrap: wrap; }
+    main { padding: 14px 16px 28px; }
+    .card { grid-column: span 12; }
+    .head-right { width: 100%; justify-content: space-between; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="logo">🐟</div>
+    <div>
+      <h1>大肥鱼 <span>Mission Control</span></h1>
+      <p>研究实例 · QQ 群 · 预算 · 知识库</p>
+    </div>
+  </div>
+  <div class="head-right">
+    <span id="updated" class="muted small">连接中…</span>
+    <span id="live" class="live"><i></i>LIVE</span>
+  </div>
+</header>
+
+<main>
+  <section class="card" id="instances">
+    <h2>实例</h2>
+    <div id="instances-body" class="rows"></div>
+  </section>
+
+  <section class="card" id="budget">
+    <h2>今日预算</h2>
+    <div id="budget-body"></div>
+  </section>
+
+  <section class="card" id="qq">
+    <h2>大肥鱼</h2>
+    <div id="qq-body"></div>
+  </section>
+
+  <section class="card" id="knowledge">
+    <h2>知识库</h2>
+    <div id="knowledge-body"></div>
+  </section>
+
+  <section class="card" id="digest">
+    <h2>今日日报</h2>
+    <div id="digest-body"></div>
+  </section>
+
+  <section class="card" id="alerts">
+    <h2>告警</h2>
+    <div id="alerts-body"></div>
+  </section>
+
+  <section class="card wide" id="feed">
+    <h2>群聊动态 <span class="muted small">最近 12 条</span></h2>
+    <div id="feed-body"></div>
+  </section>
+</main>
+
+<footer>
+  <span>只读面板 · 每 5 秒刷新</span>
+  <a href="?demo=1">演示数据</a>
+  <a href="/api/status" target="_blank" rel="noreferrer">API</a>
+</footer>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const demo = new URLSearchParams(location.search).get('demo') === '1';
+  const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[char]));
+  const time = (iso) => iso ? new Date(iso).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
+
+  function renderInstances(data) {
+    const rows = [
+      ['研究实例', 'B 站 / GitHub / 知识库', data.instances.research],
+      ['QQ 实例', '大肥鱼住的地方', data.instances.qq],
+    ];
+    $('instances-body').innerHTML = rows.map(([name, desc, item]) => `
+      <div class="row">
+        <div>
+          <div class="row-title">${name}</div>
+          <div class="muted small">${desc}</div>
+        </div>
+        <div class="row-right">
+          <span class="dot ${item.up ? 'ok' : 'bad'}"></span>
+          <span class="${item.up ? 'ok-text' : 'bad-text'}">${item.up ? '在线' : '离线'}</span>
+          <a href="${item.url}" target="_blank" rel="noreferrer">:${item.port}</a>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  function renderBudget(data) {
+    const budget = data.qq.budget;
+    const percent = budget.cny_per_day ? Math.min(100, budget.used / budget.cny_per_day * 100) : 0;
+    const tone = percent >= 90 ? 'red' : percent >= 70 ? 'amber' : 'green';
+    $('budget-body').innerHTML = `
+      <div class="big">¥${budget.used.toFixed(2)} <span class="muted">/ ¥${budget.cny_per_day.toFixed(0)}</span></div>
+      <div class="bar"><i class="${tone}" style="width:${percent}%"></i></div>
+      <div class="muted small">硬停线 ¥${budget.hard_stop_cny.toFixed(2)} · 剩余 ¥${Math.max(0, budget.cny_per_day - budget.used).toFixed(2)}</div>
+    `;
+  }
+
+  function renderQQ(data) {
+    const qq = data.qq;
+    const last = qq.last_reply;
+    $('qq-body').innerHTML = `
+      <div class="stat"><span>模式</span><b>${esc(qq.mode)}</b></div>
+      <div class="stat"><span>状态</span><b class="${qq.online ? 'ok-text' : 'bad-text'}">${qq.online ? '在线' : '离线'}</b></div>
+      <div class="stat"><span>群</span><b>${esc(qq.group || '未绑定')}</b></div>
+      <div class="triple">
+        <div><b>${qq.today.turns}</b><span>轮</span></div>
+        <div><b>${qq.today.replies}</b><span>回</span></div>
+        <div><b>${qq.today.media}</b><span>媒体</span></div>
+      </div>
+      <div class="last">
+        ${last ? `<span class="muted">最后一句</span><div>“${esc(last.text)}”</div>` : '<span class="muted">还没说过话</span>'}
+      </div>
+    `;
+  }
+
+  function renderKnowledge(data) {
+    const knowledge = data.knowledge;
+    const tags = knowledge.tags.length
+      ? knowledge.tags.map((item) => `<span class="tag">${esc(item.tag)} <b>${item.count}</b></span>`).join('')
+      : '<span class="muted small">还没有标签</span>';
+    $('knowledge-body').innerHTML = `
+      <div class="big">${knowledge.notes} <span class="muted">条笔记</span></div>
+      <div class="muted small">今天 +${knowledge.today}</div>
+      <div class="tags">${tags}</div>
+    `;
+  }
+
+  function renderDigest(data) {
+    const digest = data.digest;
+    $('digest-body').innerHTML = digest.updated_at
+      ? `<div class="muted small">${time(digest.updated_at)} 更新 · ${digest.age_hours}h 前</div><pre>${esc(digest.preview)}</pre>`
+      : '<div class="muted">还没有日报。研究实例跑完第一轮后会出现在这里。</div>';
+  }
+
+  function renderAlerts(data) {
+    $('alerts-body').innerHTML = data.alerts.length
+      ? data.alerts.map((item) => `<div class="alert ${item.level}">${esc(item.text)}</div>`).join('')
+      : '<div class="muted">一切正常</div>';
+  }
+
+  function renderFeed(data) {
+    const feed = data.qq.feed;
+    $('feed-body').innerHTML = feed.length
+      ? `<table>
+          <thead><tr><th>时间</th><th>群友</th><th>消息</th><th>大肥鱼</th></tr></thead>
+          <tbody>${feed.map((item) => `
+            <tr>
+              <td class="muted">${esc(item.at)}</td>
+              <td>${esc(item.user)}</td>
+              <td>${esc(item.text)}</td>
+              <td class="reply">${esc(item.reply)}</td>
+            </tr>
+          `).join('')}</tbody>
+        </table>`
+      : '<div class="muted">还没有群聊数据。QQ 实例写入 <code>qq-work/log/events.jsonl</code> 后会出现。</div>';
+  }
+
+  function render(data) {
+    $('updated').textContent = `更新于 ${time(data.generated_at)}${data.mock ? ' · DEMO' : ''}`;
+    const anyUp = data.instances.research.up || data.instances.qq.up;
+    $('live').classList.toggle('on', anyUp);
+    $('live').innerHTML = `<i></i>${anyUp ? 'LIVE' : 'OFFLINE'}`;
+
+    renderInstances(data);
+    renderBudget(data);
+    renderQQ(data);
+    renderKnowledge(data);
+    renderDigest(data);
+    renderAlerts(data);
+    renderFeed(data);
+  }
+
+  async function refresh() {
+    try {
+      const response = await fetch('/api/status' + (demo ? '?mock=1' : ''));
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      render(await response.json());
+    } catch (error) {
+      $('updated').textContent = `连接失败：${error.message}`;
+      $('live').classList.remove('on');
+      $('live').innerHTML = '<i></i>OFFLINE';
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 5000);
+</script>
+</body>
+</html>

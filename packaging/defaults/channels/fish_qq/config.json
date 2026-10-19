@@ -1,0 +1,6 @@
+{
+  "listen": {"host":"127.0.0.1","port":3101,"path":"/ws","token_env":"FISH_QQ_TOKEN"},
+  "napcat": {"url":"ws://127.0.0.1:3001","token_env":"NAPCAT_TOKEN"},
+  "allowlist": {"owner_id":"","private_mode":"owner_only","group_ids":[]},
+  "spool_dir":"data/qq/channel"
+}

@@ -1,0 +1,277 @@
+[
+  {
+    "name": "annotated-types",
+    "version": "0.8.0",
+    "license": "MIT"
+  },
+  {
+    "name": "anyio",
+    "version": "4.15.1",
+    "license": "MIT"
+  },
+  {
+    "name": "APScheduler",
+    "version": "3.11.3",
+    "license": "MIT"
+  },
+  {
+    "name": "attrs",
+    "version": "26.1.0",
+    "license": "MIT"
+  },
+  {
+    "name": "beautifulsoup4",
+    "version": "4.15.0",
+    "license": "MIT License"
+  },
+  {
+    "name": "bilibili-api-python",
+    "version": "17.4.2",
+    "license": "GPL-3.0-or-later"
+  },
+  {
+    "name": "brotli",
+    "version": "1.2.0",
+    "license": "MIT"
+  },
+  {
+    "name": "certifi",
+    "version": "2026.7.22",
+    "license": "MPL-2.0"
+  },
+  {
+    "name": "cffi",
+    "version": "2.1.1",
+    "license": "MIT-0"
+  },
+  {
+    "name": "click",
+    "version": "8.5.0",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "name": "colorama",
+    "version": "0.4.6",
+    "license": ""
+  },
+  {
+    "name": "cryptography",
+    "version": "50.0.2",
+    "license": "Apache-2.0 OR BSD-3-Clause"
+  },
+  {
+    "name": "h11",
+    "version": "0.16.0",
+    "license": "MIT"
+  },
+  {
+    "name": "httpcore",
+    "version": "1.0.9",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "name": "httpx",
+    "version": "0.28.1",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "name": "httpx-sse",
+    "version": "0.4.3",
+    "license": "MIT"
+  },
+  {
+    "name": "idna",
+    "version": "3.20",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "name": "jsonschema",
+    "version": "4.26.0",
+    "license": "MIT"
+  },
+  {
+    "name": "jsonschema-specifications",
+    "version": "2025.9.1",
+    "license": "MIT"
+  },
+  {
+    "name": "lxml",
+    "version": "6.1.3",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "name": "mcp",
+    "version": "1.30.0",
+    "license": "MIT"
+  },
+  {
+    "name": "multidict",
+    "version": "7.1.0",
+    "license": "Apache-2.0"
+  },
+  {
+    "name": "pillow",
+    "version": "13.0.0",
+    "license": "MIT-CMU"
+  },
+  {
+    "name": "propcache",
+    "version": "0.5.4",
+    "license": "Apache-2.0"
+  },
+  {
+    "name": "pycparser",
+    "version": "3.11",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "name": "pycryptodomex",
+    "version": "3.24.1",
+    "license": "BSD, Public Domain"
+  },
+  {
+    "name": "pydantic",
+    "version": "2.14.1",
+    "license": "MIT"
+  },
+  {
+    "name": "pydantic_core",
+    "version": "2.50.1",
+    "license": "MIT"
+  },
+  {
+    "name": "pydantic-settings",
+    "version": "2.16.0",
+    "license": "MIT"
+  },
+  {
+    "name": "PyJWT",
+    "version": "2.15.1",
+    "license": "MIT"
+  },
+  {
+    "name": "python-dotenv",
+    "version": "1.2.4",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "name": "python-multipart",
+    "version": "0.0.32",
+    "license": "Apache-2.0"
+  },
+  {
+    "name": "pywin32",
+    "version": "312",
+    "license": "PSF"
+  },
+  {
+    "name": "PyYAML",
+    "version": "6.0.3",
+    "license": "MIT"
+  },
+  {
+    "name": "qrcode",
+    "version": "8.2",
+    "license": "BSD"
+  },
+  {
+    "name": "qrcode-terminal",
+    "version": "0.8",
+    "license": "MIT"
+  },
+  {
+    "name": "referencing",
+    "version": "0.37.0",
+    "license": "MIT"
+  },
+  {
+    "name": "regex",
+    "version": "2026.9.29",
+    "license": "Apache-2.0 AND CNRI-Python"
+  },
+  {
+    "name": "rpds-py",
+    "version": "2026.9.1",
+    "license": "MIT"
+  },
+  {
+    "name": "soupsieve",
+    "version": "3.0.3",
+    "license": "MIT"
+  },
+  {
+    "name": "sse-starlette",
+    "version": "3.5.0",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "name": "starlette",
+    "version": "1.8.0",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "name": "typing_extensions",
+    "version": "4.16.0",
+    "license": "PSF-2.0"
+  },
+  {
+    "name": "typing-inspection",
+    "version": "0.4.4",
+    "license": "MIT"
+  },
+  {
+    "name": "tzdata",
+    "version": "2026.5",
+    "license": "Apache-2.0"
+  },
+  {
+    "name": "tzlocal",
+    "version": "5.4.4",
+    "license": "MIT"
+  },
+  {
+    "name": "uvicorn",
+    "version": "0.54.0",
+    "license": "BSD-3-Clause"
+  },
+  {
+    "name": "yarl",
+    "version": "1.25.1",
+    "license": "Apache-2.0"
+  },
+  {
+    "name": "PySide6",
+    "version": "6.12.0",
+    "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only"
+  },
+  {
+    "name": "PySide6_Essentials",
+    "version": "6.12.0",
+    "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only"
+  },
+  {
+    "name": "PySide6_Addons",
+    "version": "6.12.0",
+    "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only"
+  },
+  {
+    "name": "shiboken6",
+    "version": "6.12.0",
+    "license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only"
+  },
+  {
+    "name": "requests",
+    "version": "2.32.4",
+    "license": "Apache-2.0"
+  },
+  {
+    "name": "pillow",
+    "version": "11.2.1",
+    "license": "MIT-CMU"
+  },
+  {
+    "name": "websockets",
+    "version": "17.2",
+    "license": "BSD-3-Clause"
+  }
+]

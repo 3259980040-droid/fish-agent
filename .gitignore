@@ -1,0 +1,93 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+
+# Builds / packages
+build/
+build-*/
+dist/
+dist-*/
+*.zip
+*.exe
+*.dll
+*.whl
+*.egg-info/
+
+# Local runtime and generated state
+.tmp/
+homes/
+channel-state/
+data/
+artifacts/
+backups/
+screenshots/
+vendor/
+napcat/
+shared/
+qq/
+knowledge/*
+!knowledge/AGENTS.md
+harness/.phase1a-tmp/
+harness/.phase1b-tmp/
+harness/.phase2-tmp/
+harness/tmp/
+harness/fixtures/
+harness/maintenance/
+harness/plugins/registry.json
+
+# Local configs
+harness/agents.json
+harness/control.json
+harness/multimodal.json
+harness/emoji.json
+harness/setup.json
+harness/research-interests.json
+channels/fish_qq/config.json
+harness/runtime/*.yml
+harness/runtime/*.json
+harness/runtime/*.identities.json
+harness/runtime/*.token
+
+# Secrets and credentials
+harness/secrets/
+harness/safety/local_terms.txt
+*.env
+.env*
+*.key
+*.pem
+*.cookie
+*.bin
+*.credentials*
+
+# Databases / logs
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.log
+*.bak
+*.pid
+*.tmp
+
+# Generated packaging manifest
+packaging/build-source.json
+
+# One-off/personal reports
+FISH-*.md
+!FISH-QUICKSTART.md
+FISH_*.md
+PHASE-*.md
+CURRENT_STATE.md
+TAKEOVER-*.md
+MASTER-PLAN.md
+IMPLEMENTATION_PLAN.md
+PROJECT_STATUS.md
+
+# OS
+.DS_Store
+Thumbs.db

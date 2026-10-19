@@ -1,0 +1,16 @@
+{
+  "runtime": {
+    "kind": "dsh", "enabled": true,
+    "cli": "@bundle/runtime/fish-dsh.mjs", "node": "@bundle/runtime/node/node.exe",
+    "version": "0.2.1-rc.2", "profile": "web",
+    "homes": {"qq": "homes/qq", "research": "homes/research"},
+    "ports": {"qq": 3090, "research": 3080}, "tool_host_port": 3103,
+    "patches": {"qq": "harness/runtime/qq.patch.yml", "research": "harness/runtime/research.patch.yml"},
+    "control_plugin": "harness/runtime/fish-control"
+  },
+  "agents": [
+    {"id":"qq","name":"大肥鱼","workspace":"qq-work","db":"data/qq/qq.db","persona":"harness/agents/qq.persona.md","provider":"deepseek-official","model":"deepseek-flash","base_url":"https://api.deepseek.com","apiKeyEnv":"FISH_QQ_DEEPSEEK_API_KEY"},
+    {"id":"research","name":"研究员","workspace":"knowledge","db":"data/research/research.db","persona":"harness/agents/research.persona.md","provider":"deepseek-official","model":"deepseek-flash","base_url":"https://api.deepseek.com","apiKeyEnv":"FISH_RESEARCH_DEEPSEEK_API_KEY"}
+  ],
+  "channels": [{"id":"qq","name":"QQ 通道","kind":"fish-qq","enabled":false,"config":"channels/fish_qq/config.json"}]
+}

@@ -1,0 +1,35 @@
+{
+  "id": "video-understanding",
+  "name": "视频理解",
+  "version": "0.11.0",
+  "type": "mcp",
+  "description": "mcp-video-analyzer：字幕、关键帧、OCR、时间线、AI 摘要；只给研究实例用。",
+  "agents": ["research"],
+  "entry": {
+    "command": "C:\\Users\\江\\AppData\\Roaming\\npm\\mcp-video-analyzer.cmd",
+    "args": [],
+    "cwd": "."
+  },
+  "permissions": {
+    "filesystem": ["data/", "D:/Videos"],
+    "network": false,
+    "shell": false
+  },
+  "config": {
+    "detail": { "type": "string", "default": "standard" },
+    "fields": {
+      "type": "string",
+      "default": "metadata,transcript,frames,ocrResults,timeline,aiSummary"
+    },
+    "out": { "type": "string", "default": "data/research/frames" }
+  },
+  "tools": [
+    "analyze_video",
+    "analyze_videos",
+    "get_transcript",
+    "get_metadata",
+    "get_frames",
+    "analyze_moment"
+  ],
+  "fallback_cli": "mcp-video-analyzer analyze <path> --detail standard --fields metadata,transcript,frames,ocrResults,timeline,aiSummary --out data/research/frames"
+}
