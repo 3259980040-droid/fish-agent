@@ -320,7 +320,11 @@ class FishQQApp:
         chat_id = str(payload.get("chat_id", ""))
         if not (chat_id.startswith("group:") or chat_id.startswith("private:")):
             return {"ok": False, "error": {"code": "bad_request", "message": "bad chat_id"}}
-        allowed, retry_after = self.limiter.check(chat_id)
+        unlimited = False
+        if chat_id.startswith('group:'):
+            from .policy import unlimited_group
+            unlimited = unlimited_group(self.config.root, chat_id)
+        allowed, retry_after = self.limiter.check(chat_id, unlimited=unlimited)
         if not allowed:
             return {"ok": False, "error": {
                 "code": "rate_limited", "message": "outbound technical limit",

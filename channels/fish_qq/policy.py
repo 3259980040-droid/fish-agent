@@ -8,6 +8,32 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def unlimited_group(root, chat_id):
+    """Read the active window's explicit setting without importing agent code.
+
+    The transport is usable on its own, including roots with no social tables.
+    Never create a database or alter a persona while checking the send limit.
+    """
+    import json
+    import re
+    import sqlite3
+    from pathlib import Path
+    from contextlib import closing
+    if not re.fullmatch(r'group:[0-9]{5,15}', chat_id):return False
+    root=Path(root);path=root/'data/social/group-policy.db'
+    context=root/'data/social/context.db'
+    try:
+        if context.is_file():
+            with closing(sqlite3.connect('file:'+str(context)+'?mode=ro',uri=True)) as db:
+                row=db.execute('SELECT space FROM group_test_routes WHERE group_id=?',(chat_id.split(':')[1],)).fetchone()
+            if row and re.fullmatch(r'[a-f0-9]{32}',row[0]):path=root/'data/qq/spaces'/row[0]/'group-policy.db'
+        if not path.is_file():return False
+        with closing(sqlite3.connect('file:'+str(path)+'?mode=ro',uri=True)) as db:
+            row=db.execute('SELECT config FROM groups WHERE chat=?',(chat_id,)).fetchone()
+        return bool(row and json.loads(row[0]).get('reply_limits') is False)
+    except (sqlite3.Error,ValueError,OSError):return False
+
+
 class Allowlist:
     def __init__(self, owner_id: str, group_ids: list[str], private_mode: str = "owner_only"):
         self.owner_id = str(owner_id)
@@ -49,7 +75,7 @@ class OutboundLimiter:
         self._chat: dict[str, deque[float]] = {}
         self._global: deque[float] = deque()
 
-    def check(self, chat_id: str, now: float | None = None) -> tuple[bool, int]:
+    def check(self, chat_id: str, now: float | None = None, *, unlimited: bool = False) -> tuple[bool, int]:
         now = time.time() if now is None else now
         cutoff = now - self.window_s
         while self._global and self._global[0] < cutoff:
@@ -57,6 +83,8 @@ class OutboundLimiter:
         queue = self._chat.setdefault(chat_id, deque())
         while queue and queue[0] < cutoff:
             queue.popleft()
+        if unlimited:
+            return True, 0
         if len(self._global) >= self.global_per_min:
             retry = int((self._global[0] + self.window_s - now) * 1000)
             return False, max(1, retry)

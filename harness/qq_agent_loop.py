@@ -178,6 +178,8 @@ class QQAgentLoop:
         from group_workflow import GroupWorkflow
         self.social_workflow = GroupWorkflow(root)
         self.group_test_workflows = {}
+        self.group_dialogues = {}
+        self.group_send_locks = {}
 
     async def start(self) -> None:
         if not self.owner:
@@ -285,9 +287,20 @@ class QQAgentLoop:
             if workflow is None:
                 workflow = GroupWorkflow(self.root, trial=trial)
                 self.group_test_workflows[trial['id']] = workflow
-            await workflow.observe(self, payload)
         else:
-            await self.social_workflow.observe(self, payload)
+            workflow = self.social_workflow
+        from group_dialogue import GroupDialogue
+        chat = str(payload.get('chat_id', ''))
+        if not workflow.allowed(self, chat):
+            # Retain passive-listening behavior when no group version is active.
+            await workflow.observe(self, payload)
+            return
+        key = trial['id'] if trial else chat+':'+workflow.contexts.deployment(chat.split(':')[1])['revision']
+        dialogue = self.group_dialogues.get(key)
+        if dialogue is None:
+            dialogue = GroupDialogue(self, workflow, chat)
+            self.group_dialogues[key] = dialogue
+        await dialogue.observe(payload)
 
     async def _worker(self) -> None:
         while not self._stop.is_set():
@@ -409,7 +422,7 @@ class QQAgentLoop:
             return {"ok": result.get("ok", False), "turn": self.active_turn, "result": result}
         return {"ok": False, "error": "no active turn"}
 
-    async def _deliver_reply(self, chat_id, segments, key, cancelled=None, validate=None):
+    async def _deliver_reply(self, chat_id, segments, key, cancelled=None, validate=None, reply_to=None):
         text = ''.join(s.get('text', '') for s in segments if s['type'] == 'text')
         self.governance.check_output(text)  # All parts must pass before the first send.
         parts = []
@@ -428,6 +441,7 @@ class QQAgentLoop:
                 return {'ok': False, 'error': {'code': f'已暂停或取消，已发送 {len(sent)}/{len(parts)} 段', 'may_have_sent': bool(sent)}}
             chunk = ([{'type': 'text', 'text': part}] if part else []) + (media if index == len(parts)-1 else [])
             result = await self.channel.action('send_message', {'chat_id': chat_id, 'segments': chunk,
+                **({'reply_to': str(reply_to)} if reply_to and index == 0 else {}),
                 'idempotency_key': key if len(parts) == 1 else f'{key}:part:{index+1}'}, timeout=30)
             if not result.get('ok'):
                 detail = result.get('error') or {}
@@ -502,6 +516,8 @@ class QQAgentLoop:
                     "queue": self.queue.qsize(),
                     "group_tasks": sum(not task.done() for task in self.group_tasks),
                     "source_mode": not getattr(sys, 'frozen', False),
+                    "runtime_follow_max_bytes": getattr(self.dsh, 'follow_max_bytes', None),
+                    "group_topic_jobs": sum(len(d.tasks) for d in self.group_dialogues.values()),
                     "bot": self.channel.bot,
                     "counts": self.store.counts(),
                 }, ensure_ascii=False).encode()

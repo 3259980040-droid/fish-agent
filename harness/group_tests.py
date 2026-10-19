@@ -25,7 +25,7 @@ def test_scope(group, space):
 
 
 def parse_scope(scope):
-    match = re.fullmatch(r'chat:group:([0-9]{5,15}):test:([a-f0-9]{32})', str(scope))
+    match = re.fullmatch(r'chat:group:([0-9]{5,15}):test:([a-f0-9]{32})(?::task:[a-f0-9]{32})?', str(scope))
     return match.groups() if match else None
 
 
@@ -89,7 +89,7 @@ class GroupTests:
             raise ValueError('群测试只能使用 QQ 人格')
         space = self.contexts.create_space('qq', persona['name'] + ' · 群测试', revision=revision, origin='group')
         cfg = GroupPolicy(self.root).config('group:' + str(group))
-        self.policy(space).configure('group:' + str(group), {**cfg, 'listen': True, 'reply': True, 'learn': False})
+        self.policy(space).configure('group:' + str(group), {**cfg, 'listen': True, 'reply': True, 'learn': False, 'reply_limits': False})
         with database(self.path) as db:
             db.execute('INSERT INTO group_test_spaces VALUES(?,?,?,?)', (space['id'], str(group), str(sender), self.contexts.runtime_digest('qq')))
         return self.select(group, space['id'], sender)
@@ -146,6 +146,9 @@ async def command(loop, payload, sender):
     try:
         tests.require_controller(group, sender)
         if verb in ('/新建测试', '/切换测试', '/结束测试'):
+            for dialogue in getattr(loop, 'group_dialogues', {}).values():
+                if dialogue.chat == payload['chat_id']:
+                    await dialogue.cancel()
             workflows = [loop.social_workflow, *getattr(loop, 'group_test_workflows', {}).values()]
             for workflow in workflows:
                 task = workflow.pending.get(payload['chat_id'])

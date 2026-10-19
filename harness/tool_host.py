@@ -81,10 +81,17 @@ class ToolHost:
     def bind(self, role, session, scope, sender='', desktop=False):
         from social_context import SocialContext
         from group_tests import GroupTests, parse_scope
+        from group_tasks import GroupTaskStore, parse_child
         if role not in ('qq', 'research') or not session:
             raise ValueError('无效的角色或会话')
         isolated = str(scope).startswith('space:')
         group_trial = parse_scope(scope)
+        child = parse_child(scope)
+        if child:
+            if role != 'qq' or desktop:
+                raise PermissionError('子任务身份不匹配')
+            task_store = GroupTaskStore(self.root)
+            task_store.bind(scope, sender, session)
         if group_trial:
             if role != 'qq' or desktop:
                 raise PermissionError('群测试身份不匹配')
@@ -92,7 +99,7 @@ class ToolHost:
             current = tests.current(group_trial[0])
             if not current or current['id'] != group_trial[1]:
                 raise PermissionError('群测试窗口未启用或已经切换')
-            tests.contexts.bind_runtime(current['id'], session)
+            if not child:tests.contexts.bind_runtime(current['id'], session)
         if isolated:
             space = SocialContext(self.root).space(str(scope)[6:])
             if space['role'] != role:
@@ -115,6 +122,12 @@ class ToolHost:
                 if identity['scope'].startswith('space:'):
                     identity['isolated'] = True
                     identity['allowed_paths'] = [str(SocialContext(self.root).directory(identity['scope'][6:]).resolve())]
+                elif role == 'qq' and parse_child(identity['scope']):
+                    group_id, window_id, task_id = parse_child(identity['scope'])
+                    task_store = GroupTaskStore(self.root); task = task_store.get(task_id)
+                    identity.update(isolated=True, allowed_paths=[], persona_revision='')
+                    if task and task['session'] == identity['session']:
+                        identity.update(allowed_paths=[str(task_store.directory(task).resolve())], persona_revision=task['revision'])
                 elif role == 'qq' and parse_scope(identity['scope']):
                     trial_group, trial_sid = parse_scope(identity['scope'])
                     identity.update(isolated=True, allowed_paths=[], persona_revision='')
@@ -139,12 +152,18 @@ class ToolHost:
             if not identity['owner'] or (not identity['desktop'] and (not Governance(self.root).is_owner(identity['sender']) or capability not in policy.config()['owner_permissions'])):
                 raise PermissionError('主人未授予此管理权限：' + capability)
         from group_tests import GroupTests, parse_scope
+        from group_tasks import GroupTaskStore, parse_child
         group_trial = parse_scope(identity['scope'])
+        child = parse_child(identity['scope'])
+        if child:
+            job = GroupTaskStore(self.root).get(child[2])
+            if not job or job['state'] not in ('generating','sending') or job['session'] != session:
+                raise PermissionError('子任务已完成或取消')
         if group_trial:
             current = GroupTests(self.root).current(group_trial[0])
             if not current or current['id'] != group_trial[1]:
                 raise PermissionError('群测试已结束或窗口已切换')
-        if (identity['scope'].startswith('space:') or group_trial) and name not in ('fish_memory_search', 'fish_memory_save', 'fish_memory_delete'):
+        if (identity['scope'].startswith('space:') or group_trial or child) and name not in ('fish_memory_search', 'fish_memory_save', 'fish_memory_delete'):
             raise PermissionError('独立测试窗口仅开放本窗口记忆；共享资源和外部插件未向此窗口授权')
         if name.startswith('fish_interests_'):
             require('interests.write') if name.endswith('update') else require('status')
@@ -158,7 +177,7 @@ class ToolHost:
             store = ResearchControl(self.root)
             return store.search(str(arguments['query'])) if name.endswith('search') else store.detail(str(arguments['bvid']))
         if name == 'fish_memory_search':
-            return MemoryStore(self.root, role).search(str(arguments.get('query', '')), scope=identity['scope'], limit=12)
+            return MemoryStore(self.root, role).search(str(arguments.get('query', '')), scope='chat:group:'+child[0] if child else identity['scope'], limit=12)
         if name == 'fish_memory_save':
             require('memory.write')
             if identity['scope'].startswith('space:'):

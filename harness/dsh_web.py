@@ -14,6 +14,8 @@ from urllib.parse import urlsplit, urlunsplit
 import requests
 from websockets.asyncio.client import connect
 
+FOLLOW_MAX_BYTES = 1024 * 1024 * 1024
+
 
 def safe_runtime_error(value: str) -> str:
     """Keep actionable error details without exposing request credentials."""
@@ -43,6 +45,14 @@ class DSHWebClient:
         self.origin = launch_url.split("/?")[0]
         self.cookie = ""
         self._baseline_seq: dict[str, int] = {}
+        configured = os.environ.get('FISH_DSH_FOLLOW_MAX_MIB', '1024').strip().lower()
+        if configured in ('unlimited', 'none', '0'):
+            self.follow_max_bytes = None
+        else:
+            value = int(configured)
+            if not 1 <= value <= 1024:
+                raise ValueError('FISH_DSH_FOLLOW_MAX_MIB 需为 1–1024，或 unlimited')
+            self.follow_max_bytes = value * 1024 * 1024
         self.ws_url = self.origin.replace("http://", "ws://").replace("https://", "wss://") + "/api/remote.mux"
 
     async def auth(self) -> None:
@@ -92,7 +102,8 @@ class DSHWebClient:
 
     async def _cursor(self, session_id: str) -> int:
         stream_id = f"fish-follow-{uuid.uuid4().hex[:8]}"
-        async with connect(self.ws_url, additional_headers={"Cookie": self.cookie}, open_timeout=10, proxy=None) as ws:
+        async with connect(self.ws_url, additional_headers={"Cookie": self.cookie}, open_timeout=10, proxy=None,
+                           max_size=self.follow_max_bytes) as ws:
             await ws.send(json.dumps({
                 "type": "open",
                 "streamId": stream_id,
@@ -156,6 +167,7 @@ class DSHWebClient:
     ) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
         last_count = baseline
+        last_error = ''
         while time.monotonic() < deadline:
             if cancel_event is not None and cancel_event.is_set():
                 return {"ok": False, "cancelled": True, "error": "cancelled"}
@@ -163,8 +175,10 @@ class DSHWebClient:
                 cursor = await self._cursor(session_id)
                 page = await self._page(session_id, cursor)
             except Exception as exc:  # noqa: BLE001
+                last_error = safe_runtime_error(f'{type(exc).__name__}: {exc}')
+                if '1009' in str(exc) or 'exceeds limit' in str(exc):
+                    return {'ok': False, 'error': '模型会话读取超过允许大小：' + last_error}
                 await asyncio.sleep(1)
-                last_error = f"{type(exc).__name__}: {exc}"
                 continue
             texts = self._assistant_texts(page)
             start = self._baseline_seq.get(session_id, 0)
@@ -192,7 +206,7 @@ class DSHWebClient:
                     return result
             last_count = len(texts)
             await asyncio.sleep(1)
-        return {"ok": False, "error": f"timeout (assistant_count={last_count})"}
+        return {"ok": False, "error": f"timeout (assistant_count={last_count})" + ('; ' + last_error if last_error else '')}
 
     @staticmethod
     def _final_reasoning(records):

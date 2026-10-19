@@ -143,9 +143,9 @@ class GroupTrialTests(Fixture):
 
     def test_real_group_rate_budget_is_shared_across_windows(self):
         a,b=self.candidates();tests=GroupTests(self.root);sa=tests.create(self.group,a['id'],self.owner)
-        wa=GroupWorkflow(self.root,trial=sa);wa.policy.configure(self.chat,{'max_total_min':1})
+        wa=GroupWorkflow(self.root,trial=sa);wa.policy.configure(self.chat,{'max_total_min':1,'reply_limits':True})
         wa.log(self.chat,1,'direct','sent','fake local delivery')
-        sb=tests.create(self.group,b['id'],self.owner);wb=GroupWorkflow(self.root,trial=sb);wb.policy.configure(self.chat,{'max_total_min':1})
+        sb=tests.create(self.group,b['id'],self.owner);wb=GroupWorkflow(self.root,trial=sb);wb.policy.configure(self.chat,{'max_total_min':1,'reply_limits':True})
         self.assertFalse(wb.within_budget(self.chat))
 
     def test_group_owner_commands_run_through_real_event_dispatch_and_stop(self):

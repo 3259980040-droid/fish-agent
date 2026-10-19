@@ -51,6 +51,8 @@ class GroupWorkflow:
     def within_budget(self, chat):
         # Shared physical-group limits survive A/B switches and new windows.
         now = time.time(); cfg = self.policy.config(chat)
+        if not cfg['reply_limits']:
+            return True
         with database(self.path) as db:
             rows = db.execute("SELECT kind,created FROM decisions WHERE chat=? AND stage='sent' AND created>?", (chat, now-3600)).fetchall()
         if sum(r['created'] > now-60 for r in rows) >= cfg['max_total_min']:
@@ -112,7 +114,7 @@ class GroupWorkflow:
             if kind=='active':
                 with database(self.path) as db:
                     active_rows=db.execute("SELECT created FROM decisions WHERE chat=? AND kind='active' AND stage='sent' AND created>?",(chat,time.time()-3600)).fetchall()
-                if len(active_rows)>=self.policy.config(chat)['max_active_hour'] or (active_rows and time.time()-max(r['created'] for r in active_rows)<self.policy.config(chat)['active_cooldown_s']):
+                if (self.policy.config(chat)['reply_limits'] and len(active_rows)>=self.policy.config(chat)['max_active_hour']) or (active_rows and time.time()-max(r['created'] for r in active_rows)<self.policy.config(chat)['active_cooldown_s']):
                     return
                 recent = self.decisions(chat)
                 last_sent = next((r['created'] for r in recent if r['stage']=='sent' and r['kind']=='active'),0)

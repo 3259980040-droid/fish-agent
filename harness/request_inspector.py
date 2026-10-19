@@ -61,9 +61,12 @@ class RequestInspector:
         if identity['scope'].startswith('space:'):
             from social_context import SocialContext
             revision = SocialContext(self.root).space(identity['scope'][6:])['revision']
-        elif re.fullmatch(r'chat:group:[0-9]{5,15}:test:[a-f0-9]{32}', identity['scope']):
+        elif re.fullmatch(r'chat:group:[0-9]{5,15}:test:[a-f0-9]{32}(?::task:[a-f0-9]{32})?', identity['scope']):
             from social_context import SocialContext
-            revision = SocialContext(self.root).space(identity['scope'].rsplit(':', 1)[1])['revision']
+            revision = SocialContext(self.root).space(identity['scope'].split(':')[4])['revision']
+        elif re.fullmatch(r'chat:group:[0-9]{5,15}:task:[a-f0-9]{32}', identity['scope']):
+            from group_tasks import GroupTaskStore
+            revision = GroupTaskStore(self.root).get(identity['scope'].rsplit(':',1)[1])['revision']
         with database(self.path) as db:
             cur = db.execute('INSERT INTO requests(role,session,scope,revision,created,payload) VALUES(?,?,?,?,?,?)',
                 (role, identity['session'], identity['scope'], revision, time.time(), json.dumps(allowed, ensure_ascii=False)))

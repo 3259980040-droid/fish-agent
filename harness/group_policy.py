@@ -10,7 +10,7 @@ import time
 import uuid
 from storage import database
 
-DEFAULTS = dict(listen=False, learn=False, reply=False, mode='familiar', debounce_s=4,
+DEFAULTS = dict(listen=False, learn=False, reply=False, reply_limits=True, mode='familiar', debounce_s=4,
     active_cooldown_s=60, max_active_hour=6, max_total_min=6,
     max_unanswered_active=2, quiet_start='', quiet_end='')
 RESERVATION_TTL_S = 180
@@ -50,7 +50,7 @@ class GroupPolicy:
         with database(self.path) as db:
             db.execute('BEGIN IMMEDIATE')
             cfg = {**DEFAULTS, **json.loads(self._state(db, chat)['config']), **updates}
-            for k in ('listen', 'learn', 'reply'):
+            for k in ('listen', 'learn', 'reply', 'reply_limits'):
                 if type(cfg[k]) is not bool: raise ValueError(k + ' 需要开关值')
             for k, lo, hi in (('debounce_s',0,60), ('active_cooldown_s',0,86400), ('max_active_hour',0,120), ('max_total_min',1,60), ('max_unanswered_active',0,10)):
                 if type(cfg[k]) is not int or not lo <= cfg[k] <= hi: raise ValueError(k + ' 超出范围')
@@ -138,14 +138,14 @@ class GroupPolicy:
         if now-obs[-1]['created'] > 180 or now < obs[-1]['created']: return result('silent','上下文已过时或时钟变化')
         kind = 'direct' if any(json.loads(row['data'])['direct'] for row in obs) else 'active'
         counts = db.execute("SELECT kind,finished FROM reservations WHERE chat=? AND state IN ('sent','uncertain') AND finished>?",(chat,now-3600)).fetchall()
-        if sum(r['finished']>now-60 for r in counts) >= cfg['max_total_min']: return result('wait','全部回复达到每分钟上限',kind)
+        if cfg['reply_limits'] and sum(r['finished']>now-60 for r in counts) >= cfg['max_total_min']: return result('wait','全部回复达到每分钟上限',kind)
         if kind=='active':
             if cfg['mode']=='mention': return result('silent','当前仅回应提及',kind)
             if now-obs[-1]['created'] < cfg['debounce_s']: return result('wait','正在合并连续消息',kind)
             if self._quiet(cfg,now): return result('wait','主动静默时段',kind)
-            if state['unanswered'] >= cfg['max_unanswered_active']: return result('silent','无人接续，继续旁听',kind)
+            if cfg['reply_limits'] and state['unanswered'] >= cfg['max_unanswered_active']: return result('silent','无人接续，继续旁听',kind)
             active = [r for r in counts if r['kind']=='active']
-            if len(active) >= cfg['max_active_hour']: return result('wait','主动回复达到每小时上限',kind)
+            if cfg['reply_limits'] and len(active) >= cfg['max_active_hour']: return result('wait','主动回复达到每小时上限',kind)
             if active and now-max(r['finished'] for r in active) < cfg['active_cooldown_s']: return result('wait','主动回复冷却中',kind)
         return result('candidate','提及回应' if kind=='direct' else '可以判断是否值得插话',kind)
 

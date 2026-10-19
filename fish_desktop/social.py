@@ -53,10 +53,13 @@ class SocialPage(BasePage):
         self.listen = QCheckBox('允许旁听并保存有界上下文'); form.addRow('旁听', self.listen)
         self.learn = QCheckBox('从新旁听文字提取候选记忆，确认后才用于回复'); form.addRow('学习',self.learn)
         self.mode = QComboBox(); self.mode.addItem('熟悉群友：合适时接话', 'familiar'); self.mode.addItem('只回应提及和回复', 'mention'); form.addRow('参与方式', self.mode)
+        self.reply_limits = QCheckBox('启用每分钟、每小时及无人接续的次数上限')
+        form.addRow('回复次数限制', self.reply_limits)
         self.numbers = {}
         for key, title, lo, hi in (('debounce_s', '消息合并等待（秒）', 0, 60), ('active_cooldown_s', '主动发言冷却（秒）', 0, 86400),
                 ('max_active_hour', '每小时主动发言上限', 0, 120), ('max_total_min', '每分钟全部回复上限', 1, 60), ('max_unanswered_active', '无人接续时最多主动发言', 0, 10)):
             spin = QSpinBox(); spin.setRange(lo, hi); self.numbers[key] = spin; form.addRow(title, spin)
+        self.reply_limits.toggled.connect(lambda enabled: [self.numbers[k].setEnabled(enabled) for k in ('max_active_hour','max_total_min','max_unanswered_active')])
         self.quiet_start = QLineEdit(); self.quiet_start.setPlaceholderText('例如 23:00，留空不设静默')
         self.quiet_end = QLineEdit(); self.quiet_end.setPlaceholderText('例如 08:00，与开始同时填写')
         form.addRow('主动静默开始', self.quiet_start); form.addRow('主动静默结束', self.quiet_end)
@@ -65,7 +68,7 @@ class SocialPage(BasePage):
         row.addWidget(self.group_save); row.addWidget(self.pause); row.addStretch(); card.body.addLayout(row)
         self.clear_context = _button('清理此群旁听记录'); row.insertWidget(2,self.clear_context)
         self.publish = _button('将当前已认可版本发布到此群并开启发言'); card.body.addWidget(self.publish)
-        card.body.addWidget(_label('保存旁听与频率不会打开群回复。静默时段仅约束主动插话；被叫到仍受全部回复上限控制。', 'Caption'))
+        card.body.addWidget(_label('保存设置不会打开群回复。关闭次数限制后不按分钟或小时限次；主动冷却和静默时段仍生效。明确提问独立处理并引用原消息。', 'Caption'))
         self.group_log = QPlainTextEdit(); self.group_log.setReadOnly(True); self.group_log.setPlaceholderText('群决策记录将在模拟与运行后显示。'); gl.addWidget(self.group_log, 1)
         gl.setSizeConstraint(QLayout.SetMinimumSize)
         group_scroll=QScrollArea();group_scroll.setWidgetResizable(True);group_scroll.setFrameShape(QFrame.NoFrame);group_scroll.setWidget(group)
@@ -177,7 +180,9 @@ class SocialPage(BasePage):
         cfg = (tests.policy(trial) if trial else GroupPolicy(self.services.root)).config('group:' + gid)
         self.listen.setChecked(cfg['listen']); self.mode.setCurrentIndex(max(0, self.mode.findData(cfg['mode'])))
         self.learn.setChecked(cfg['learn'])
+        self.reply_limits.setChecked(cfg['reply_limits'])
         for k, spin in self.numbers.items(): spin.setValue(cfg[k])
+        for k in ('max_active_hour','max_total_min','max_unanswered_active'):self.numbers[k].setEnabled(cfg['reply_limits'])
         self.quiet_start.setText(cfg['quiet_start']); self.quiet_end.setText(cfg['quiet_end'])
         dep = SocialContext(self.services.root).deployment(gid)
         self.deployment.setText(('群发言已开启 · 人格 ' + dep['revision'][:8]) if dep['enabled'] else '群发言已停止；' + dep.get('reason', '发布记录保留。'))
@@ -191,7 +196,7 @@ class SocialPage(BasePage):
     def _save_group(self):
         from group_policy import GroupPolicy
         try:
-            cfg = {'listen': self.listen.isChecked(), 'learn':self.learn.isChecked(), 'mode': self.mode.currentData(), 'quiet_start': self.quiet_start.text().strip(), 'quiet_end': self.quiet_end.text().strip(), **{k: v.value() for k, v in self.numbers.items()}}
+            cfg = {'listen': self.listen.isChecked(), 'learn':self.learn.isChecked(), 'reply_limits':self.reply_limits.isChecked(), 'mode': self.mode.currentData(), 'quiet_start': self.quiet_start.text().strip(), 'quiet_end': self.quiet_end.text().strip(), **{k: v.value() for k, v in self.numbers.items()}}
             GroupPolicy(self.services.root).configure('group:' + self.groups.currentData(), cfg)
             from group_tests import GroupTests
             tests = GroupTests(self.services.root); trial = tests.current(self.groups.currentData())

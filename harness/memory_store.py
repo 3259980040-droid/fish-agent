@@ -46,7 +46,7 @@ class MemoryStore:
     @staticmethod
     def is_test_scope(scope):
         """Isolated persona spaces are read-only for long-term memory."""
-        return str(scope).startswith('space:') or bool(re.fullmatch(r'chat:group:[0-9]{5,15}:test:[a-f0-9]{32}', str(scope)))
+        return str(scope).startswith('space:') or bool(re.fullmatch(r'chat:group:[0-9]{5,15}(?::test:[a-f0-9]{32})(?::task:[a-f0-9]{32})?', str(scope))) or bool(re.fullmatch(r'chat:group:[0-9]{5,15}:task:[a-f0-9]{32}', str(scope)))
 
     def options(self):
         return {'auto_learning': True, **read_json(self.path.parent / 'memory-options.json')}
