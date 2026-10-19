@@ -379,12 +379,14 @@ class QQAgentLoop:
             from tool_host import bind_session
             from memory_store import MemoryStore
             await asyncio.to_thread(bind_session, self.root, 'qq', self.session_id, 'owner', self.owner)
+            from owner_computer import apply_permissions
+            computer=await asyncio.to_thread(apply_permissions,self.root,self.session_id)
             prompt[0]['text'] = self.governance.identity_prompt(self.owner) + MemoryStore(self.root, 'qq').context(item['text'], 'owner') + prompt[0]['text']
             self.store.update_message(item['message_id'], segments=item['payload'].get('segments', []))
             self.governance.consume("calls")
             await client.prompt(self.session_id, prompt)
             result = await client.wait_response(
-                self.session_id, baseline, timeout=180, cancel_event=self.cancel_event,
+                self.session_id, baseline, timeout=1800 if computer else 180, cancel_event=self.cancel_event,
             )
         except Exception as exc:  # noqa: BLE001
             status = 'cancelled' if isinstance(exc, InterruptedError) or self.cancel_event.is_set() else 'failed'

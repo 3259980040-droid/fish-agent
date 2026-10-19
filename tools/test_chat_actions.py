@@ -52,7 +52,7 @@ class ChatActions(Fixture):
         bubbles=[{'kind':'text','text':'坏了'}, {'kind':'text','text':'让你发现了'}, {'kind':'sticker','emoji_id':asset}]
         def request(root,route,*args,**kwargs):
             return {'bubbles':bubbles} if route=='/chat/take' else {'asset':''}
-        with patch('owner_tests.DSHRuntimeAdapter.connect',return_value=client),patch('owner_tests.bind_session'),patch('tool_host.request',side_effect=request),patch('chat_output.bubble_delay',return_value=0):
+        with patch('owner_tests.DSHRuntimeAdapter.connect',return_value=client),patch('owner_tests.bind_session'),patch('owner_computer.apply_permissions',return_value=False),patch('tool_host.request',side_effect=request),patch('chat_output.bubble_delay',return_value=0):
             asyncio.run(process(loop,{'message_id':mid,'conversation':conv,'payload':payload,'space_id':space['id'],'text':'聊聊'}))
         sent=[call.args[1] for call in loop.channel.action.await_args_list]
         self.assertEqual([v['segments'] for v in sent],[[{'type':'text','text':'坏了'}],[{'type':'text','text':'让你发现了'}],[{'type':'image','asset_id':asset}]])

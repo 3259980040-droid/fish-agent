@@ -26,7 +26,8 @@ except ImportError:
 CAPABILITIES = {"status": "查看状态", "pause": "暂停回复", "resume": "恢复回复", "cancel": "取消当前任务",
                 "memory.write": "保存记忆", "memory.delete": "删除记忆", "interests.write": "调整研究兴趣", "emoji.manage": "管理表情库",
                 'persona.test':'选择人格测试窗口','persona.approve':'认可人格版本',
-                'bot.manage':'管理人格与群聊设置','schedule.manage':'创建和修改定时任务'}
+                'bot.manage':'管理人格与群聊设置','schedule.manage':'创建和修改定时任务',
+                'computer.work':'主人私聊使用本机文件、编程和终端工具'}
 DEFAULTS = {"version": 3, "owner_permissions": list(CAPABILITIES), "paused": False, "paused_roles": {"qq": False, "research": False},
             "daily_usage_limits": {"qq": True, "research": True},
             "max_daily_calls": 150, "max_daily_replies": 150, "max_tool_calls_per_turn": 12,

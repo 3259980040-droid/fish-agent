@@ -50,7 +50,7 @@ class TulpaTests(Fixture):
         mid = loop.store.record_message(conv['id'],payload['chat_id'],self.owner,'inbound','incoming',None,payload['segments'],'你好','queued')
         client = Mock(auth=AsyncMock(),baseline=AsyncMock(return_value=0),prompt=AsyncMock(),
                       wait_response=AsyncMock(return_value={'ok':True,'text':'原版发送完后的本地尾声'}))
-        with patch('owner_tests.DSHRuntimeAdapter.connect',return_value=client), patch('owner_tests.bind_session'):
+        with patch('owner_tests.DSHRuntimeAdapter.connect',return_value=client), patch('owner_tests.bind_session'), patch('owner_computer.apply_permissions',return_value=True):
             asyncio.run(process(loop,{'message_id':mid,'conversation':conv,'payload':payload,'space_id':space['id'],'text':'你好'}))
         loop.channel.action.assert_not_awaited()
 

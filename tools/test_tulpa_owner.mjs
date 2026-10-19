@@ -13,4 +13,14 @@ for (const name of names.slice(0,6)) {
   assert.equal(toolDenial({name, arguments:{}}, {isolated:true, chat_mode:'tulpa', fishTools:names}, '.', 'qq'), undefined)
 }
 assert.ok(toolDenial({name:'schedule_create'}, {isolated:true,chat_mode:'owner'}, '.', 'qq'))
+const codingRequest={...request,messages:[{source:{kind:'system-prompt'},content:'native coding instructions'},{source:{kind:'runtime-context'},content:[]},{source:{kind:'skill-catalog'},content:[]}],tools:[...request.tools,{name:'write'},{name:'edit'},{name:'read'}]}
+const coding=chatRequest(codingRequest,{scope:'space:owner',chat_mode:'tulpa',owner:true,desktop:false,owner_coding:true})
+for (const name of ['bash','write','edit','read','schedule_create','fishp__tulpa_owner__send_chat_reply']) assert.ok(coding.tools.some(t=>t.name===name),name)
+assert.equal(coding.messages[0].content[0].text,'native coding instructions')
+assert.ok(coding.messages.some(m=>m.source.kind==='runtime-context'))
+assert.ok(coding.system.startsWith('coding header'))
+for (const name of ['bash','write','edit']) assert.equal(toolDenial({name,arguments:{}},{owner:true,owner_coding:true,desktop:false,isolated:true,isGroup:false},'.','qq'),undefined)
+const daily=chatRequest(codingRequest,{scope:'owner',owner:true,owner_coding:true,desktop:false})
+assert.ok(!daily.system.includes('fish_chat_reply'))
+assert.ok(!daily.tools.some(t=>t.name==='schedule_create'))
 console.log('Tulpa tools and scheduler remain private; group projection preserved: PASS')

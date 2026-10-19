@@ -54,7 +54,11 @@ class BotControl:
             directory=self.root/'data/qq/scheduled';directory.mkdir(parents=True,exist_ok=True)
             session=await client.create_session(cwd=str(directory))
         with database(self.path) as db:db.execute('INSERT OR REPLACE INTO sessions VALUES(?,?,?)',(target,session,revision))
+        await client.baseline(session)
         await asyncio.to_thread(bind_session,self.root,'qq',session,'control:'+target,c.owner())
+        if target=='private:'+c.owner():
+            from owner_computer import apply_permissions
+            await asyncio.to_thread(apply_permissions,self.root,session)
         return session
 
     def context(self,session):
@@ -98,6 +102,11 @@ class BotControl:
         if action=='personas':return PersonaLibrary(self.root).list()
         if action=='persona_import':return [{'id':p['id'],'name':p['name']} for p in PersonaLibrary(self.root).import_text(params['text'],name=params.get('name','导入人格'),source=params.get('source','主人对话'))]
         if action=='persona_apply':return PersonaLibrary(self.root).apply(params['revision'],params.get('target','owner'),new=bool(params.get('new',False)))
+        if action=='message_send':
+            from owner_computer import authorized
+            if not identity or not (identity.get('desktop') and identity.get('owner') or authorized(self.root,identity)):
+                raise PermissionError('单次交办发送仅用于已核验主人工作入口')
+            return self._deliver(self.validate_target(params.get('target','owner')),params['text'],params['request_id'])
         if action.startswith('group_'):
             from group_tests import GroupTests
             from group_policy import GroupPolicy
@@ -126,12 +135,16 @@ class BotControl:
     def send(self,identity,text,request_id):
         if not identity['scope'].startswith('control:'):raise PermissionError('此发送器仅用于已绑定目标的定时会话')
         target=self.validate_target(identity['scope'][8:])
-        if not isinstance(text,str) or not text.strip():raise ValueError('消息不能为空')
-        if not isinstance(request_id,str) or not request_id.strip():raise ValueError('需要本次触发的唯一发送编号')
         with database(self.path) as db:
-            db.execute('BEGIN IMMEDIATE')
             row=db.execute('SELECT * FROM sessions WHERE target=? AND session=?',(target,identity['session'])).fetchone()
             if not row:raise PermissionError('定时会话绑定不匹配')
+        return self._deliver(target,text,request_id)
+
+    def _deliver(self,target,text,request_id):
+        if not isinstance(text,str) or not text.strip():raise ValueError('消息不能为空')
+        if not isinstance(request_id,str) or not request_id.strip():raise ValueError('需要本次执行的唯一发送编号')
+        with database(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
             previous=db.execute('SELECT * FROM sends WHERE id=?',(request_id,)).fetchone()
             if previous:
                 if previous['target']!=target or previous['text']!=text:raise ValueError('发送编号已用于其他内容')

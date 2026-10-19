@@ -211,6 +211,7 @@ class GroupTests(Fixture):
         from qq_agent_loop import QQAgentLoop
         from owner_tests import process
         c=SocialContext(self.root);p=c.ensure_default('qq');space=c.create_space('qq',revision=p['id'],origin='owner-qq')
+        c.select_owner_space(space['id'],self.owner)
         async def check():
             loop=QQAgentLoop(self.root);conv=loop.store.get_or_create_conversation('test:'+space['id'],'qq')
             client=Mock(auth=AsyncMock(),create_session=AsyncMock(return_value='owner-test-session'),baseline=AsyncMock(return_value=0),prompt=AsyncMock(),wait_response=AsyncMock(return_value={'ok':True,'text':'测试答复'}))
@@ -218,7 +219,7 @@ class GroupTests(Fixture):
                 mid=loop.store.record_message(conv['id'],'private:'+self.owner,self.owner,'inbound','in-'+str(index),None,[],'你好','queued')
                 item={'space_id':space['id'],'message_id':mid,'conversation':conv,'text':'你好','payload':{'chat_id':'private:'+self.owner,'segments':[]}}
                 loop._deliver_reply=AsyncMock(return_value={'ok':success,'payload':{'message_id':'fake-out-'+str(index)}})
-                with patch('runtime_adapter.DSHRuntimeAdapter.connect',return_value=client),patch('owner_tests.bind_session'):
+                with patch('runtime_adapter.DSHRuntimeAdapter.connect',return_value=client),patch('owner_tests.bind_session'),patch('owner_computer.apply_permissions',return_value=False),patch('tool_host.request',return_value={}):
                     await process(loop,item)
                 if not success:
                     with self.assertRaises(PermissionError):c.approve(p['id'],self.owner)

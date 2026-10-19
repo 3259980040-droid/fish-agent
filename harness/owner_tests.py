@@ -72,6 +72,8 @@ async def process(loop, item):
         loop.store.create_turn(turn, conv['id'], session, turn)
         await asyncio.to_thread(bind_session, loop.root, 'qq', session, space['scope'], loop.owner)
         baseline = await client.baseline(session)
+        from owner_computer import apply_permissions
+        computer=await asyncio.to_thread(apply_permissions,loop.root,session)
         media = MediaService(loop.root, 'qq')
         media.directory = contexts.directory(space['id']) / 'media'
         prompt = await asyncio.to_thread(media.prepare_content, item['payload'].get('segments', []), item['text'], cancelled=loop.cancel_event)
@@ -87,7 +89,7 @@ async def process(loop, item):
         reply_mode = space['persona'].get('owner_reply_mode', 'final')
         if reply_mode == 'thinking_excerpt' and item['payload'].get('chat_id') != 'private:' + str(loop.owner):
             raise PermissionError('思考片段仅用于主人私聊测试')
-        result = await client.wait_response(session, baseline, timeout=180, cancel_event=loop.cancel_event,
+        result = await client.wait_response(session, baseline, timeout=1800 if computer else 180, cancel_event=loop.cancel_event,
                                            include_reasoning=reply_mode == 'thinking_excerpt')
         if result.get('cancelled') or loop.cancel_event.is_set():
             raise InterruptedError('已取消')

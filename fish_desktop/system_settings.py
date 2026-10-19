@@ -23,8 +23,9 @@ class OwnerPage(BasePage):
         for index, (key, title) in enumerate(CAPABILITIES.items()):
             check = QCheckBox(title)
             self.permissions[key] = check
-            row.addWidget(check, index // 4, index % 4)
-        form.addRow("私聊管理权限", row)
+            if key=='computer.work':row.addWidget(check,(index+3)//4,0,1,4)
+            else:row.addWidget(check, index // 4, index % 4)
+        form.addRow("主人管理与工作权限", row)
         self.paused = QCheckBox("暂停所有 QQ 回复与任务")
         form.addRow(self.paused)
         self.daily_limits = QComboBox()
@@ -40,7 +41,7 @@ class OwnerPage(BasePage):
         for widget in (self.calls, self.replies, self.tools, self.model_calls, self.tokens): widget.setMaximumWidth(220)
         form.addRow("每角色每日处理轮数", self.calls)
         form.addRow("每日 QQ 发出条数", self.replies)
-        form.addRow("每轮工具调用上限", self.tools)
+        form.addRow("普通聊天每轮工具上限", self.tools)
         form.addRow('每角色每日模型请求上限', self.model_calls)
         form.addRow('已报告 token 的暂停阈值', self.tokens)
         self.daily_limits.currentIndexChanged.connect(lambda _: [w.setEnabled(self.daily_limits.currentData()) for w in
@@ -48,6 +49,9 @@ class OwnerPage(BasePage):
         card.body.addWidget(_label('关闭后，QQ 不按每日处理轮数、发出条数、模型请求数或 token 总量暂停；用量继续统计。B 站研究侧保持独立设置。', 'Caption'))
         card.body.addLayout(form)
         card.body.addWidget(_label("主人任务认真执行，必要时允许详细回答；人格中的懒或顶嘴不能代替执行。管理权限由程序执行。", "Caption"))
+        computer_note=_label("开启本机工具后，主人私聊及其定时任务可使用当前 Windows 账号读写文件、修改代码和运行命令，结果实际发回 QQ。主人本机工作不套用普通聊天的工具次数上限。", "Caption")
+        computer_note.setWordWrap(True)
+        card.body.addWidget(computer_note)
         root.addWidget(card)
         self.save_btn = _button("保存主人权限与用量", primary=True)
         card.body.addWidget(self.save_btn)

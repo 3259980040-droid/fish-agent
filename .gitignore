@@ -31,6 +31,7 @@ shared/
 qq/
 knowledge/*
 !knowledge/AGENTS.md
+qq-work/owner-files/
 harness/.phase1a-tmp/
 harness/.phase1b-tmp/
 harness/.phase2-tmp/
@@ -42,6 +43,7 @@ harness/plugins/registry.json
 # Local configs
 harness/agents.json
 harness/control.json
+harness/owner-computer.json
 harness/multimodal.json
 harness/emoji.json
 harness/setup.json
