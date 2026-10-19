@@ -197,6 +197,34 @@ class TakeoverTests(unittest.TestCase):
         self.assertEqual(result["text"],"这是最终回复")
         self.assertEqual(client._page.await_count,2)
 
+    def test_test_memory_stays_readonly_after_background_refresh(self):
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtTest import QTest
+        from fish_desktop.resources import MemoryPage
+        from types import SimpleNamespace
+        app = QApplication.instance() or QApplication([])
+        page = MemoryPage(SimpleNamespace(root=self.root))
+        try:
+            page.scope.addItem('独立测试', 'space:' + 'a' * 32)
+            page.scope.setCurrentIndex(page.scope.count() - 1)
+            self.assertFalse(page.save_btn.isEnabled())
+            page.refresh()
+            for _ in range(100):
+                QTest.qWait(20)
+                if not page.loading:
+                    break
+            self.assertFalse(page.loading)
+            self.assertFalse(page.save_btn.isEnabled())
+            self.assertFalse(page.confirm_btn.isEnabled())
+            self.assertFalse(page.delete_btn.isEnabled())
+            self.assertIn('只读', page.test_note.text())
+            page.scope.setCurrentIndex(0)
+            self.assertTrue(page.save_btn.isEnabled())
+        finally:
+            page.runner.shutdown()
+            page.runner.executor.shutdown(wait=True, cancel_futures=True)
+            page.close()
+
     def test_qt_navigation_and_save_button_persist_edits(self):
         from PySide6.QtWidgets import QApplication
         from PySide6.QtTest import QTest

@@ -138,11 +138,16 @@ class MemoryPage(BasePage):
     def _is_test_scope(self):
         return str(self.scope.currentData() or '').startswith('space:')
 
+    def _done(self, on_done=None):
+        super()._done(on_done)
+        self._update_scope_guard()
+
     def _update_scope_guard(self):
         readonly = self._is_test_scope()
-        self.save_btn.setEnabled(not readonly)
-        self.confirm_btn.setEnabled(not readonly)
-        self.delete_btn.setEnabled(not readonly and bool(self.mid))
+        editable = not readonly and not self.loading
+        self.save_btn.setEnabled(editable)
+        self.confirm_btn.setEnabled(editable)
+        self.delete_btn.setEnabled(editable and bool(self.mid))
         self.test_note.setText(
             '独立测试空间：长期记忆只读。这里只显示已有测试资料，不会写入、确认、删除或重学正式记忆。'
             if readonly else ''

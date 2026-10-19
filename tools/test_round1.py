@@ -74,6 +74,23 @@ class RoundOneTests(unittest.TestCase):
         self.assertIn("1234", client.origin)
         manager.start.assert_called_once_with("qq")
 
+    def test_adapter_retries_read_timeout_without_duplicate_start_and_stays_bounded(self):
+        import requests
+        from runtime_adapter import DSHRuntimeAdapter
+        manager = SimpleNamespace(config=SimpleNamespace(runtime_port=lambda role: 1234), start=unittest.mock.Mock())
+        ready = SimpleNamespace(status_code=200, raise_for_status=lambda: None,
+            json=lambda: {"url": "http://127.0.0.1:1234/?launch=fixture", "role": "qq", "guard_active": True,
+                          "control_version": 3, 'root_id': __import__('core').root_id(self.root)})
+        with patch('runtime_adapter.requests.get', side_effect=[requests.ReadTimeout(), ready]), patch('runtime_adapter.time.sleep'):
+            client = DSHRuntimeAdapter(self.root, 'qq', manager).connect()
+        self.assertEqual(client.origin, 'http://127.0.0.1:1234')
+        manager.start.assert_not_called()
+        with patch('runtime_adapter.requests.get', side_effect=requests.ReadTimeout()), \
+                patch('runtime_adapter.time.sleep'), patch('runtime_adapter.time.monotonic', side_effect=[0, 0, 36]):
+            with self.assertRaisesRegex(RuntimeError, '等待时间'):
+                DSHRuntimeAdapter(self.root, 'qq', manager).connect()
+        manager.start.assert_not_called()
+
     def test_rule_validation_preserves_config(self):
         before = self.policy.config()
         with self.assertRaises(Exception): self.policy.save({"block_patterns":["["]})

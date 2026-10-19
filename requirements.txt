@@ -1,4 +1,10 @@
 PySide6==6.12.0
-Pillow==11.2.1
+Pillow==13.0.0
 requests==2.32.4
 websockets==17.2
+mcp==1.30.0
+bilibili-api-python==17.4.2
+cryptography==50.0.2
+qrcode==8.2
+regex==2026.9.29
+httpx==0.28.1

@@ -60,6 +60,11 @@ class DSHRuntimeAdapter:
                     # timeout; give the newly spawned server a full ready window.
                     deadline = time.monotonic() + 90
                 time.sleep(.25)
+            except requests.Timeout:
+                # The local HTTP server can listen before its control route is
+                # responsive. Keep the existing deadline and identity checks;
+                # a slow response is not a reason to launch another runtime.
+                time.sleep(.25)
         raise RuntimeError("角色服务未在等待时间内就绪，请查看运行记录；首次启动最多等待 90 秒")
 
     def cancel(self, session_id: str):
