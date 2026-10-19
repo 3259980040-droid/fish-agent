@@ -208,7 +208,9 @@ class GroupDialogue:
                     context+='\n[本窗口早先已发回复]\n'+json.dumps([r['text'].split('\n回复：')[-1][:1000] for r in reversed(old)],ensure_ascii=False)
                 context+='\n[此话题已完成的相关问答]\n'+json.dumps(self.jobs.history(job),ensure_ascii=False)
                 context+=language+knowledge
-                context+=f"\n本轮只回答消息 {job['root']} 的提问及其合并补充，对象 QQ {job['sender']}。不要把群背景里的其他问题当成本轮请求。日常回复的长度预算为 {people['max_chars']} 字，可以只回一句，不为凑长度展开解释；明确任务按需完成，正式回复最多800字。\n"
+                from group_reply_style import reply_style_prompt
+                context+=f"\n本轮只回答消息 {job['root']} 的提问及其合并补充，对象 QQ {job['sender']}。不要把群背景里的其他问题当成本轮请求。\n"
+                context+=reply_style_prompt()
                 await asyncio.to_thread(set_group_context,self.root,session,context)
                 if not self.valid(job,token):raise InterruptedError('窗口或任务已取消')
                 for item in job['payload']:

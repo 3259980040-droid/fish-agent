@@ -32,6 +32,19 @@ class ConcurrentTests(Fixture):
         self.assertIn('没有附加文字',self.clients[0].content[0]['text'])
         self.assertEqual(self.sent[0]['reply_to'],'blank-at')
 
+    def test_reply_style_reaches_actual_group_request(self):
+        self.setup_dialogue()
+        async def run():
+            await self.d.observe(self.payload('请反驳一个观点并展开理由','discussion'));await self.drain()
+        asyncio.run(run())
+        context=list(self.contexts.values())[-1]
+        self.assertIn('20–500',context)
+        self.assertIn('200–400',context)
+        self.assertIn('不要每次都加动作',context)
+        self.assertIn('"max_chars": 500',context)
+        self.assertNotIn('日常回复的长度预算为',context)
+        self.assertEqual(len(self.sent),1)
+
     def setup_dialogue(self,mode='final'):
         self.tests=GroupTests(self.root)
         p=self.tests.contexts.save_persona('qq','same fish','同一个人格',owner_reply_mode=mode)

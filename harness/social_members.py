@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 from storage import read_json
 from social_roster import SocialRoster
+from group_reply_style import MIN_CHARS, MAX_CHARS
 
 
 def allowed_group(root, group):
@@ -72,7 +73,7 @@ def reply_context(root, payload, snapshot, bot_id=''):
     group = str(payload.get('chat_id', '')).removeprefix('group:')
     roster = SocialRoster(root)
     if roster.settings()['group_id'] != group:
-        return {'profiles': [], 'facts': [], 'reply_target': '', 'max_chars': 800}, {'active_probability': 1.0, 'cooldown_multiplier': 1.0, 'max_chars': 800}
+        return {'profiles': [], 'facts': [], 'reply_target': '', 'min_chars': MIN_CHARS, 'max_chars': MAX_CHARS}, {'active_probability': 1.0, 'cooldown_multiplier': 1.0, 'max_chars': MAX_CHARS}
     allowed_group(root, group)
     ids = participants(payload, snapshot, bot_id)
     profiles = []
@@ -86,8 +87,10 @@ def reply_context(root, payload, snapshot, bot_id=''):
             facts.append({'subject': uid, 'text': row['text'][:350], 'source': row['source'][:100]})
     target = str((payload.get('sender') or {}).get('id', ''))
     behavior = roster.behavior(group, target) if re.fullmatch(r'[0-9]{5,15}', target) else {'max_chars': 120, 'active_probability': .2, 'cooldown_multiplier': 2.0}
-    # Only a public profile projection and the length budget enter generation.
-    return {'profiles': profiles, 'facts': facts[:8], 'reply_target': target, 'max_chars': behavior['max_chars']}, behavior
+    # Relationship state still controls proactive participation, never how
+    # thoroughly a direct question deserves to be answered.
+    behavior = {**behavior, 'max_chars': MAX_CHARS}
+    return {'profiles': profiles, 'facts': facts[:8], 'reply_target': target, 'min_chars': MIN_CHARS, 'max_chars': MAX_CHARS}, behavior
 
 
 def active_admitted(chat, cursor, behavior, last_sent, cooldown, now):

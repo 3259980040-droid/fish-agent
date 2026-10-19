@@ -40,7 +40,7 @@ class MemberIntegration(unittest.TestCase):
         self.assertNotIn('C_UNRELATED',text);self.assertNotIn('C_PRIVATE',text)
         for key in ('affinity','delta','locked','active_probability','cooldown_multiplier','events'):
             self.assertNotIn(key,context);self.assertNotIn('"'+key+'"',text)
-        self.assertEqual(context['max_chars'],480);self.assertEqual(behavior['active_probability'],.8)
+        self.assertEqual((context['min_chars'],context['max_chars']),(20,500));self.assertEqual(behavior['active_probability'],.8)
 
     def test_behavior_changes_do_not_bypass_group_limits(self):
         lows=self.roster.behavior(GROUP,A)
@@ -52,6 +52,17 @@ class MemberIntegration(unittest.TestCase):
         self.assertGreater(admitted_high,admitted_low)
         self.assertFalse(active_admitted('group:'+GROUP,1,highs,990,60,1000))
         self.assertFalse(GroupPolicy(self.root).config('group:'+GROUP)['reply'])
+
+    def test_group_reply_range_is_not_reduced_by_affinity(self):
+        payload={'chat_id':'group:'+GROUP,'sender':{'id':A},'segments':[]}
+        for score in (0,30,90):
+            self.roster.save_member(GROUP,A,affinity=score,locked=False,preferences='',aliases=[])
+            context,behavior=reply_context(self.root,payload,{'messages':[]})
+            self.assertEqual((context['min_chars'],context['max_chars']),(20,500))
+            self.assertEqual(behavior['max_chars'],500)
+        self.roster.configure('876543210')
+        context,_=reply_context(self.root,payload,{'messages':[]})
+        self.assertEqual((context['min_chars'],context['max_chars']),(20,500))
 
     def test_automatic_event_piggybacks_candidate_learning(self):
         policy=GroupPolicy(self.root);policy.configure('group:'+GROUP,{'listen':True,'learn':True})

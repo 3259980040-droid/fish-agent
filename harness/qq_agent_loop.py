@@ -546,6 +546,7 @@ class QQAgentLoop:
                     "group_tasks": sum(not task.done() for task in self.group_tasks),
                     "source_mode": not getattr(sys, 'frozen', False),
                     "language_layer_version": 1,
+                    "group_reply_style_version": 2,
                     "channel_epoch": self.channel.epoch,
                     "channel_seq": self.channel.last_seq,
                     "event_queue": self.channel._events.qsize(),
