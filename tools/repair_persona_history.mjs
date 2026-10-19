@@ -23,7 +23,11 @@ function decode(bytes) {
   for (let offset = 0; offset < bytes.length;) {
     const result = zstdDecompressSync(bytes.subarray(offset), {info: true})
     if (!result.engine.bytesWritten) throw new Error('No frame consumed')
-    rows.push(...result.buffer.toString('utf8').trim().split('\n').filter(Boolean).map(JSON.parse))
+    const frameRows = result.buffer.toString('utf8').trim().split('\n').filter(Boolean).map(JSON.parse)
+    if (offset === 0 && (frameRows.length !== 1 || frameRows[0].type !== 'session')) {
+      throw new Error('The first compressed frame must contain exactly the session header')
+    }
+    rows.push(...frameRows)
     offset += result.engine.bytesWritten
   }
   const decoder = codec.createDecoder(rows[0], 'strict')
@@ -53,8 +57,12 @@ for (const path of files(base)) {
   restoreReleasedV4Artifact(artifact, new Set(KNOWN_SESSION_EVENT_TYPES))
   const physical = [{type: 'session', ...codec.encodeHeader(artifact.header, artifact.inheritedEventCount)},
                     ...artifact.events.map(event => codec.encodeEvent(event))]
-  const encoded = zstdCompressSync(physical.map(value => JSON.stringify(value)).join('\n') + '\n',
-    {params: {[constants.ZSTD_c_checksumFlag]: 1}})
+  const options = {params: {[constants.ZSTD_c_checksumFlag]: 1}}
+  // The JSONL backend reads the first frame independently for metadata.
+  const encoded = Buffer.concat([
+    zstdCompressSync(JSON.stringify(physical[0]) + '\n', options),
+    zstdCompressSync(physical.slice(1).map(value => JSON.stringify(value)).join('\n') + '\n', options),
+  ])
   const restored = restoreReleasedV4Artifact(decode(encoded), new Set(KNOWN_SESSION_EVENT_TYPES))
   for (const event of restored.events) {
     if (!early.some(item => item.seq === event.seq)
