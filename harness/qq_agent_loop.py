@@ -43,21 +43,37 @@ class ChannelClient:
         self.futures: dict[str, asyncio.Future] = {}
         self._seq = 0
         self._task: asyncio.Task | None = None
+        self._event_task: asyncio.Task | None = None
+        self._events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._stop = asyncio.Event()
 
     async def start(self) -> None:
+        self._event_task = asyncio.create_task(self._dispatch_events(), name="fish-qq-core-events")
         self._task = asyncio.create_task(self._run(), name="fish-qq-core-client")
 
     async def stop(self) -> None:
         self._stop.set()
         if self.ws is not None:
             await self.ws.close()
-        if self._task is not None:
-            self._task.cancel()
+        tasks = [task for task in (self._task, self._event_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _dispatch_events(self) -> None:
+        # Keep event order while the receiver continues resolving action receipts.
+        # An event handler may itself send a message and await its receipt.
+        while not self._stop.is_set():
+            frame = await self._events.get()
             try:
-                await self._task
-            except (asyncio.CancelledError, Exception):
-                pass
+                await self.on_event(frame)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log(f"fish-qq event failed: {type(exc).__name__}: {exc}")
+            finally:
+                self._events.task_done()
 
     async def _run(self) -> None:
         while not self._stop.is_set():
@@ -88,7 +104,7 @@ class ChannelClient:
                             continue
                         if frame.get("type") == "event":
                             self.last_seq = max(self.last_seq, int(frame.get("seq", 0)))
-                            await self.on_event(frame)
+                            self._events.put_nowait(frame)
                         elif frame.get("type") == "action.result" and frame.get("id") in self.futures:
                             future = self.futures.pop(frame["id"])
                             if not future.done():
@@ -96,12 +112,13 @@ class ChannelClient:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
+                log(f"fish-qq disconnected: {type(exc).__name__}: {exc}")
+            finally:
                 self.ws = None
                 for future in self.futures.values():
                     if not future.done():
-                        future.set_exception(RuntimeError(f"fish-qq disconnected: {exc}"))
+                        future.set_exception(RuntimeError("fish-qq disconnected"))
                 self.futures.clear()
-                log(f"fish-qq disconnected: {type(exc).__name__}: {exc}")
             if not self._stop.is_set():
                 await asyncio.sleep(1)
 
@@ -112,11 +129,11 @@ class ChannelClient:
         action_id = f"core-{self._seq}-{uuid.uuid4().hex[:4]}"
         future = asyncio.get_running_loop().create_future()
         self.futures[action_id] = future
-        await self.ws.send(json.dumps({
-            "v": 1, "type": "action", "id": action_id, "action": action,
-            "ts": "", "payload": payload,
-        }))
         try:
+            await self.ws.send(json.dumps({
+                "v": 1, "type": "action", "id": action_id, "action": action,
+                "ts": "", "payload": payload,
+            }))
             return await asyncio.wait_for(future, timeout)
         finally:
             self.futures.pop(action_id, None)
@@ -237,14 +254,19 @@ class QQAgentLoop:
         from social_context import SocialContext
         test_space = SocialContext(self.root).owner_space(sender)
         conversation = self.store.get_or_create_conversation('test:' + test_space['id'], self.agent_id) if test_space else self.conversation
+        paused = self.governance.config()['paused']
         try:
             message_id = self.store.record_message(
                 conversation["id"], payload["chat_id"], self.owner, "inbound",
                 str(payload.get("message_id", "")), payload.get("reply_to"),
-                payload.get("segments", []), text, "queued",
+                payload.get("segments", []), text, "paused" if paused else "queued",
             )
         except Exception as exc:  # duplicate channel_message_id or DB error
             log(f"inbound duplicate/error: {type(exc).__name__}: {exc}")
+            return
+        if paused:
+            self.store.update_message(message_id, error="主人已暂停回复，消息已跳过")
+            log(f"owner inbound skipped while paused message_id={message_id}")
             return
         await self.queue.put({"message_id": message_id, "payload": payload, "text": text,
                               'space_id': test_space['id'] if test_space else '', 'conversation': conversation})
@@ -424,6 +446,10 @@ class QQAgentLoop:
         if capability in ("pause", "resume"):
             self.governance.save({"paused": capability == "pause"})
             if capability == "pause":
+                while not self.queue.empty():
+                    item = self.queue.get_nowait()
+                    self.store.update_message(item['message_id'], status='paused', error='主人已暂停回复，消息已跳过')
+                    self.queue.task_done()
                 await self.cancel()
             response = "已暂停回复。发 /继续 恢复。" if capability == "pause" else "已恢复回复。"
         elif capability == "cancel":

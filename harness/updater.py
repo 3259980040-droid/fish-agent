@@ -11,7 +11,7 @@ import time
 import uuid
 import zipfile
 
-VERSION = '0.4.3'
+VERSION = '0.4.4'
 
 
 def inspect_release(path):
