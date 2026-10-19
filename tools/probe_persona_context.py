@@ -111,7 +111,24 @@ def main():
         assert all(c["persona_copies"] == 1 for c in checks), checks
         assert all(c["a_marker"] == 1 and c["b_marker"] == 0 for c in checks), checks
         assert bcheck["b_marker"] == 1 and bcheck["a_marker"] == 0, bcheck
-        result.update(ok=True, turns=checks, b=bcheck, provider_requests=len(received))
+        # A live session alone cannot validate its persisted format. Tear down
+        # the native runtime, then resume the exact A and B sessions from disk.
+        sessions = {cid: chat.conversation_context(cid)['session'] for cid in (ca, cb)}
+        manager.stop('qq')
+        manager = RuntimeManager(HarnessConfig(root))
+        chat = DesktopChat(root, 'qq', manager)
+        restored = []
+        for cid, marker, forbidden in ((ca, 'ISOLATED_PERSONA_A', 'CANARY_B_1'),
+                                        (cb, 'ISOLATED_PERSONA_B', 'CANARY_A_1')):
+            chat.send(cid, 'COLD_RESTORE_CHECK', [])
+            context = chat.conversation_context(cid)
+            assert context['session'] == sessions[cid]
+            payload = RequestInspector(root).latest('qq', context['session'])['payload']
+            history = json.dumps(payload['messages'], ensure_ascii=False)
+            assert history.count(marker) == 1 and forbidden not in history
+            assert ('CANARY_A_1' if cid == ca else 'CANARY_B_1') in history
+            restored.append({'session': context['session'], 'same_session': True, 'history_kept': True})
+        result.update(ok=True, turns=checks, b=bcheck, cold_restores=restored, provider_requests=len(received))
     except Exception as exc:
         result.update(ok=False, error=type(exc).__name__ + ": " + str(exc))
         raise

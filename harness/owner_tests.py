@@ -109,10 +109,20 @@ async def process(loop, item):
         raise
     except Exception as exc:
         from dsh_web import safe_runtime_error
-        status = 'cancelled' if isinstance(exc, InterruptedError) else 'blocked' if isinstance(exc, PermissionError) else 'failed'
-        error = safe_runtime_error(str(exc))
-        loop.store.update_message(mid, status=status, error=error)
+        status = 'cancelled' if isinstance(exc, InterruptedError) or loop.cancel_event.is_set() else 'blocked' if isinstance(exc, PermissionError) else 'failed'
+        error = safe_runtime_error(str(exc) or type(exc).__name__)
+        loop.store.update_message(mid, status=status, error=error, cancelled=status == 'cancelled',
+                                  runtime_session_id=session or '', runtime_turn_id=turn)
         loop.store.finish_turn(turn, status, error=error)
+        if status == 'failed':
+            loop.governance.audit('reply_failed', error)
+            if not loop.governance.config()['paused'] and loop.governance.is_owner(loop.owner):
+                try:
+                    await loop.channel.action('send_message', {'chat_id': item['payload']['chat_id'],
+                        'segments': [{'type': 'text', 'text': '这次回复未能完成，聊天记录仍保留。请查看 Fish 工作台的运行记录后重试。'}],
+                        'idempotency_key': turn + ':failure-notice'})
+                except Exception:
+                    pass
     finally:
         loop.active_turn = None
         loop.active_test_session = None

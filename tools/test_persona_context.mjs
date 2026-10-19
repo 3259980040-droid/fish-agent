@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
-import { ensurePersonaContext } from '../harness/runtime/fish-control/lib/index.js'
+import { ensurePersonaContext, acceptPersonaContext } from '../harness/runtime/fish-control/lib/index.js'
 
 class FakeSession {
   constructor() {
     this.next = 1
-    this.surface = {nodes: []}
-    this.events = new Map()
+    this.surface = {nodes: [0]}
+    this.events = new Map([[0, {type: 'system/message'}]])
   }
   add(text, revision) {
     const seq = this.next++
@@ -36,11 +36,18 @@ class FakeSession {
 const session = new FakeSession()
 assert.equal(ensurePersonaContext(session, 'PERSONA-A', 'rev-a').inserted, true)
 assert.equal(ensurePersonaContext(session, 'PERSONA-A', 'rev-a').inserted, false)
-assert.equal(session.surface.nodes.length, 1)
+assert.equal(session.surface.nodes.length, 2)
 // simulated compaction removes the node from the visible surface
-session.surface.nodes.length = 0
+session.surface.nodes.splice(1)
 assert.equal(ensurePersonaContext(session, 'PERSONA-A', 'rev-a').inserted, true)
-assert.equal(session.surface.nodes.length, 1)
+assert.equal(session.surface.nodes.length, 2)
+const blank = new FakeSession()
+blank.surface.nodes.length = 0
+const pending = ensurePersonaContext(blank, 'PERSONA-A', 'rev-a')
+assert.equal(blank.surface.nodes.length, 0)
+const accepted = acceptPersonaContext({kind: 'enter', messages: []}, pending)
+assert.equal(accepted.messages[0].source.kind, 'fish-persona-context')
+assert.deepEqual(acceptPersonaContext({kind: 'stop'}, pending), {kind: 'stop'})
 // a new session with a different revision is rejected
 const other = new FakeSession()
 other.add('PERSONA-B', 'rev-b')

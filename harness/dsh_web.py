@@ -105,6 +105,12 @@ class DSHWebClient:
                 frame = json.loads(raw)
                 if frame.get("streamId") != stream_id:
                     continue
+                if frame.get('type') == 'error':
+                    detail = frame.get('error') or {}
+                    message = detail.get('message', '') if isinstance(detail, dict) else str(detail)
+                    raise RuntimeError('读取模型会话失败：' + safe_runtime_error(message or '运行时拒绝读取会话'))
+                if frame.get('type') in ('close', 'end', 'done'):
+                    raise RuntimeError('模型会话读取提前结束，未取得历史快照')
                 value = frame.get("value")
                 if frame.get("type") == "item" and isinstance(value, dict) \
                         and value.get("type") == "snapshot" and isinstance(value.get("cursor"), int):

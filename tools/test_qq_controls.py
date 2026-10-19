@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock, Mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'harness')]
@@ -138,6 +138,48 @@ class QQControlsTests(unittest.IsolatedAsyncioTestCase):
             with patch('fish_desktop.services.subprocess.run', side_effect=replies) as run:
                 self.assertEqual(kill_port(3101, self.root), expected)
             self.assertEqual(any(call.args[0][0] == 'taskkill' for call in run.call_args_list), expected)
+
+    async def test_runtime_stream_errors_are_visible_without_cursor_timeout(self):
+        from dsh_web import DSHWebClient
+        for kind in ('error', 'end'):
+            async def response(ws):
+                request = json.loads(await ws.recv())
+                await ws.send(json.dumps({'type': kind, 'streamId': request['streamId'],
+                    'error': {'message': 'stored log is corrupt; Bearer sk-synthetic-secret'}}))
+            server = await serve(response, '127.0.0.1', 0)
+            try:
+                client = DSHWebClient('http://127.0.0.1/')
+                client.ws_url = 'ws://127.0.0.1:' + str(server.sockets[0].getsockname()[1])
+                with self.assertRaises(RuntimeError) as failure:
+                    await asyncio.wait_for(client.baseline('fixture-session'), 1)
+                self.assertNotIn('sk-synthetic-secret', str(failure.exception))
+                self.assertTrue(str(failure.exception))
+            finally:
+                server.close()
+                await server.wait_closed()
+
+    async def test_owner_history_failure_keeps_session_and_sends_failure_notice(self):
+        from social_context import SocialContext
+        from owner_tests import process
+        contexts = SocialContext(self.root)
+        space = contexts.create_space('qq', origin='owner-qq')
+        contexts.bind_runtime(space['id'], 'fixture-durable-session')
+        conversation = self.loop.store.get_or_create_conversation('test:' + space['id'], 'qq')
+        payload = {'chat_id': 'private:' + self.owner, 'segments': [{'type': 'text', 'text': 'hello'}]}
+        mid = self.loop.store.record_message(conversation['id'], payload['chat_id'], self.owner, 'inbound',
+            'fixture-history', None, payload['segments'], 'hello', 'queued')
+        client = Mock(auth=AsyncMock(), baseline=AsyncMock(side_effect=TimeoutError()))
+        with patch('owner_tests.DSHRuntimeAdapter.connect', return_value=client), patch('owner_tests.bind_session'):
+            await process(self.loop, {'message_id': mid, 'conversation': conversation, 'payload': payload,
+                                     'space_id': space['id'], 'text': 'hello'})
+        self.assertEqual(contexts.space(space['id'])['session'], 'fixture-durable-session')
+        with closing(self.loop.store.connect()) as db:
+            row = db.execute('SELECT status,error,runtime_session_id FROM messages WHERE id=?', (mid,)).fetchone()
+        self.assertEqual(row['status'], 'failed')
+        self.assertEqual(row['error'], 'TimeoutError')
+        self.assertEqual(row['runtime_session_id'], 'fixture-durable-session')
+        self.assertEqual(len(self.actions), 1)
+        self.assertIn('未能完成', self.actions[0]['payload']['segments'][0]['text'])
 
 
 if __name__ == '__main__':

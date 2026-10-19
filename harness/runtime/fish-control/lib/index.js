@@ -116,8 +116,19 @@ export function ensurePersonaContext(session, text, revision = '') {
     }
     return {inserted: false, consolidated: false}
   }
+  // The loop commits its initial system head before accepting this batch.
+  // Appending here with an empty surface breaks the durable log on cold restore.
+  if (!session.surface.nodes.length) {
+    return {inserted: false, consolidated: false, deferred: personaContextMessage(text, revision)}
+  }
   session.append('user/message', personaContextMessage(text, revision), {surfaceOp: 'append'})
   return {inserted: true, consolidated: false}
+}
+
+export function acceptPersonaContext(decision, state) {
+  return state?.deferred && decision.kind === 'enter'
+    ? {...decision, messages: [state.deferred, ...decision.messages]}
+    : decision
 }
 
 // Use Harness's logged surface replacement API: raw logs remain inspectable,
@@ -326,6 +337,7 @@ export function apply(ctx, config = {}) {
     const identity = identities[String(agent.id)]
     const group = role === 'qq' && identity?.scope?.startsWith('chat:group:')
     const isolated = role === 'qq' && identity?.scope?.startsWith('space:')
+    let personaState
     // Clear stale profiles BEFORE native compaction reads history.
     if (group) replaceGroupContext(agent.session, '')
     // Isolated sessions get one durable persona context node before request
@@ -337,9 +349,9 @@ export function apply(ctx, config = {}) {
       } catch (error) {
         throw new Error('人格上下文加载失败：' + String(error?.message ?? error))
       }
-      ensurePersonaContext(agent.session, String(persona.text ?? ''), String(persona.revision ?? ''))
+      personaState = ensurePersonaContext(agent.session, String(persona.text ?? ''), String(persona.revision ?? ''))
     }
-    let decision = await next()
+    let decision = acceptPersonaContext(await next(), personaState)
     if (group && decision.kind === 'enter') {
       const context = await host('/social/context', {session: String(agent.id)})
       const exists = [...agent.session.surface.nodes].some(seq => agent.session.eventAt(seq)?.data?.source?.kind === 'fish-group-context')
