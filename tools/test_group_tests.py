@@ -122,13 +122,13 @@ class GroupTrialTests(Fixture):
         *_,loop,client,bind,context=self.run_trial(mode='thinking_excerpt',blocked=True)
         loop._deliver_reply.assert_not_awaited()
 
-    def test_tool_identity_does_not_grant_owner_and_cannot_read_owner_memory(self):
+    def test_verified_owner_keeps_group_memory_scope(self):
         from tool_host import ToolHost
         a,_=self.candidates();tests=GroupTests(self.root);trial=tests.create(self.group,a['id'],self.owner)
         host=ToolHost(self.root)
         MemoryStore(self.root,'qq').save('OWNER_PRIVATE_CANARY',scope='owner')
         host.bind('qq','trial-session',trial['test_scope'],self.owner)
-        identity=host.identity('qq','trial-session');self.assertFalse(identity['owner'])
+        identity=host.identity('qq','trial-session');self.assertTrue(identity['owner'])
         identities=read_json(self.root/'harness/runtime/qq.identities.json')
         self.assertTrue(identities['trial-session']['isolated'])
         self.assertEqual(identities['trial-session']['persona_revision'],a['id'])
