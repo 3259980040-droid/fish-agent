@@ -152,6 +152,7 @@ class DSHWebClient:
     async def wait_response(
         self, session_id: str, baseline: int, timeout: float,
         cancel_event: asyncio.Event | None = None,
+        include_reasoning: bool = False,
     ) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
         last_count = baseline
@@ -185,7 +186,26 @@ class DSHWebClient:
                             "error": label + ('：' + message if message else '；请查看诊断记录后重试')}
                 final = self._assistant_texts({"records": recent})
                 if final:
-                    return {"ok": True, "text": final[-1]}
+                    result = {"ok": True, "text": final[-1]}
+                    if include_reasoning:
+                        result['reasoning'] = self._final_reasoning(recent)
+                    return result
             last_count = len(texts)
             await asyncio.sleep(1)
         return {"ok": False, "error": f"timeout (assistant_count={last_count})"}
+
+    @staticmethod
+    def _final_reasoning(records):
+        # Match the final text-bearing assistant message, excluding earlier
+        # tool-planning steps and every previous turn/session.
+        for record in reversed(records):
+            event = record.get('event') or {}
+            if record.get('type') != 'event' or event.get('type') != 'assistant/message':
+                continue
+            message = (event.get('data') or {}).get('message') or {}
+            blocks = message.get('content') or []
+            if not any(b.get('type') == 'text' and str(b.get('text', '')).strip() for b in blocks):
+                continue
+            return '\n'.join(b['text'] for b in blocks if b.get('type') in ('reasoning', 'thinking')
+                             and isinstance(b.get('text'), str))
+        return ''

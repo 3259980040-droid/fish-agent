@@ -78,7 +78,11 @@ async def process(loop, item):
             raise InterruptedError('已取消')
         loop.governance.consume('calls')
         await client.prompt(session, prompt)
-        result = await client.wait_response(session, baseline, timeout=180, cancel_event=loop.cancel_event)
+        reply_mode = space['persona'].get('owner_reply_mode', 'final')
+        if reply_mode == 'thinking_excerpt' and item['payload'].get('chat_id') != 'private:' + str(loop.owner):
+            raise PermissionError('思考片段仅用于主人私聊测试')
+        result = await client.wait_response(session, baseline, timeout=180, cancel_event=loop.cancel_event,
+                                           include_reasoning=reply_mode == 'thinking_excerpt')
         if result.get('cancelled') or loop.cancel_event.is_set():
             raise InterruptedError('已取消')
         if not result.get('ok'):
@@ -88,6 +92,8 @@ async def process(loop, item):
         if loop.governance.config()['paused']:
             raise PermissionError('主人已暂停，测试回复未发送')
         response = str(result['text']).strip()
+        from owner_reply import format_owner_reply
+        response = format_owner_reply(response, result.get('reasoning', ''), reply_mode)
         loop.governance.check_output(response)
         segments = [{'type': 'text', 'text': response}]
         outbound = loop.store.record_message(conv['id'], item['payload']['chat_id'], 'bot', 'outbound', '', None, segments, response, 'pending', runtime_session_id=session, runtime_turn_id=turn)

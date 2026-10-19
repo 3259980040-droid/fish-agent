@@ -26,6 +26,13 @@ class SocialPage(BasePage):
         layout.addLayout(top)
         self.state = _label('', 'Muted'); self.state.setTextFormat(Qt.PlainText); self.state.setWordWrap(True); layout.addWidget(self.state)
         self.name = QLineEdit(); self.name.setPlaceholderText('人格名称'); layout.addWidget(self.name)
+        output_row = QHBoxLayout(); output_row.addWidget(_label('主人 QQ 测试输出', 'Caption'))
+        self.reply_mode = QComboBox()
+        self.reply_mode.addItem('只发正式回复', 'final')
+        self.reply_mode.addItem('思考片段（最多 160 字）＋正式回复', 'thinking_excerpt')
+        self.reply_mode.setToolTip('思考片段取自 API 的实际返回，仅用于主人独立测试；不会发到群里。保存后形成新版本。')
+        output_row.addWidget(self.reply_mode, 1); layout.addLayout(output_row)
+        self.reply_mode.currentIndexChanged.connect(self._edited)
         self.edit_tabs = QTabWidget(); layout.addWidget(self.edit_tabs, 1)
         self.body = QPlainTextEdit(); self.global_rules = QPlainTextEdit(); self.workspace_rules = QPlainTextEdit()
         for title, editor in (('本窗口人格', self.body), ('共同规则快照', self.global_rules), ('工作区规则快照', self.workspace_rules)):
@@ -103,20 +110,21 @@ class SocialPage(BasePage):
     def _load_persona(self):
         if not self.versions.currentData(): return
         if self.selected and self.dirty:
-            self._drafts[self.selected] = (self.name.text(),self.body.toPlainText(),self.global_rules.toPlainText(),self.workspace_rules.toPlainText())
+            self._drafts[self.selected] = (self.name.text(),self.body.toPlainText(),self.global_rules.toPlainText(),self.workspace_rules.toPlainText(),self.reply_mode.currentData())
         from social_context import SocialContext
         p = SocialContext(self.services.root).persona(self.versions.currentData()); self.selected = p['id']
-        name,body,common,workspace = self._drafts.get(p['id'],(p['name'],p['body'],p['global_rules'],p['workspace_rules']))
+        name,body,common,workspace,mode = self._drafts.get(p['id'],(p['name'],p['body'],p['global_rules'],p['workspace_rules'],p.get('owner_reply_mode','final')))
         for editor, value in ((self.body, body), (self.global_rules, common), (self.workspace_rules, workspace)):
             editor.blockSignals(True); editor.setPlainText(value); editor.blockSignals(False)
         self.name.setText(name); self.dirty = p['id'] in self._drafts
+        self.reply_mode.blockSignals(True); self.reply_mode.setCurrentIndex(max(0,self.reply_mode.findData(mode))); self.reply_mode.blockSignals(False)
         self.state.setText(f"版本 {p['id']}\n配置摘要 {p['digest'][:16]} · {'主人已认可' if p['approved'] else '等待主人测试与认可'}")
 
     def _save_persona(self):
         from social_context import SocialContext
         try:
             p = SocialContext(self.services.root).save_persona('qq', self.name.text(), self.body.toPlainText(), parent=self.selected,
-                global_rules=self.global_rules.toPlainText(), workspace_rules=self.workspace_rules.toPlainText())
+                global_rules=self.global_rules.toPlainText(), workspace_rules=self.workspace_rules.toPlainText(), owner_reply_mode=self.reply_mode.currentData())
             self._drafts.pop(self.selected,None); self.dirty=False;self.selected = p['id']; self._load_versions(); self._toast('已创建待测版本。先在主人 QQ 测试并认可。')
         except Exception as exc: self._toast(str(exc))
 
@@ -142,6 +150,8 @@ class SocialPage(BasePage):
         dialog,layout,editor=self._viewer('人格版本对比')
         before='\n'.join(parent[k] for k in ('body','global_rules','workspace_rules'))
         after='\n'.join((self.body.toPlainText(),self.global_rules.toPlainText(),self.workspace_rules.toPlainText()))
+        before += '\n主人测试输出：' + parent.get('owner_reply_mode','final')
+        after += '\n主人测试输出：' + str(self.reply_mode.currentData())
         editor.setPlainText(''.join(difflib.unified_diff(before.splitlines(True),after.splitlines(True),fromfile=p['parent'] or '初始空版本',tofile=self.selected+('（含未保存草稿）' if self.dirty else ''))))
         dialog.exec()
 

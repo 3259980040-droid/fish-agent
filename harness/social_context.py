@@ -31,6 +31,8 @@ class SocialContext:
                 id TEXT PRIMARY KEY, role TEXT NOT NULL, name TEXT NOT NULL,
                 body TEXT NOT NULL, global_rules TEXT NOT NULL, workspace_rules TEXT NOT NULL,
                 digest TEXT NOT NULL, parent TEXT NOT NULL, created REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS persona_output_modes(
+                revision TEXT PRIMARY KEY REFERENCES personas(id), mode TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS approvals(
                 revision TEXT PRIMARY KEY REFERENCES personas(id), owner TEXT NOT NULL,
                 digest TEXT NOT NULL, created REAL NOT NULL);
@@ -62,11 +64,14 @@ class SocialContext:
             raise PermissionError('此操作需要当前主人 QQ 私聊身份')
 
     @staticmethod
-    def digest(body, global_rules, workspace_rules):
-        raw = json.dumps([body, global_rules, workspace_rules], ensure_ascii=False, separators=(',', ':'))
+    def digest(body, global_rules, workspace_rules, owner_reply_mode='final'):
+        values = [body, global_rules, workspace_rules]
+        if owner_reply_mode != 'final':
+            values.append({'owner_reply_mode': owner_reply_mode})
+        raw = json.dumps(values, ensure_ascii=False, separators=(',', ':'))
         return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
-    def save_persona(self, role, name, body, *, parent='', global_rules=None, workspace_rules=None):
+    def save_persona(self, role, name, body, *, parent='', global_rules=None, workspace_rules=None, owner_reply_mode=None):
         if role not in ('qq', 'research'):
             raise ValueError('未知角色')
         name, body = str(name).strip(), str(body).strip()
@@ -84,11 +89,17 @@ class SocialContext:
             workspace_rules = prior.get('workspace_rules', self._text('qq-work/AGENTS.md' if role == 'qq' else 'knowledge/AGENTS.md'))
         if len(str(global_rules)) > 40000 or len(str(workspace_rules)) > 40000:
             raise ValueError('附加规则每项最多 40000 字')
+        if owner_reply_mode is None:
+            owner_reply_mode = prior.get('owner_reply_mode', 'final')
+        if owner_reply_mode not in ('final', 'thinking_excerpt'):
+            raise ValueError('未知主人测试输出方式')
         revision = uuid.uuid4().hex
         with database(self.path) as db:
             db.execute('INSERT INTO personas VALUES(?,?,?,?,?,?,?,?,?)',
                 (revision, role, name, body, str(global_rules), str(workspace_rules),
-                 self.digest(body, str(global_rules), str(workspace_rules)), parent, time.time()))
+                 self.digest(body, str(global_rules), str(workspace_rules), owner_reply_mode), parent, time.time()))
+            if owner_reply_mode != 'final':
+                db.execute('INSERT INTO persona_output_modes VALUES(?,?)', (revision, owner_reply_mode))
             db.execute('INSERT INTO audit(kind,subject,actor,created) VALUES(?,?,?,?)',
                        ('persona_created', revision, 'local-console', time.time()))
         return self.persona(revision)
@@ -111,7 +122,7 @@ class SocialContext:
     def persona(self, revision):
         identifier(revision)
         with database(self.path) as db:
-            row = db.execute('SELECT p.*,a.owner AS approved_owner,a.created AS approved_at,a.runtime_digest AS approved_runtime FROM personas p LEFT JOIN approvals a ON a.revision=p.id AND a.digest=p.digest WHERE p.id=?', (revision,)).fetchone()
+            row = db.execute("SELECT p.*,COALESCE(o.mode,'final') AS owner_reply_mode,a.owner AS approved_owner,a.created AS approved_at,a.runtime_digest AS approved_runtime FROM personas p LEFT JOIN persona_output_modes o ON o.revision=p.id LEFT JOIN approvals a ON a.revision=p.id AND a.digest=p.digest WHERE p.id=?", (revision,)).fetchone()
         if not row:
             raise ValueError('人格版本不存在')
         result = dict(row)
