@@ -364,6 +364,16 @@ class RuntimeManager:
                 "- id: llm-deepseek-account",
                 "  disabled: true",
             ]
+        if agent_id == 'qq':
+            integration_path = self.config.root / 'harness/integration.json'
+            integration = json.loads(integration_path.read_text(encoding='utf-8')) if integration_path.exists() else {}
+            native_ui = Path(integration.get('native_ui_package', ''))
+            if (native_ui / 'lib/index.js').is_file():
+                from tool_host import port as tool_host_port
+                lines += ['- insert:', '    - id: ui-fish',
+                          "      name: '@deepseek-ai/dsh-client-ui-fish'",
+                          '      config:', '        fishRoot: ' + json.dumps(str(self.config.root)),
+                          '        port: ' + str(tool_host_port(self.config.root))]
         path = self.overlay_path(agent_id)
         ensure_dir(path.parent)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")

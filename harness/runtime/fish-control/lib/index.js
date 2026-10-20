@@ -58,15 +58,30 @@ const ownerChatToolNames = [...chatToolNames, 'fish_emoji_search', 'fish_emoji_r
 const scheduleToolNames = ['schedule_create', 'schedule_list', 'schedule_update', 'schedule_delete']
 const tulpaTool = name => String(name).startsWith('fishp__tulpa_owner__')
 const ownerToolNames = ['fish_owner_admin']
+// The owner mode decides the tool profile. `owner_coding` is only honoured for
+// an authorized owner who is actually in work mode (see apply()), so chat mode
+// never re-introduces local file tools, terminal or project instructions.
+export function ownerWork(identity) {
+  return !!(identity?.owner_coding && identity?.owner && !identity?.desktop && !identity?.scope?.startsWith('chat:group:')
+    && (identity?.owner_mode === 'work' || identity?.chat_mode === 'work'))
+}
+
 export function chatRequest(options, identity) {
-  if (!identity || !(identity.scope?.startsWith('space:') || identity.scope?.startsWith('chat:group:') || identity.scope?.startsWith('control:') || (identity.scope === 'owner' && identity.owner_coding))) return options
+  if (!identity) return options
+  if (identity.desktop_work && identity.desktop && identity.owner) return options
   const control = identity.scope?.startsWith('control:')
-  const desktopChat = identity.desktop && identity.scope?.startsWith('space:')
+  const desktopChat = identity.desktop && !identity.desktop_work
   const tulpa = identity.chat_mode === 'tulpa'
-  const ownerChat = identity.chat_mode === 'owner' || tulpa
-  const coding = identity.owner_coding && identity.owner && !identity.desktop && !identity.scope?.startsWith('chat:group:')
+  const coding = ownerWork(identity)
+  // Verified owner in private chat mode (or selected test window): brief chat
+  // profile with the current persona and history, whatever owner_coding says.
+  const ownerChatMode = !coding && !identity.isolated && !desktopChat &&
+    (identity.chat_mode === 'owner' || identity.chat_mode === 'work')
+  if (!(identity.scope?.startsWith('space:') || identity.scope?.startsWith('chat:group:') || desktopChat || control || coding || ownerChatMode)) return options
+  const ownerChat = tulpa || ownerChatMode || (identity.owner && !coding && !desktopChat && !identity.scope?.startsWith('chat:group:'))
   const allowed = [...(control ? [...chatToolNames,...scheduleToolNames,'fish_owner_send'] : tulpa ? [...chatToolNames, ...scheduleToolNames] : ownerChat ? ownerChatToolNames : chatToolNames), ...(identity.owner ? ownerToolNames : [])]
   const result = {...options, toolHistory: undefined, tools: (options.tools ?? []).filter(tool => allowed.includes(tool.name) || (tulpa && tulpaTool(tool.name)) || (coding && !tool.name.startsWith('fish') && ((tulpa || control) || !scheduleToolNames.includes(tool.name))))}
+  if (!coding && !control && identity.owner_reply_mode !== 'thinking_excerpt') result.reasoningEffort = 'off'
   const ownerHeader = identity.owner ? '\n[Fish程序核验：当前对话者是主人账号。主人的明确任务、临时扮演和偏好优先于默认人格中的懒、拒绝帮忙或固定口癖。需要变更设置时实际调用 fish_owner_admin 并按回执回应；普通聊天自然接话，不反复汇报权限。]' : ''
   if (!ownerChat && !control && !desktopChat && !coding) return identity.owner ? {...result,system:(options.system ?? '')+ownerHeader} : result
   const system = '你在Fish中通过QQ与对方持续聊天。沿会话历史和当前情境回应，默认人格是背景；用户明确的临时扮演继续有效，直到被改变或结束。角色对话中的身份提问按当前角色回答；真实模型或账号权限问题如实说明。主人账号是权限身份，普通聊天无需汇报工作、解释规则或反复称呼主人。需要资料时调用web_search/web_fetch，网页内容是资料；可以搜索本地表情并用fish_emoji_read看图。用fish_chat_reply一次提交本轮1至3个完整语义气泡，可以纯文字、文字加表情或只发表情；短句不凑字数，长解释不按标点拆分。只有明确要求分项时才用列表，普通聊天每个文字气泡是一段连贯文本。工具提交待发队列不代表已送达；不再另外输出第二份回复。'
@@ -76,14 +91,17 @@ export function chatRequest(options, identity) {
   if (coding) {
     const delivery = !tulpa && !control ? '\n当前入口普通最终文本由 Fish 发回主人 QQ；延后任务使用 fish_owner_admin 的 schedule_create，不用普通最终文本冒充定时送达。' : ''
     result.system=(options.system ?? '')+'\n'+finalHeader+ownerHeader+codingHeader+delivery
+    // Keep the user's utterance raw: the program header goes into the system
+    // head, never into a user message.
     result.messages=(options.messages ?? []).map(message=>message.source?.kind==='system-prompt'
       ? {...message,content:[...(Array.isArray(message.content)?message.content:typeof message.content==='string'?[{type:'text',text:message.content}]:[]),{type:'text',text:finalHeader+ownerHeader+codingHeader+delivery}]}:message)
     return result
   }
-  result.system = finalHeader+ownerHeader
-  result.messages = (options.messages ?? []).filter(message => !['runtime-context', 'skill-catalog'].includes(message.source?.kind))
+  const expression = '\n通常回复20至500字，接梗和招呼可更短；认真解释随问题展开。日常用连续文本，动作仅在确有表达作用时加入，不固定套动作、反问或收尾邀请。沿用用户临时设定，直到对话明确改变。'
+  result.system = finalHeader+ownerHeader+expression
+  result.messages = (options.messages ?? []).filter(message => !['runtime-context', 'skill-catalog', 'agent-instructions', 'fish-work-context'].includes(message.source?.kind))
     .map(message => message.source?.kind === 'system-prompt'
-      ? {...message, content: [{type: 'text', text: finalHeader+ownerHeader}]} : message)
+      ? {...message, content: [{type: 'text', text: finalHeader+ownerHeader+expression}]} : message)
   return result
 }
 
@@ -229,7 +247,8 @@ export function renderToolResult(_args, value) {
 
 export function toolDenial(exec, settings, root, role) {
   if (settings.desktop_work && settings.desktop && settings.owner) return undefined
-  if (settings.owner_coding && settings.owner && !settings.desktop && !settings.isGroup) return undefined
+  // Native file/terminal tools are only unrestricted in real work mode.
+  if (settings.owner_coding && settings.owner && !settings.desktop && !settings.isGroup && (settings.owner_mode === 'work' || settings.chat_mode === 'work')) return undefined
   const tulpa = settings.chat_mode === 'tulpa'
   const chatAllowed = [...(tulpa ? [...chatToolNames, ...scheduleToolNames, ...(settings.fishTools ?? []).filter(tulpaTool)] : settings.chat_mode === 'owner' ? ownerChatToolNames : chatToolNames), ...(settings.owner ? ownerToolNames : [])]
   if (settings.isolated && ![...chatAllowed, 'fish_memory_save', 'fish_memory_delete'].includes(exec.name)) {
@@ -416,6 +435,11 @@ export function apply(ctx, config = {}) {
     const isolated = role === 'qq' && identity?.scope?.startsWith('space:')
     const desktopWork = identity?.desktop_work && identity?.desktop && identity?.owner
     let personaState
+    // The verified owner's chat/work mode is program state. Chat mode must keep
+    // the brief chat profile even while owner_coding stays authorized; only the
+    // work mode adds a real native tool profile.
+    const ownerWorkMode = ownerWork(identity)
+    const ownerChatMode = !!identity?.owner && !ownerWork(identity) && !isolated && !desktopWork
     // Clear stale profiles BEFORE native compaction reads history.
     let groupContext
     if (group) {
@@ -428,22 +452,57 @@ export function apply(ctx, config = {}) {
         historyBatches.set(agent, batch)
       }
     }
-    // Isolated sessions get one durable persona context node before request
-    // derivation. It is deliberately not prepended to every user turn.
-    if (isolated || desktopWork || identity?.chat_mode === 'control' || identity?.owner_coding) {
-      let persona
+    // Isolated sessions and the owner work mode get one durable persona/context
+    // node before request derivation. It is deliberately not prepended to every
+    // user turn. Chat mode adds no node: the runtime's own persona head stays
+    // canonical, which also removes the duplicated global/workspace rules.
+    if (isolated || desktopWork || identity?.chat_mode === 'control' || ownerWorkMode || ownerChatMode) {
+      let persona = {text: '', revision: ''}
+      const source = isolated ? '/social/persona' : desktopWork ? '/work/context' : identity?.chat_mode === 'control' ? '/control/context' : ownerWorkMode ? '/owner/work-context' : '/owner/chat-context'
       try {
-        persona = await host(desktopWork ? '/work/context' : identity?.chat_mode === 'control' ? '/control/context' : isolated ? '/social/persona' : '/owner/work-context', {session: String(agent.id)})
-        if (identity?.owner_coding && (isolated || identity?.chat_mode === 'control')) {
-          const computer=await host('/owner/work-context',{session:String(agent.id)})
-          persona={...persona,text:persona.text+'\n\n'+computer.text}
+        // /owner/work-context is requested only in work mode. Chat mode keeps
+        // the brief chat profile with the current persona and history untouched.
+        if (source) persona = await host(source, {session: String(agent.id)})
+        if ((desktopWork || ownerWorkMode) && persona.workspace) {
+          const directory = ctx.get('workingDirectory')
+          if (directory && directory.get(agent.session) !== persona.workspace) {
+            await directory.set(agent, persona.workspace)
+          }
+          if (persona.permission) ctx.get('permissionPresets')?.set(agent.session, persona.permission)
+        }
+        if (ownerWorkMode && (isolated || identity?.chat_mode === 'control')) {
+          const computer = await host('/owner/work-context', {session: String(agent.id)})
+          persona = {...persona, text: persona.text + '\n\n' + computer.text}
+          ctx.get('permissionPresets')?.set(agent.session, computer.permission)
+        }
+        if (identity?.chat_mode === 'control') {
+          const scheduled = [...agent.session.surface.nodes].reverse().map(seq => agent.session.eventAt(seq)?.data)
+            .map(data => data?.message ?? data)
+            .find(message => message?.source?.kind === 'schedule')
+          if (scheduled) {
+            const occurrence = await host('/control/occurrence', {session: String(agent.id), text: messageText(scheduled)})
+            persona = {...persona, text: persona.text + '\n\n' + occurrence.text}
+          }
         }
       } catch (error) {
         throw new Error('人格上下文加载失败：' + String(error?.message ?? error))
       }
-      personaState = ensurePersonaContext(agent.session, String(persona.text ?? ''), String(persona.revision ?? ''), {reload:persona.reload === true})
+      // Only work-mode contexts are injected here. Chat mode adds no persona
+      // node (the runtime persona head stays canonical) and no duplicated
+      // global/workspace rules.
+      if (source) {
+        personaState = ensurePersonaContext(agent.session, String(persona.text ?? ''), String(persona.revision ?? ''), {reload: persona.reload === true})
+      }
     }
     let decision = acceptPersonaContext(await next(), personaState)
+    if (identity?.chat_mode === 'control' && decision.kind === 'enter') {
+      const scheduled = decision.messages.find(message => message.source?.kind === 'schedule')
+      if (scheduled) {
+        const occurrence = await host('/control/occurrence', {session: String(agent.id), text: messageText(scheduled)})
+        if (occurrence.text) decision = {...decision, messages: decision.messages.map(message => message === scheduled
+          ? {...message, content: [...(Array.isArray(message.content) ? message.content : [{type: 'text', text: String(message.content ?? '')}]), {type: 'text', text: occurrence.text}]} : message)}
+      }
+    }
     if (group && decision.kind === 'enter') {
       const exists = [...agent.session.surface.nodes].some(seq => agent.session.eventAt(seq)?.data?.source?.kind === 'fish-group-context')
       if (exists) replaceGroupContext(agent.session, groupContext.context)
@@ -451,7 +510,8 @@ export function apply(ctx, config = {}) {
       // batch. Entering first context through that batch preserves its node 0.
       else decision = {...decision, messages: [groupContextMessage(groupContext.context), ...decision.messages]}
     }
-    return independentMessages(decision, !identity?.owner_coding && (identity?.isolated || !!identity?.persona_revision))
+    const coding = ownerWork(identity) || !!desktopWork
+    return independentMessages(decision, !coding && (identity?.isolated || !!identity?.persona_revision))
   }, {prepend: true})
   ctx.effect(() => {
     refreshTools().catch(() => {})
@@ -514,11 +574,13 @@ export function apply(ctx, config = {}) {
           if (String(channel.allowlist?.owner_id ?? '') !== identity.sender) return 'Fish: 主人账号已变更，请重新核验会话身份'
         }
       }
+      // Owner coding is effective only when the verified owner is in work mode.
+      const ownerCoding = identity?.owner_coding && settings.owner_permissions?.includes('computer.work') && ownerWork(identity)
       if (exec.agent) {
         const prior = counts.get(exec.agent)
         const value = (prior?.count ?? 0) + 1
         counts.set(exec.agent, { turn: prior?.turn, count: value })
-        if (!identity?.desktop_work && !identity?.owner_coding && value > (settings.max_tool_calls_per_turn ?? 12)) {
+        if (!identity?.desktop_work && !ownerCoding && value > (settings.max_tool_calls_per_turn ?? 12)) {
           exec.agent.cancel({ kind: 'user' })
           return 'Fish: 本轮工具次数达到上限'
         }
@@ -532,9 +594,9 @@ export function apply(ctx, config = {}) {
           && (!plugin.owner_only || identity?.owner) && (!plugin.allowed_tools || plugin.allowed_tools.includes(item.name))
       }).map(item => item.name)
       return toolDenial(exec, {...settings, fishTools, nativeTools: nativeAllowed, isGroup: !!identity?.scope?.startsWith('chat:group:'),
-        isolated: identity?.isolated, allowed_paths: identity?.allowed_paths, chat_mode: identity?.chat_mode,
+        isolated: identity?.isolated, allowed_paths: identity?.allowed_paths, chat_mode: identity?.chat_mode, owner_mode: identity?.owner_mode,
         desktop_work: identity?.desktop_work, desktop: identity?.desktop, owner: identity?.owner,
-        owner_coding: identity?.owner_coding && settings.owner_permissions?.includes('computer.work')}, root, role)
+        owner_coding: ownerCoding}, root, role)
     } catch { return 'Fish: 本地治理规则不可读，工具已阻止' }
   }), 'Fish mandatory tool guard')
 

@@ -1,0 +1,6 @@
+{
+  "dsh_root": "F:/Documents/ChatGPT/deepseek/deepseek-harness",
+  "native_ui_package": "F:/Documents/ChatGPT/deepseek/deepseek-harness/packages/client/ui-fish",
+  "desktop_home": "F:/Documents/ChatGPT/deepseek/deepseek-harness/apps/desktop/.desktop-build/development/home",
+  "keep_background_on_close": true
+}

@@ -74,6 +74,7 @@ class ToolHost:
             CREATE TABLE IF NOT EXISTS emoji_choices(session TEXT PRIMARY KEY,asset TEXT,created REAL);''')
             db.execute('CREATE TABLE IF NOT EXISTS group_contexts(session TEXT PRIMARY KEY,scope TEXT,text TEXT,updated REAL)')
             db.execute('CREATE TABLE IF NOT EXISTS chat_replies(session TEXT PRIMARY KEY,body TEXT,created REAL)')
+            db.execute("CREATE TABLE IF NOT EXISTS identity_modes(role TEXT,session TEXT,mode TEXT,PRIMARY KEY(role,session))")
         self.registry.publish()
         from research_autonomy import ResearchWorker
         self.research = ResearchWorker(self.root)
@@ -81,13 +82,15 @@ class ToolHost:
     def identity(self, role, session):
         with database(self.path) as db:
             row = db.execute('SELECT * FROM identities WHERE role=? AND session=?', (role, session)).fetchone()
+            selected = db.execute('SELECT mode FROM identity_modes WHERE role=? AND session=?', (role, session)).fetchone()
         if not row:
             raise PermissionError('会话没有经过程序身份核验')
         if row['owner'] and not row['desktop'] and not Governance(self.root).is_owner(row['sender']):
             raise PermissionError('主人账号已变更，请重新核验会话身份')
-        return dict(row)
+        from owner_mode import OwnerMode
+        return {**dict(row), 'owner_mode': selected['mode'] if selected else OwnerMode(self.root).get()['mode']}
 
-    def bind(self, role, session, scope, sender='', desktop=False):
+    def bind(self, role, session, scope, sender='', desktop=False, chat_mode=''):
         from social_context import SocialContext
         from group_tests import GroupTests, parse_scope
         from group_tasks import GroupTaskStore, parse_child
@@ -128,15 +131,23 @@ class ToolHost:
             raise PermissionError('普通聊天需使用独立范围')
         with database(self.path) as db:
             db.execute('INSERT OR REPLACE INTO identities VALUES(?,?,?,?,?,?,?)', (role, session, scope, int(owner), int(desktop), sender, time.time()))
+            from owner_mode import OwnerMode
+            mode = 'work' if str(scope).startswith(('control:', 'work:')) else 'chat' if chat_mode in ('chat', 'owner') else 'work' if chat_mode == 'work' else OwnerMode(self.root).get()['mode']
+            db.execute('INSERT OR REPLACE INTO identity_modes VALUES(?,?,?)', (role, session, mode))
             db.execute('DELETE FROM emoji_choices WHERE session=?', (session,))
             db.execute('DELETE FROM chat_replies WHERE session=?', (session,))
             identities = [dict(r) for r in db.execute('SELECT * FROM identities WHERE role=? ORDER BY updated DESC LIMIT 3000', (role,))]
+            modes = {r['session']: r['mode'] for r in db.execute('SELECT * FROM identity_modes WHERE role=?', (role,))}
             for identity in identities:
                 from owner_computer import authorized as owner_computer_authorized
-                identity['owner_coding']=owner_computer_authorized(self.root,identity)
+                from owner_mode import OwnerMode
+                identity['owner_mode'] = modes.get(identity['session'], OwnerMode(self.root).get()['mode'])
+                identity['owner_coding'] = owner_computer_authorized(self.root, identity) and (
+                    identity['owner_mode'] == 'work' or identity['scope'].startswith('control:'))
                 if identity['scope'].startswith('space:'):
                     identity['isolated'] = True
                     private_space = SocialContext(self.root).space(identity['scope'][6:])
+                    identity['owner_reply_mode'] = private_space['persona'].get('owner_reply_mode', 'final')
                     identity['chat_mode'] = 'owner' if private_space['origin'] == 'owner-qq' else ''
                     from tulpa_owner import matches
                     if identity['owner'] and not identity['desktop'] and matches(self.root, private_space):
@@ -147,6 +158,8 @@ class ToolHost:
                     identity.update(desktop_work=True,chat_mode='work',allowed_paths=[work['workspace']])
                 elif identity['scope'].startswith('control:'):
                     identity.update(chat_mode='control')
+                elif identity['scope'] == 'owner':
+                    identity.update(chat_mode='owner')
                 elif role == 'qq' and parse_child(identity['scope']):
                     group_id, window_id, task_id = parse_child(identity['scope'])
                     task_store = GroupTaskStore(self.root); task = task_store.get(task_id)
@@ -210,11 +223,15 @@ class ToolHost:
             current = GroupTests(self.root).current(group_trial[0])
             if not current or current['id'] != group_trial[1]:
                 raise PermissionError('群测试已结束或窗口已切换')
-        private_chat = role == 'qq' and identity['owner'] and identity['scope'].startswith('space:')
+        private_chat = role == 'qq' and identity['owner'] and not identity['desktop'] and (
+            identity['scope'] == 'owner' or identity['scope'].startswith('space:'))
         from tulpa_owner import PREFIX, require_route
         tulpa_chat = private_chat and name.startswith(PREFIX)
         if tulpa_chat:
             require_route(self.root, identity)
+            if name in (PREFIX + 'send_chat_reply', PREFIX + 'react_to_chat_message'):
+                if not policy.config()['send_policy']['owner_private']['owner_reply']:
+                    raise PermissionError('主人已关闭私聊自动回复发送')
             if name == PREFIX + 'wait_chat_messages':
                 # Fish owns inbound event wakeups. Keep the original ACK and
                 # learning protocol without occupying a model turn for 150s.
@@ -247,18 +264,21 @@ class ToolHost:
             store = ResearchControl(self.root)
             return store.search(str(arguments['query'])) if name.endswith('search') else store.detail(str(arguments['bvid']))
         if name == 'fish_memory_search':
-            return MemoryStore(self.root, role).search(str(arguments.get('query', '')), scope='chat:group:'+child[0] if child else identity['scope'], limit=12)
+            memory_scope = 'chat:group:' + child[0] if child else self.memory_scope(identity)
+            return MemoryStore(self.root, role).search(str(arguments.get('query', '')), scope=memory_scope, limit=12)
         if name == 'fish_memory_save':
             require('memory.write')
-            if identity['scope'].startswith('space:'):
+            memory_scope = self.memory_scope(identity)
+            if memory_scope.startswith('space:'):
                 raise PermissionError('独立测试空间长期记忆只读，不能写入正式记忆库')
             return MemoryStore(self.root, role).save(str(arguments['text']), category=str(arguments.get('category', '约定')),
-                scope=identity['scope'], source='manual', source_text='主人通过会话 ' + session + ' 明确要求保存')
+                scope=memory_scope, source='manual', source_text='主人通过会话 ' + session + ' 明确要求保存')
         if name == 'fish_memory_delete':
             require('memory.delete')
-            if identity['scope'].startswith('space:'):
+            memory_scope = self.memory_scope(identity)
+            if memory_scope.startswith('space:'):
                 raise PermissionError('独立测试空间长期记忆只读，不能删除正式记忆库')
-            rows = MemoryStore(self.root, role).search(scope=identity['scope'], limit=200)
+            rows = MemoryStore(self.root, role).search(scope=memory_scope, limit=200)
             if not any(r['id'] == arguments['id'] for r in rows):
                 raise PermissionError('记忆不存在或当前会话不可见')
             return MemoryStore(self.root, role).delete(arguments['id'])
@@ -301,21 +321,59 @@ class ToolHost:
             with self.lock:
                 self.cancelled.pop(key, None)
 
+    @staticmethod
+    def memory_scope(identity):
+        scope = str(identity['scope'])
+        private = scope == 'owner' or scope.startswith(('space:', 'work:', 'control:private:'))
+        return 'owner' if identity['owner'] and private else scope
+
     def dispatch(self, route, body, role, admin):
+        if route == '/workbench':
+            if not admin:
+                raise PermissionError('本地工作区需要客户端身份')
+            if not hasattr(self, '_workbench'):
+                from workbench import Workbench
+                with self.lock:
+                    if not hasattr(self, '_workbench'):
+                        self._workbench = Workbench(self.root)
+            return self._workbench.dispatch(str(body.get('action', '')), body.get('params', {}))
         if route=='/owner/work-context':
             from owner_computer import context
-            return context(self.root,self.identity(role,str(body.get('session',''))))
+            identity = self.identity(role, str(body.get('session', '')))
+            return context(self.root, identity, identity['owner_mode'])
+        if route == '/owner/chat-context':
+            identity = self.identity(role, str(body.get('session', '')))
+            if not identity['owner']:
+                raise PermissionError('未识别主人身份')
+            from social_context import SocialContext
+            contexts = SocialContext(self.root)
+            selected = contexts.owner_space(contexts.owner())
+            persona = selected['persona'] if selected else contexts.ensure_default(role)
+            if identity['desktop']:
+                with database(self.root / 'data' / role / 'desktop-chat.db') as db:
+                    row = db.execute('SELECT revision FROM conversations WHERE session_id=? ORDER BY updated_at DESC LIMIT 1', (identity['session'],)).fetchone()
+                if row and row['revision']:
+                    persona = contexts.persona(row['revision'])
+            return {'revision': persona['id'], 'text': persona['body'], 'reload': True}
         if route == '/control/context':
             identity=self.identity(role,str(body.get('session','')))
             if not identity['owner'] or not identity['scope'].startswith('control:'):raise PermissionError('不是主人定时会话')
             from bot_control import BotControl
             return BotControl(self.root).context(identity['session'])
+        if route == '/control/occurrence':
+            identity = self.identity(role, str(body.get('session', '')))
+            from bot_control import BotControl
+            return BotControl(self.root).native_occurrence(identity, str(body.get('text', '')))
         if route == '/work/context':
             identity=self.identity(role,str(body.get('session','')))
             if not identity['desktop'] or not identity['scope'].startswith('work:'):raise PermissionError('不是本地主人工作会话')
             return self.work_context(role,identity['session'],identity['scope'])
         if route == '/health':
-            return {'ok': True, 'root': hashlib.sha256(str(self.root.resolve()).encode()).hexdigest(), 'social_context_version': 1, 'social_roster_version': 1, 'chat_actions_version': 1}
+            return {'ok': True, 'root': hashlib.sha256(str(self.root.resolve()).encode()).hexdigest(), 'social_context_version': 1, 'social_roster_version': 1, 'chat_actions_version': 1, 'workbench_version': 1}
+        if route == '/system/stop':
+            if not admin: raise PermissionError('请从本地客户端停止后台')
+            self.stop.set()
+            return {'ok': True}
         if route == '/chat/take':
             if not admin:
                 raise PermissionError('只有消息控制器可以取得待发聊天气泡')
@@ -350,7 +408,7 @@ class ToolHost:
             sid = identity['scope'][6:]
             contexts = SocialContext(self.root)
             space = contexts.space(sid)
-            text = contexts.prompt(sid)
+            text = contexts.persona(space['revision'])['body']
             from tulpa_owner import matches, prompt as tulpa_prompt
             if matches(self.root, space):
                 text += '\n\n' + tulpa_prompt(self.root)
@@ -360,7 +418,7 @@ class ToolHost:
         if route == '/bind':
             if not admin:
                 raise PermissionError('只有本地控制台能绑定身份')
-            return self.bind(body['role'], body['session'], body['scope'], body.get('sender', ''), bool(body.get('desktop', False)))
+            return self.bind(body['role'], body['session'], body['scope'], body.get('sender', ''), bool(body.get('desktop', False)), body.get('chat_mode', ''))
         if route == '/execute':
             if admin:
                 raise PermissionError('工具执行必须使用角色令牌')
@@ -445,7 +503,8 @@ class ToolHost:
                     if self.headers.get('Origin'):
                         raise PermissionError('浏览器跨源请求已拒绝')
                     length = int(self.headers.get('Content-Length', '0'))
-                    if not 0 <= length <= 2 * 1024 * 1024:
+                    ceiling = 32 * 1024 * 1024 if self.path == '/workbench' else 2 * 1024 * 1024
+                    if not 0 <= length <= ceiling:
                         raise ValueError('请求过大')
                     body = json.loads(self.rfile.read(length) or b'{}')
                     result = host.dispatch(self.path, body, role, admin)
@@ -466,6 +525,8 @@ class ToolHost:
         self.research_thread = threading.Thread(target=self.research.loop, daemon=True, name='fish-research')
         if background_workers:
             self.learning_thread.start(); self.research_thread.start()
+            from memory_maintenance import start_background
+            self.memory_thread = start_background(self)
         threading.Thread(target=self.server.serve_forever, daemon=True, name='fish-tool-host').start()
 
 
@@ -501,11 +562,11 @@ def ensure_host(root):
             _hosts[str(root)] = host
 
 
-def bind_session(root, role, session, scope='owner', sender='', desktop=False):
+def bind_session(root, role, session, scope='owner', sender='', desktop=False, *, chat_mode=''):
     ensure_host(root)
     if str(scope).startswith('space:') and request(root, '/health').get('social_context_version') != 1:
         raise PermissionError('工具服务尚未支持独立窗口隔离；请停止并重新启动对应角色')
-    return request(root, '/bind', {'role': role, 'session': session, 'scope': scope, 'sender': sender, 'desktop': desktop}, role=role)
+    return request(root, '/bind', {'role': role, 'session': session, 'scope': scope, 'sender': sender, 'desktop': desktop, 'chat_mode': chat_mode}, role=role)
 
 
 def set_group_context(root, session, text):

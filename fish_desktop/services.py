@@ -96,7 +96,7 @@ def kill_port(port: int, root: Path = PROJECT) -> bool:
     if port == 3001:
         return False
     try:
-        output = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, timeout=5).stdout
+        output = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, timeout=5, creationflags=_hidden_flags()).stdout or ''
     except Exception:
         return False
     pids = set()
@@ -630,6 +630,7 @@ class FishServices:
         kill_port(3102, self.root)
         kill_port(3101, self.root)
         self.runtime.stop("qq")
+        http_json("http://127.0.0.1:3090/fish/shutdown", method="POST", timeout=3, root=self.root)
         kill_port(3090, self.root)
         return {"ok": True}
 

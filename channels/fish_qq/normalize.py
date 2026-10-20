@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -39,10 +40,37 @@ def _cq_params(raw: str) -> dict[str, str]:
 
 
 def _image_url(data: dict[str, Any]) -> str | None:
-    url = str(data.get("url") or data.get("file") or "")
-    if url.startswith("http://") or url.startswith("https://"):
-        return url
+    return _media_ref(data)
+
+
+def _media_ref(data: dict[str, Any]) -> str | None:
+    """Any HTTP(S) transport the adapter gave us (url / path / file as URL)."""
+    for key in ("url", "path", "file"):
+        value = str(data.get(key) or "")
+        if value.startswith("http://") or value.startswith("https://"):
+            return value
     return None
+
+
+def _file_segment(data: dict[str, Any]) -> dict[str, Any]:
+    """Keep every identifier a file segment carries; never invent a local file."""
+    raw_file = str(data.get("file") or data.get("file_id") or "")
+    name = str(data.get("name") or data.get("file_name") or Path(raw_file.replace("\\", "/")).name or "")
+    url = _media_ref(data)
+    file_id = str(data.get("file_id") or data.get("id") or data.get("fid") or "")
+    seg: dict[str, Any] = {"type": "file", "name": name or "file", "url": url, "file": raw_file,
+                           "file_id": file_id, "file_size": str(data.get("file_size") or ""),
+                           "source_ref": url or file_id or raw_file}
+    local = raw_file if raw_file and not url and (Path(raw_file).is_absolute() or raw_file.startswith("file:")) else ""
+    if local and Path(local.removeprefix("file:")).is_file():
+        seg["path"] = str(Path(local.removeprefix("file:")).resolve())
+    if url is None and not seg.get("path"):
+        # Honest status for the model/UI: identifiers were kept for a later retry.
+        reason = "附件段没有可下载地址" + (f"（仅有文件标识 {file_id[:40]}）" if file_id else "")
+        seg["status"] = "no_url"
+        seg["reason"] = reason
+        seg["placeholder"] = f"[文件 {name or '未命名'}：{reason}]"
+    return seg
 
 
 def _segment(kind: str, data: dict[str, Any]) -> dict[str, Any] | None:
@@ -58,6 +86,8 @@ def _segment(kind: str, data: dict[str, Any]) -> dict[str, Any] | None:
         if alt:
             seg["alt"] = str(alt)
         return seg
+    if kind == "file":
+        return _file_segment(data)
     if kind == "at":
         qq = str(data.get("qq", ""))
         return {"type": "at", "user_id": qq} if qq else None
@@ -143,6 +173,9 @@ def normalize_message(
         segments.append({"type": "unknown", "raw_type": "empty", "placeholder": "[不支持的消息类型: empty]"})
 
     sender = raw.get("sender") if isinstance(raw.get("sender"), dict) else {}
+    for segment in segments:
+        if segment.get('type') in ('file', 'image', 'video', 'audio'):
+            segment['chat_id'] = chat_id
     sender_id = str(sender.get("user_id", raw.get("user_id", "")))
     display_name = str(sender.get("card") or sender.get("nickname") or "")
     bot_ids = bot_message_ids or set()

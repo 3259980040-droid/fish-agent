@@ -1,4 +1,10 @@
-"""Verified-owner QQ persona tests; every queued message pins its test space."""
+"""Verified-owner QQ persona tests; every queued message pins its test space.
+
+The owner chat/work mode is program state, not persona state. One mode snapshot
+is taken when the message is queued and carried by the queue item, so a switch
+made while this turn waits never changes its route; the next message uses the
+new mode in the very same session, persona and space.
+"""
 import asyncio
 import uuid
 from social_context import SocialContext
@@ -70,16 +76,29 @@ async def process(loop, item):
             loop.store.set_session(conv['id'], session)
         loop.active_test_session = session
         loop.store.create_turn(turn, conv['id'], session, turn)
-        await asyncio.to_thread(bind_session, loop.root, 'qq', session, space['scope'], loop.owner)
+        mode = item.get('owner_mode') or loop.owner_mode().get()['mode']
+        owner_coding = bool(loop.governance.permitted(loop.owner, 'computer.work'))
+        work = mode == 'work' and owner_coding
+        # Owner test windows stay isolated (persona tests); ordinary owner
+        # private windows read the shared owner memory pool, not only this
+        # space's legacy memories.
+        await asyncio.to_thread(bind_session, loop.root, 'qq', session, space['scope'], loop.owner,
+                                chat_mode='work' if work else 'owner')
         baseline = await client.baseline(session)
-        from owner_computer import apply_permissions
-        computer=await asyncio.to_thread(apply_permissions,loop.root,session)
+        from owner_computer import apply_permissions, context as work_context
+        computer=await asyncio.to_thread(apply_permissions,loop.root,session,'work' if work else 'chat')
         media = MediaService(loop.root, 'qq')
         media.directory = contexts.directory(space['id']) / 'media'
         prompt = await asyncio.to_thread(media.prepare_content, item['payload'].get('segments', []), item['text'], cancelled=loop.cancel_event)
-        # Tool authority is enforced by the program. Do not turn every casual
-        # user message into a long administrative instruction in model history.
-        prompt[0]['text'] = '[当前入口：已核验主人账号的独立私聊。]\n' + MemoryStore(loop.root, 'qq').context(item['text'], space['scope']) + prompt[0]['text']
+        from web_knowledge import WebKnowledge
+        web = await asyncio.to_thread(WebKnowledge(loop.root).resolve, space['scope'], item['text'], loop.cancel_event)
+        # Program context precedes the untouched user message. In chat mode the
+        # persona (body + its global/workspace rules) is already the runtime
+        # persona context node; only retrieved memory is added here. In work
+        # mode this Python route adds the same work environment text the
+        # runtime pre-step would use.
+        prefix = web + MemoryStore(loop.root, 'qq').context(item['text'], 'owner')
+        prompt[0]['text'] = prefix + prompt[0]['text']
         from tulpa_owner import matches
         tulpa = matches(loop.root, space)
         if loop.cancel_event.is_set():

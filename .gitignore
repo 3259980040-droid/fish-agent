@@ -94,3 +94,6 @@ PROJECT_STATUS.md
 # OS
 .DS_Store
 Thumbs.db
+
+node_modules/
+harness/runtime/fish-workspace/

@@ -262,6 +262,8 @@ class QQAgentLoop:
             return
         payload = frame.get("payload") or {}
         sender = str((payload.get("sender") or {}).get("id", ""))
+        if await self._mode_command(payload, sender):
+            return
         from group_language import command as language_command
         if await language_command(self,payload,sender):return
         from group_tests import command as group_test_command
@@ -284,7 +286,7 @@ class QQAgentLoop:
             if seg.get("type") == "text"
         ).strip()
         if not text:
-            text = "".join({"image":"[图片]", "video":"[视频]", "audio":"[语音]"}.get(s.get("type"), "")
+            text = "".join({"image":"[图片]", "video":"[视频]", "audio":"[语音]", "file":"[文件]"}.get(s.get("type"), "")
                            for s in payload.get("segments", [])) or "[附件消息]"
         from social_context import SocialContext
         test_space = SocialContext(self.root).owner_space(sender)
@@ -303,8 +305,13 @@ class QQAgentLoop:
             self.store.update_message(message_id, error="主人已暂停回复，消息已跳过")
             log(f"owner inbound skipped while paused message_id={message_id}")
             return
+        from tulpa_owner import matches as tulpa_route
         await self.queue.put({"message_id": message_id, "payload": payload, "text": text,
-                              'space_id': test_space['id'] if test_space else '', 'conversation': conversation})
+                              'space_id': test_space['id'] if test_space else '', 'conversation': conversation,
+                              # Mode snapshot taken when queued; the turn keeps it even
+                              # if the owner switches while it waits.
+                              'owner_mode': self.owner_mode().get()['mode'],
+                              'tulpa': bool(test_space and tulpa_route(self.root, test_space))})
         log(f"owner inbound queued message_id={message_id} text_len={len(text)}")
 
     async def _on_group(self, payload: dict[str, Any]) -> None:
@@ -353,6 +360,12 @@ class QQAgentLoop:
             from owner_tests import process
             await process(self, item)
             return
+        mode = self.owner_mode().get()['mode']
+        # Legacy Tulpa route owns its delivery protocol; it still gets the
+        # requested mode in its identity so work tooling applies there.
+        if mode == 'work' and not item.get('tulpa'):
+            await self._process_work(item)
+            return
         try:
             await self.ensure_runtime()
         except Exception as exc:  # noqa: BLE001
@@ -361,27 +374,23 @@ class QQAgentLoop:
             return
         assert self.dsh is not None and self.session_id is not None
         client = self.dsh
-        turn_id = f"turn-{uuid.uuid4().hex[:12]}"
-        self.active_turn = turn_id
-        self.current_text = item["text"]
-        self.cancel_event = asyncio.Event()
-        self.store.create_turn(turn_id, self.conversation["id"], self.session_id, turn_id)
+        turn_id = self._begin_turn(item)
         try:
             baseline = await client.baseline(self.session_id)
             prompt = await asyncio.to_thread(MediaService(self.root, "qq").prepare_content,
                                              item["payload"].get("segments", []), item["text"], cancelled=self.cancel_event)
             if self.cancel_event.is_set():
-                self.store.update_message(item["message_id"], status="cancelled", cancelled=True,
-                                          runtime_turn_id=turn_id)
-                self.store.finish_turn(turn_id, "cancelled", error="cancelled during media processing")
-                self.active_turn = None
+                self._finish_cancelled(item["message_id"], turn_id, None, "cancelled during media processing")
                 return
-            from tool_host import bind_session
             from memory_store import MemoryStore
-            await asyncio.to_thread(bind_session, self.root, 'qq', self.session_id, 'owner', self.owner)
             from owner_computer import apply_permissions
-            computer=await asyncio.to_thread(apply_permissions,self.root,self.session_id)
-            prompt[0]['text'] = self.governance.identity_prompt(self.owner) + MemoryStore(self.root, 'qq').context(item['text'], 'owner') + prompt[0]['text']
+            from web_knowledge import WebKnowledge
+            # Selecting an owner test window is an explicit owner choice and
+            # stays isolated (persona test space). Otherwise owner mode applies.
+            work = False if item.get('space_id') else self._bind_owner(self.session_id, mode, self._owner_coding())
+            computer = await asyncio.to_thread(apply_permissions, self.root, self.session_id, 'work' if work else 'chat')
+            web = await asyncio.to_thread(WebKnowledge(self.root).resolve, 'private:' + self.owner, item['text'], self.cancel_event)
+            prompt[0]['text'] = web + MemoryStore(self.root, 'qq').context(item['text'], 'owner') + prompt[0]['text']
             self.store.update_message(item['message_id'], segments=item['payload'].get('segments', []))
             self.governance.consume("calls")
             await client.prompt(self.session_id, prompt)
@@ -389,16 +398,10 @@ class QQAgentLoop:
                 self.session_id, baseline, timeout=1800 if computer else 180, cancel_event=self.cancel_event,
             )
         except Exception as exc:  # noqa: BLE001
-            status = 'cancelled' if isinstance(exc, InterruptedError) or self.cancel_event.is_set() else 'failed'
-            self.store.update_message(item["message_id"], status=status, error=str(exc), runtime_turn_id=turn_id)
-            self.store.finish_turn(turn_id, status, error=str(exc))
-            self.active_turn = None
+            self._finish_failed(item["message_id"], turn_id, None, exc)
             return
         if result.get("cancelled"):
-            self.store.update_message(item["message_id"], status="cancelled", cancelled=True,
-                                      runtime_turn_id=turn_id)
-            self.store.finish_turn(turn_id, "cancelled", error="cancelled")
-            self.active_turn = None
+            self._finish_cancelled(item["message_id"], turn_id, None, "cancelled")
             return
         if not result.get("ok"):
             self.store.update_message(item["message_id"], status="failed", error=result.get("error", ""),
@@ -447,6 +450,132 @@ class QQAgentLoop:
             log(f"outbound failed: {error}")
         self.active_turn = None
 
+    # -- owner chat/work mode helpers -------------------------------------
+    def _begin_turn(self, item):
+        turn_id = f"turn-{uuid.uuid4().hex[:12]}"
+        self.active_turn = turn_id
+        self.current_text = item["text"]
+        self.cancel_event = asyncio.Event()
+        self.store.create_turn(turn_id, self.conversation["id"], self.session_id, turn_id)
+        return turn_id
+
+    def _owner_coding(self):
+        """Identity permission only; the mode decides whether it is active."""
+        return bool(self.owner and self.governance.permitted(self.owner, 'computer.work'))
+
+    def _bind_owner(self, session, mode, owner_coding):
+        """Bind the verified owner identity for this turn.
+
+        ``scope`` stays ``owner`` so shared owner memory is readable in every
+        ordinary owner private window. ``chat_mode`` carries the requested
+        chat/work mode; the runtime (or the parent ToolHost) derives the
+        effective ``owner_coding`` as authorized AND mode == work.
+        """
+        from tool_host import bind_session
+        work = mode == 'work' and owner_coding
+        bind_session(self.root, 'qq', session, 'owner', self.owner, chat_mode=mode if work else 'owner')
+        return work
+
+    def _finish_cancelled(self, message_id, turn_id, session, error):
+        self.store.update_message(message_id, status="cancelled", cancelled=True,
+                                  runtime_session_id=session or '', runtime_turn_id=turn_id)
+        self.store.finish_turn(turn_id, "cancelled", error=error)
+        self.active_turn = None
+
+    def _finish_failed(self, message_id, turn_id, session, exc):
+        from dsh_web import safe_runtime_error
+        status = 'cancelled' if isinstance(exc, InterruptedError) or self.cancel_event.is_set() else 'failed'
+        error = safe_runtime_error(str(exc) or type(exc).__name__)
+        self.store.update_message(message_id, status=status, error=error, cancelled=status == 'cancelled',
+                                  runtime_session_id=session or '', runtime_turn_id=turn_id)
+        self.store.finish_turn(turn_id, status, error=error)
+        self.active_turn = None
+        log(f"owner turn {turn_id} {status}: {error}")
+
+    async def _process_work(self, item):
+        """QQ owner message handled as native work in the same runtime session.
+
+        Same conversation/QQStore records, same runtime session and history as
+        the chat path; only the tool profile and the program-side prompt differ.
+        Fish sends the final text through the normal QQ delivery gate.
+        """
+        try:
+            await self.ensure_runtime()
+        except Exception as exc:  # noqa: BLE001
+            self.store.update_message(item["message_id"], status="failed", error=str(exc))
+            log(f"runtime unavailable for message {item['message_id']}: {exc}")
+            return
+        assert self.dsh is not None and self.session_id is not None
+        client = self.dsh
+        turn_id = self._begin_turn(item)
+        try:
+            if not self._owner_coding():
+                raise PermissionError('主人账号未启用本机工作权限')
+            baseline = await client.baseline(self.session_id)
+            prompt = await asyncio.to_thread(MediaService(self.root, "qq").prepare_content,
+                                             item["payload"].get("segments", []), item["text"], cancelled=self.cancel_event)
+            if self.cancel_event.is_set():
+                self._finish_cancelled(item["message_id"], turn_id, None, "cancelled during media processing")
+                return
+            from owner_computer import apply_permissions
+            self._bind_owner(self.session_id, 'work', True)
+            await asyncio.to_thread(apply_permissions, self.root, self.session_id, 'work')
+            self.store.update_message(item['message_id'], segments=item['payload'].get('segments', []))
+            self.governance.consume("calls")
+            await client.prompt(self.session_id, prompt)
+            result = await client.wait_response(self.session_id, baseline, timeout=1800,
+                                                cancel_event=self.cancel_event)
+        except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, PermissionError):
+                self.store.update_message(item["message_id"], status="blocked", error=str(exc), runtime_turn_id=turn_id)
+                self.store.finish_turn(turn_id, "blocked", error=str(exc))
+                self.active_turn = None
+            else:
+                self._finish_failed(item["message_id"], turn_id, None, exc)
+            return
+        if result.get("cancelled"):
+            self._finish_cancelled(item["message_id"], turn_id, None, "cancelled")
+            return
+        if not result.get("ok"):
+            self.store.update_message(item["message_id"], status="failed", error=result.get("error", ""),
+                                      runtime_turn_id=turn_id)
+            self.store.finish_turn(turn_id, "failed", error=result.get("error", ""))
+            self.active_turn = None
+            return
+        response = str(result["text"]).strip()
+        if not response:
+            response = '本机任务已处理完成；没有需要补充的文字。'
+        try:
+            if self.governance.config()['paused']:
+                raise PermissionError('主人已暂停，回复未发送')
+            self.governance.check_output(response)
+        except (PermissionError, OSError, ValueError) as exc:
+            self.store.update_message(item["message_id"], status="blocked", error=str(exc), runtime_turn_id=turn_id)
+            self.store.finish_turn(turn_id, "blocked", error=str(exc))
+            self.active_turn = None
+            return
+        segments = self._reply_segments(self.session_id, response)
+        outbound_id = self.store.record_message(
+            self.conversation["id"], f"private:{self.owner}", "bot", "outbound", "",
+            None, segments, response, "pending", runtime_session_id=self.session_id, runtime_turn_id=turn_id,
+        )
+        turn = await self._deliver_reply(f'private:{self.owner}', segments, f'qq-agent:{turn_id}', self.cancel_event)
+        if turn.get("ok"):
+            payload = turn.get("payload") or {}
+            self.store.update_message(outbound_id, status="sent", channel_message_id=str(payload.get("message_id", "")))
+            self.store.update_message(item["message_id"], status="processed",
+                                      runtime_session_id=self.session_id, runtime_turn_id=turn_id)
+            self.store.finish_turn(turn_id, "done", assistant_message_id=str(payload.get("message_id", "")))
+            log(f"owner work outbound sent message_id={payload.get('message_id')} turn={turn_id}")
+        else:
+            error = (turn.get("error") or {}).get("code", "send_failed")
+            self.store.update_message(outbound_id, status="failed", error=error)
+            self.store.update_message(item["message_id"], status="processed", error=error,
+                                      runtime_session_id=self.session_id, runtime_turn_id=turn_id)
+            self.store.finish_turn(turn_id, "send_failed", error=error)
+            log(f"owner work outbound failed: {error}")
+        self.active_turn = None
+
     async def cancel(self) -> dict[str, Any]:
         self.cancel_event.set()
         for task in list(self.group_tasks):
@@ -458,6 +587,8 @@ class QQAgentLoop:
         return {"ok": False, "error": "no active turn"}
 
     async def _deliver_reply(self, chat_id, segments, key, cancelled=None, validate=None, reply_to=None):
+        if chat_id == 'private:' + self.owner and not self.governance.config()['send_policy']['owner_private']['owner_reply']:
+            raise PermissionError('主人已关闭私聊自动回复发送')
         text = ''.join(s.get('text', '') for s in segments if s['type'] == 'text')
         self.governance.check_output(text)  # All parts must pass before the first send.
         parts = []
@@ -494,6 +625,56 @@ class QQAgentLoop:
         except Exception:
             pass
         return result
+
+    def owner_mode(self):
+        from owner_mode import OwnerMode
+        return OwnerMode(self.root)
+
+    async def _mode_command(self, payload: dict, sender: str) -> bool:
+        """Program-level owner chat/work switch, before any model or persona path.
+
+        The switch changes only the persisted mode: same conversation row, same
+        runtime session, same persona and history. It never sends the command to
+        the model and never creates a new session or space.
+        """
+        from owner_mode import mode_command
+        text = ''.join(s.get('text', '') for s in (payload.get('segments') or []) if s.get('type') == 'text').strip()
+        action = mode_command(text)
+        if not action:
+            return False
+        if (payload.get('chat_type') != 'private' or not self.owner or sender != self.owner
+                or payload.get('chat_id') != f'private:{self.owner}' or not self.governance.is_owner(sender)):
+            return False
+        mode = self.owner_mode()
+        before = mode.get()['mode']
+        switched, failed = False, False
+        try:
+            if action == 'toggle':
+                result = mode.toggle()
+            else:
+                # Turning work mode on needs the existing identity permission;
+                # chat mode never does, so the owner can always stop working.
+                if action == 'work' and not self.governance.permitted(sender, 'computer.work'):
+                    raise PermissionError('主人账号未启用本机工作权限')
+                result = mode.set(action)
+            switched = True
+            response = mode.summary(before)
+        except (ValueError, PermissionError, TimeoutError) as exc:
+            failed = True
+            result = mode.get()
+            response = mode.summary(before, failed=True) + '\n' + (str(exc) or type(exc).__name__)
+            log(f"owner mode command {action} refused: {type(exc).__name__}")
+        self.governance.audit('owner_mode', f"{before}->{result['mode']}" + (' switched' if switched else ' kept'))
+        reply_key = 'owner-mode:' + str(payload.get('message_id', uuid.uuid4().hex))
+        try:
+            # 切换模式 is a Fish management command, like /状态.
+            reply = await self._deliver_reply(f'private:{self.owner}', [{'type': 'text', 'text': response}], reply_key)
+            if not reply.get('ok'):
+                log(f"owner mode reply not sent: {(reply.get('error') or {}).get('code', 'send_failed')}")
+        except Exception as exc:  # noqa: BLE001
+            log(f"owner mode reply failed: {type(exc).__name__}")
+        log(f"owner mode command {action} result={result['mode']} switched={switched} failed={failed} reply_key={reply_key}")
+        return True
 
     async def _admin_command(self, payload: dict, sender: str) -> bool:
         text = "".join(s.get("text", "") for s in payload.get("segments", []) if s.get("type") == "text").strip()
@@ -548,6 +729,7 @@ class QQAgentLoop:
                     "conversation": self.conversation["id"] if self.conversation else None,
                     "session_id": self.session_id,
                     "active_turn": self.active_turn,
+                    "owner_mode": self.owner_mode().get(),
                     "queue": self.queue.qsize(),
                     "group_tasks": sum(not task.done() for task in self.group_tasks),
                     "source_mode": not getattr(sys, 'frozen', False),

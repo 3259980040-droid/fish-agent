@@ -17,7 +17,8 @@ from storage import settings_lock, read_json, write_json
 
 ROOTS = ('channel-state', 'data', 'homes', 'knowledge', 'qq-work', 'harness/agents', 'harness/global', 'harness/safety', 'harness/secrets')
 FILES = ('harness/network.json', 'harness/agents.json', 'harness/control.json', 'harness/multimodal.json', 'harness/emoji.json',
-         'harness/research-interests.json', 'harness/plugins/registry.json', 'harness/setup.json', 'channels/fish_qq/config.json')
+         'harness/research-interests.json', 'harness/plugins/registry.json', 'harness/setup.json', 'channels/fish_qq/config.json',
+         'harness/owner-computer.json', 'harness/integration.json', 'harness/memory-embeddings.json')
 
 
 def _allowed(relative):

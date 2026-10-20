@@ -68,6 +68,38 @@ class DesktopChat:
             conn.commit()
         return cid
 
+    def set_mode(self, cid: str, mode: str, workspace: str = '') -> dict:
+        """Switch this conversation between chat and work without a new conversation.
+
+        The conversation id, space, runtime session, persona revision, messages
+        and attachments never change. The native working-directory service
+        applies an updated workspace before the next work turn.
+        """
+        if mode not in ('chat', 'work'):
+            raise ValueError('未知对话模式')
+        with closing(self.connect()) as db:
+            row = db.execute('SELECT * FROM conversations WHERE id=?', (cid,)).fetchone()
+            if not row:
+                raise ValueError('请选择对话')
+            target = row['workspace']
+            if mode == 'work':
+                if workspace:
+                    target = workspace
+                elif not target:
+                    from owner_computer import workspace as owner_workspace
+                    target = str(owner_workspace(self.root))
+                directory = Path(target).resolve()
+                if not directory.is_dir():
+                    raise ValueError('请选择存在的工作目录')
+                target = str(directory)
+            db.execute('UPDATE conversations SET mode=?,workspace=?,updated_at=? WHERE id=?',
+                       (mode, target, time.strftime("%Y-%m-%d %H:%M:%S"), cid))
+            db.commit()
+            settings = dict(db.execute('SELECT mode,workspace,revision,permission FROM conversations WHERE id=?', (cid,)).fetchone())
+        return {'ok': True, 'conversation_id': cid, 'session_id': row['session_id'] or '',
+                'space_id': row['space_id'] or '', 'settings': settings,
+                'note': '已切换到' + ('工作模式' if mode == 'work' else '聊天模式') + '；同一对话、人格与历史保持不变。'}
+
     def snapshot(self, cid: str = "", search: str = "", after='', before='', limit=100, *, around=0) -> dict:
         with closing(self.connect()) as conn:
             limit = min(2000, max(20, int(limit)))
@@ -166,20 +198,24 @@ class DesktopChat:
             if conversation is None:
                 raise ValueError("对话不存在")
             space = self.conversation_context(cid)
-            work = conversation['mode'] == 'work'
+            # Read the mode from storage for every phase. set_mode() may run
+            # while this turn is queued; a cached flag would route the new text
+            # through the previous mode's tools, memory scope or prompt.
+            work = self._mode(cid)['mode'] == 'work'
             self._isolation_requested = bool(space)
             scope = 'work:'+cid if work else space['scope'] if space else 'owner'
             imported = []
+            from attachment_store import AttachmentStore
+            attachment_store = AttachmentStore(self.root, self.role)
             for attachment in attachments[:3]:
                 source = Path(attachment["path"]).resolve()
                 if not source.is_file() or source.stat().st_size > 20 * 1024 * 1024:
                     raise ValueError("附件不存在或超过 20MB")
-                directory = self.db.parent / ("spaces/" + space['id'] if space else "chat-attachments") / uuid.uuid4().hex
-                directory.mkdir(parents=True)
-                target = directory / ("attachment" + source.suffix.lower())
-                shutil.copy2(source, target)
-                imported.append({"type": attachment["type"], "path": str(target)})
-            mid = self._record(cid, "inbound", text or "[图片]", imported, "processing")
+                record = attachment_store.import_path(cid, source, name=attachment.get('name', source.name),
+                    type_hint=attachment.get('type', ''), source='desktop')
+                imported.append({"id": record['id'], "type": record['type'], "path": record['path'],
+                                 "name": record['name'], "conversation_id": cid})
+            mid = self._record(cid, "inbound", text or "[附件]", imported, "processing")
             with closing(self.connect()) as conn:
                 conn.execute("UPDATE conversations SET title=CASE WHEN title='新对话' THEN ? ELSE title END WHERE id=?", ((text or "图片对话")[:40], cid))
                 conn.commit()
@@ -187,13 +223,12 @@ class DesktopChat:
             if space:
                 from social_context import SocialContext
                 media.directory = SocialContext(self.root).directory(space['id']) / 'media'
-            content = media.prepare_content(imported, text or "请理解这张图片。", local=True, cancelled=self.cancel_event)
+            content = media.prepare_content(imported, text or "请查看附件。", local=True, cancelled=self.cancel_event)
             from memory_store import MemoryStore
-            content[0]["text"] = self.policy.identity_prompt(desktop=True) + ('' if work else MemoryStore(self.root, self.role).context(text, scope)) + content[0]['text']
-            if work:
-                content[0]['text'] = ('[本地主人工作会话：使用 DSH 原生文件、编辑、终端和联网工具完成任务；'
-                    '工作目录为 '+conversation['workspace']+'。主人已授权在此工作目录处理文件。'
-                    '不通过 QQ 发送本轮结果；按实际工具结果说明修改及验证。]\n')+content[0]['text']
+            from web_knowledge import WebKnowledge
+            memory = MemoryStore(self.root, self.role)
+            web = WebKnowledge(self.root).resolve(cid, text, self.cancel_event)
+            content[0]["text"] = self._prompt_text(cid, text, memory, scope) + web + content[0]['text']
             if self.cancel_event.is_set():
                 raise InterruptedError("已取消")
             self.policy.consume("calls")
@@ -203,9 +238,11 @@ class DesktopChat:
                 raise InterruptedError("已取消")
             if not result.get("ok"):
                 raise RuntimeError(result.get("error", "没有取得完整回复"))
+            settings = self._mode(cid)
+            work = settings['mode'] == 'work'
             if not work:self.policy.check_output(result["text"])
             self._record(cid, "outbound", result["text"], [], "done")
-            if not work:MemoryStore(self.root, self.role).enqueue('desktop:' + str(mid), text, scope)
+            if not work:memory.enqueue('desktop:' + str(mid), text, scope)
             self._status(mid, "done")
             return self.snapshot(cid)
         except Exception as exc:
@@ -219,11 +256,22 @@ class DesktopChat:
             self.active_cid = ''
             self.lock.release()
 
+    def _mode(self, cid):
+        """Current persisted settings of one conversation (mode read per phase)."""
+        with closing(self.connect()) as db:
+            row = db.execute('SELECT mode,workspace,revision,permission FROM conversations WHERE id=?', (cid,)).fetchone()
+        if not row:
+            raise ValueError("对话不存在")
+        return dict(row)
+
+    def _prompt_text(self, cid, text, memory, scope):
+        """Program prefix for one turn; the user's own words are left raw."""
+        return memory.context(text, 'owner')
+
     async def _turn(self, client, session, cid, content):
         self.active_client=client
         await client.auth()
-        with closing(self.connect()) as db:
-            settings=dict(db.execute('SELECT * FROM conversations WHERE id=?',(cid,)).fetchone())
+        settings=self._mode(cid)
         if session:
             try:
                 baseline = await client.baseline(session)
@@ -247,6 +295,7 @@ class DesktopChat:
         self.active_session = session
         from tool_host import bind_session
         space = self.conversation_context(cid)
+        settings = self._mode(cid)  # set_mode() may have run while awaiting the client.
         if settings['mode']=='work':
             bind_session(self.root,self.role,session,scope='work:'+cid,desktop=True)
             port=self.runtime.config.runtime_port(self.role)
@@ -263,7 +312,7 @@ class DesktopChat:
         if self.cancel_event.is_set():
             return {"cancelled": True}
         await client.prompt(session, content)
-        return await client.wait_response(session, baseline, 1800 if settings['mode']=='work' else 180, cancel_event=self.cancel_event)
+        return await client.wait_response(session, baseline, 1800 if self._mode(cid)['mode']=='work' else 180, cancel_event=self.cancel_event)
 
     def cancel(self):
         self.cancel_event.set()

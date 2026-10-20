@@ -23,6 +23,11 @@ try:
 except ImportError:
     from guard import Guard, normalize, safe_search
 
+try:
+    from .send_policy import normalize_policy, validate_updates
+except ImportError:
+    from send_policy import normalize_policy, validate_updates
+
 CAPABILITIES = {"status": "查看状态", "pause": "暂停回复", "resume": "恢复回复", "cancel": "取消当前任务",
                 "memory.write": "保存记忆", "memory.delete": "删除记忆", "interests.write": "调整研究兴趣", "emoji.manage": "管理表情库",
                 'persona.test':'选择人格测试窗口','persona.approve':'认可人格版本',
@@ -34,7 +39,8 @@ DEFAULTS = {"version": 3, "owner_permissions": list(CAPABILITIES), "paused": Fal
             "max_model_requests_daily": 300, "max_model_tokens_daily": 2000000,
             "blocked_tools": ["bash", "shell", "terminal", "run_code", "write", "edit", "delete", "onebot", "send_message", "plugin_manager"],
             "allowed_tools": ["read", "read_file", "read_image", "list_directory", "ls", "glob", "grep", "web_search", "web_fetch", "search", "fetch"],
-            "blocked_text": [], "block_patterns": [], "owner_priority": True}
+            "blocked_text": [], "block_patterns": [], "owner_priority": True,
+            "send_policy": normalize_policy({})}
 
 
 def daily_limits_enabled(settings: dict, role: str) -> bool:
@@ -79,6 +85,9 @@ class Governance:
             result['version'] = 3
             if "paused_roles" not in raw:
                 result["paused_roles"] = {role: bool(raw.get("paused", False)) for role in ("qq", "research")}
+            # Missing or older send settings keep their safe defaults; public
+            # group auto-reply is never enabled from this key.
+            result['send_policy'] = normalize_policy(raw)
         result["paused"] = bool(result["paused_roles"].get(self.agent_id, False))
         result['daily_usage_limits'] = {role: daily_limits_enabled(result, role) for role in ('qq', 'research')}
         return result
@@ -98,7 +107,16 @@ class Governance:
             if not isinstance(values, dict) or any(k not in daily_limits or type(v) is not bool for k, v in values.items()):
                 raise ValueError('每日用量开关必须按 QQ 和研究角色分别设置为开启或关闭')
             daily_limits.update(values)
-        cfg.update({k: v for k, v in updates.items() if k in cfg})
+        send_policy = cfg['send_policy']
+        if 'send_policy' in updates:
+            # Partial update: validate unknown keys/types, then merge per bucket.
+            changes = validate_updates(updates['send_policy'])
+            send_policy = json.loads(json.dumps(send_policy))
+            for bucket, values in changes.items():
+                send_policy[bucket].update(values)
+            send_policy = normalize_policy(send_policy)
+        cfg.update({k: v for k, v in updates.items() if k in cfg and k != 'send_policy'})
+        cfg['send_policy'] = send_policy
         cfg['daily_usage_limits'] = daily_limits
         if "paused" in updates:
             cfg["paused_roles"][self.agent_id] = bool(updates["paused"])
@@ -199,7 +217,11 @@ class Governance:
         with closing(self.connect()) as conn:
             usage = dict(conn.execute("SELECT kind,count FROM usage WHERE day=?", (time.strftime("%Y-%m-%d"),)))
             audit = [dict(zip(("ts", "kind", "reason"), row)) for row in conn.execute("SELECT ts,kind,reason FROM audit ORDER BY id DESC LIMIT 30")]
-        return {"config": self.config(), "owner_id": self.owner_id(), "usage": usage, "audit": audit}
+        cfg = self.config()
+        from send_policy import CAPABILITIES, SETTABLE, summary as send_summary
+        return {"config": cfg, "owner_id": self.owner_id(), "usage": usage, "audit": audit,
+                "send_policy": cfg['send_policy'], "send_capabilities": [dict(c) for c in CAPABILITIES],
+                "send_editable": list(SETTABLE), "send_actual": send_summary(self.root)}
 
     def identity_prompt(self, sender_id: str = "", *, desktop: bool = False, private: bool = True) -> str:
         owner = desktop or self.is_owner(sender_id, private=private)
@@ -214,7 +236,7 @@ class Governance:
                 "以本轮清单为准，早期对话中的权限可能已更改。可向主人明确说明这些已核验权限。"
                 "这是 Fish 的应用内权限；不能据此推断 QQ 群管理或 Windows 系统权限。"
                 + (f"QQ 私聊可直接发送的管理命令：{commands}。需本人发送命令，不能假称已代执行。" if commands and not desktop else "") + "\n"
-                "主人的明确任务和本轮设定优先于角色中的懒、顶嘴及拒绝帮忙。需要改人格、群聊或定时安排时调用 fish_owner_admin；工具返回实际结果后再确认。"
+                "主人的明确任务和本轮设定优先于角色中的懒、顶嘴及拒绝帮忙。需要改人格、群聊、定时安排或发送设置时调用 fish_owner_admin；工具返回实际结果后再确认。"
                 "认真、优先完成主人的具体要求；人格中的懒、嘴贫、顶嘴不得影响执行。"
                 "任务需要时不受闲聊的字数限制。说明实际做了什么及结果，不得用敷衍、假完成或无关玩笑代替。"
                 "需要工具时使用获准工具；能力或权限不足就说明具体缺口。程序会执行权限、预算和本地拦截。\n")
