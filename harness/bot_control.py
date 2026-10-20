@@ -624,6 +624,12 @@ class BotControl:
             return [{'id': p['id'], 'name': p['name']} for p in PersonaLibrary(self.root).import_text(params['text'], name=params.get('name', '导入人格'), source=params.get('source', '主人对话'))]
         if action == 'persona_apply': return PersonaLibrary(self.root).apply(params['revision'], params.get('target', 'owner'), new=bool(params.get('new', False)))
         if action == 'message_send': return self._manual_send(params, identity)
+        if action == 'file_send':
+            from owner_files import send_file
+            return send_file(self.root, params.get('target','owner'), params['path'], params['request_id'])
+        if action in ('qzone_draft','qzone_publish'):
+            from social_publish import execute
+            return execute(self.root, action, params)
         if action.startswith('send_'):
             return self._send_settings(action, params, identity)
         if action.startswith('group_'):

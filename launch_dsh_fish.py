@@ -17,6 +17,8 @@ def main():
     desktop = dsh / 'apps/desktop'
     env = os.environ.copy()
     env.update(FISH_HARNESS_HOME=str(ROOT),
+               PYTHONUTF8='1', PYTHONNOUSERSITE='1',
+               PYTHONPATH=str(ROOT / 'vendor/python'),
                FISH_NATIVE_UI_ENTRY=str(Path(config['native_ui_package']) / 'lib/index.js'),
                DSH_HOME=config['desktop_home'],
                DSH_DESKTOP_OPEN_DEVTOOLS='0',
@@ -33,7 +35,7 @@ def main():
         raise RuntimeError('旧后台仍在运行，请先结束旧版 Fish 后再打开统一客户端')
     if not health:
         with (logs / 'backend.log').open('a', encoding='utf-8') as output:
-            subprocess.Popen([sys.executable, str(ROOT / 'harness/unified_service.py')],
+            subprocess.Popen([config.get('python_executable',sys.executable), str(ROOT / 'harness/unified_service.py')],
                              cwd=ROOT, env=env, stdout=output, stderr=subprocess.STDOUT,
                              creationflags=flags)
         for _ in range(60):

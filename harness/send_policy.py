@@ -16,10 +16,9 @@ Defaults: owner reply and owner private scheduled result allowed; group relay
 only on the owner's explicit request; public auto-reply off and not exposed as
 a setting here (it stays in GroupPolicy listen/reply).
 
-Supported transport: QQ text segments on the fish-qq WebSocket channel only
-(``send_message`` -> NapCat ``send_private_msg`` / ``send_group_msg``). There
-is no configured Qzone / Moment / mass-send transport, so those are reported
-unsupported rather than emulated.
+Message transport uses the fish-qq WebSocket channel. Real file uploads use
+owner_files, and Qzone drafts/publishing use social_publish with its explicit
+runtime switch. No mass-send transport is configured.
 """
 from __future__ import annotations
 
@@ -47,8 +46,8 @@ CAPABILITIES = (
      'default': 'allowed_when_explicit', 'reason': '仅当主人在当前会话明确要求发往该白名单群；公开群自动插话仍由独立群开关控制且默认关闭'},
     {'action': 'public_auto_reply', 'destination': 'group', 'supported': False,
      'default': 'off', 'reason': '公开群自动回复属于群参与策略（监听/回复开关默认关闭），不在发送设置中开放，避免绕过群开关'},
-    {'action': 'qzone_publish', 'destination': 'qzone', 'supported': False,
-     'default': 'off', 'reason': '当前运行时没有 QQ 空间/说说发布接口（fish-qq 通道只实现私聊与群消息），不伪造发送'},
+    {'action': 'qzone_publish', 'destination': 'qzone', 'supported': True,
+     'default': 'off', 'reason': 'NapCat 动态草稿与真实发布适配已接入；由设置中的空间发布开关控制，当前尚未进行真实发布测试'},
     {'action': 'mass_send', 'destination': 'any', 'supported': False,
      'default': 'off', 'reason': '通道按白名单收件人发送，不支持批量群发或陌生人私聊'},
 )

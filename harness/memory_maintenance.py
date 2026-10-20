@@ -542,7 +542,12 @@ class MemoryMaintenance:
         return _State(role_dir(self.root, role) / 'memory.db')
 
     def _job(self, state: _State, kind) -> dict:
-        return dict((state.get('job:' + kind) or {}).get('record') or {})
+        record = dict((state.get('job:' + kind) or {}).get('record') or {})
+        # Older successful maintenance rows stored attempted_window only.
+        # Treat that completed window as successful without rerunning history.
+        if not record.get('last_window') and record.get('status') in YES:
+            record['last_window'] = record.get('attempted_window', 0)
+        return record
 
     def _save_job(self, state: _State, kind, record: dict):
         state.set('job:' + kind, {'record': record})

@@ -56,13 +56,15 @@ def main():
             pass
     finally:
         host.stop.set()
-        services.shutdown()
-        if getattr(host, '_workbench', None):
-            host._workbench.close()
-        host.server.shutdown()
-        host.server.server_close()
-        state.update(status='stopped', stopped=time.time())
-        write_json(state_path, state)
+        try:
+            services.shutdown()
+        finally:
+            if getattr(host, '_workbench', None):
+                host._workbench.close()
+            host.server.shutdown()
+            host.server.server_close()
+            state.update(status='stopped', stopped=time.time())
+            write_json(state_path, state)
     return 0
 
 

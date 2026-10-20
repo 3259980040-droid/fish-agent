@@ -31,9 +31,10 @@ class DataRetention:
         if state.exists():
             previous=json.loads(state.read_text(encoding='utf-8'))
             prior_manifest=Path(previous.get('backup',''))/'manifest.json'
-            prior_files=self.verify(prior_manifest.parent)['files'] if prior_manifest.is_file() else {}
+            # Completed backups are verified when created, not every five minutes.
+            prior_files=json.loads(prior_manifest.read_text(encoding='utf-8')).get('files',{}) if prior_manifest.is_file() else {}
             required=[r for r in ('data/qq/memory.db','data/social/group-language.db','data/social/people.db') if (self.root/r).exists()]
-            if now-previous.get('last_success',0)<3600 and all(r in prior_files for r in required):return {'skipped':True}
+            if now-previous.get('last_success',0)<86400 and all(r in prior_files for r in required):return {'skipped':True}
         target=self.root/'backups/automatic-qq'/time.strftime('%Y%m%d-%H%M%S',time.localtime(now))
         target.mkdir(parents=True,exist_ok=True);files={}
         for rel in ('data/qq/memory.db','data/social/group-language.db','data/social/people.db'):
@@ -48,6 +49,15 @@ class DataRetention:
             temp.replace(dest);files[rel]={'file':dest.name,'sha256':hashlib.sha256(dest.read_bytes()).hexdigest()}
         write_json(target/'manifest.json',{'created':now,'files':files})
         self.verify(target)
+        # Keep 14 recent copies handy; older snapshots remain recoverable in
+        # the user-managed cleanup tree. Never delete original data.
+        import shutil
+        copies=sorted(p for p in target.parent.iterdir() if p.is_dir() and (p/'manifest.json').is_file())
+        archive=self.root/'需要清理/过期自动备份'
+        for old in copies[:-14]:
+            archive.mkdir(parents=True,exist_ok=True)
+            dest=archive/old.name
+            if not dest.exists(): shutil.move(str(old),str(dest))
         # Only disposable derivatives; never touch chat history, memories,
         # learning jobs, attachments, persona windows, or native session logs.
         cache=self.root/'data/qq/web-cache.db';pruned=0

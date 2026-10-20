@@ -33,7 +33,7 @@ def schema(properties, required=()):
 def builtins(role):
     string = {'type': 'string'}
     tools = [
-        {'name':'fish_owner_admin','description':'已核验主人可实际管理 Fish，群聊和私聊均可用。action：status、pause、resume；message_send 参数 target(owner或group:白名单群号),text，真实单次发送并返回消息编号；personas 列出版本；persona_import 参数 text/name/source；persona_apply 参数 revision,target(owner或group:群号),new(默认false保留历史)；memory_search 参数query；memory_save 参数text/category；memory_delete 参数id（群里只管理本群记忆，私聊管理主人记忆）；group_get/group_set 参数 group_id/settings(如reply、mode、debounce_s、reply_limits)；schedule_list；schedule_create 参数 target,title,prompt 及一个时间选择 after_seconds/every_seconds/at/daily；at={date,time,time_zone}，daily={time,time_zone}，时区Asia/Shanghai，周期至少60秒；schedule_update 参数 id,title,prompt,change；schedule_delete 参数id。先查询实际编号，再执行并按回执报告。',
+        {'name':'fish_owner_admin','description':'已核验主人可实际管理 Fish，群聊和私聊均可用。action：status、pause、resume；message_send 参数 target(owner或group:白名单群号),text，真实单次发送并返回消息编号；file_send 参数 target(owner或group:白名单群号),path(已存在文件的绝对路径)，通过QQ上传真实文件，不能用chat_files能力标志推断QQ不支持文件；qzone_draft 参数 content,images(图片路径或URL数组),ugc_right(1公开/4好友/64自己)，保存动态草稿但不发布；qzone_publish 参数 draft_id，在客户端空间发布开关开启后调用NapCat真实发布并返回tid；personas 列出版本；persona_import 参数 text/name/source；persona_apply 参数 revision,target(owner或group:群号),new(默认false保留历史)；memory_search 参数query；memory_save 参数text/category；memory_delete 参数id（群里只管理本群记忆，私聊管理主人记忆）；group_get/group_set 参数 group_id/settings(如reply、mode、debounce_s、reply_limits)；schedule_list；schedule_create 参数 target,title,prompt 及一个时间选择 after_seconds/every_seconds/at/daily；at={date,time,time_zone}，daily={time,time_zone}，时区Asia/Shanghai，周期至少60秒；schedule_update 参数 id,title,prompt,change；schedule_delete 参数id。先查询实际编号，再执行并按回执报告。',
          'parameters':schema({'action':string,'params':{'type':'object','description':'对应 action 的参数对象，结构见工具说明'}},['action'])},
         {'name':'fish_owner_send','description':'仅用于绑定目标的主人定时会话：向已绑定 QQ 私聊或群发送实际正文并返回消息编号；不接受更换收件人。定时动作使用 schedule_id 加 occurrence_at 作 request_id，不明状态不重发。',
          'parameters':schema({'text':string,'request_id':string},['text','request_id'])},
@@ -208,7 +208,7 @@ class ToolHost:
             require('bot.manage' if name=='fish_owner_admin' else 'schedule.manage')
             from bot_control import BotControl
             control=BotControl(self.root)
-            if name=='fish_owner_admin' and arguments['action']=='message_send':
+            if name=='fish_owner_admin' and arguments['action'] in ('message_send','file_send'):
                 arguments={**arguments,'params':{**arguments.get('params',{}),'request_id':'owner-send:'+session+':'+call_id}}
             return control.execute(arguments['action'],arguments.get('params',{}),identity) if name=='fish_owner_admin' else control.send(identity,arguments['text'],arguments['request_id'])
         from group_tests import GroupTests, parse_scope

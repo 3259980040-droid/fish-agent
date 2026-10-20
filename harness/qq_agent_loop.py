@@ -426,6 +426,7 @@ class QQAgentLoop:
             self.active_turn = None
             return
         response_segments = self._reply_segments(self.session_id, response)
+        response = '\n'.join(s.get('text', '') for s in response_segments if s['type'] == 'text') or '[表情]'
         outbound_id = self.store.record_message(
             self.conversation["id"], f"private:{self.owner}", "bot", "outbound", "",
             None, response_segments, response, "pending",
@@ -555,6 +556,7 @@ class QQAgentLoop:
             self.active_turn = None
             return
         segments = self._reply_segments(self.session_id, response)
+        response = '\n'.join(s.get('text', '') for s in segments if s['type'] == 'text') or '[表情]'
         outbound_id = self.store.record_message(
             self.conversation["id"], f"private:{self.owner}", "bot", "outbound", "",
             None, segments, response, "pending", runtime_session_id=self.session_id, runtime_turn_id=turn_id,
@@ -616,15 +618,18 @@ class QQAgentLoop:
         return {'ok': True, 'payload': {'message_id': sent[-1], 'message_ids': sent}}
 
     def _reply_segments(self, session, text):
-        result = [{'type': 'text', 'text': text}]
-        try:
-            from tool_host import request
-            asset = request(self.root, '/emoji/take', {'session': session}, role='qq').get('asset')
-            if asset:
-                result.append({'type': 'image', 'asset_id': asset})
-        except Exception:
-            pass
-        return result
+        from tool_host import request
+        from chat_output import segments as bubble_segments
+        draft = request(self.root, '/chat/take', {'session': session}, role='qq')
+        asset = request(self.root, '/emoji/take', {'session': session}, role='qq').get('asset')
+        if draft.get('bubbles'):
+            # Ordinary owner chat/work uses the same prepared output as an
+            # isolated window. Do not replace a real media draft with final prose.
+            parts = [segment for bubble in draft['bubbles'] for segment in bubble_segments(bubble)]
+            texts = [part['text'] for part in parts if part['type'] == 'text']
+            media = [part for part in parts if part['type'] != 'text']
+            return ([{'type': 'text', 'text': '\n'.join(texts)}] if texts else []) + media
+        return ([{'type': 'text', 'text': text}] if text else []) + ([{'type': 'image', 'asset_id': asset}] if asset else [])
 
     def owner_mode(self):
         from owner_mode import OwnerMode

@@ -52,7 +52,10 @@ class Workbench:
         persona = space['persona'] if space else contexts.ensure_default('qq')
         mode = OwnerMode(self.root).get()
         from governance import CAPABILITIES
+        from storage import read_json
         return {**self.settings(), **mode, 'owner': policy.owner_id(), 'owner_capabilities': CAPABILITIES,
+                'keep_background_on_close': read_json(self.root / 'harness/integration.json', {}).get('keep_background_on_close', True),
+                'qzone_enabled': read_json(self.root / 'harness/integration.json', {}).get('qzone_enabled', False),
                 'send_policy': policy.config()['send_policy'],
                 'permissions': '、'.join(policy.owner_capabilities(desktop=True).values()),
                 'persona': {k: persona[k] for k in ('id', 'name', 'body')},
@@ -76,6 +79,12 @@ class Workbench:
             return self.status()
         if action == 'settings.save':
             changes = {}
+            for option in ('keep_background_on_close', 'qzone_enabled'):
+                if option not in params: continue
+                from storage import read_json, write_json
+                if type(params[option]) is not bool: raise ValueError('开关必须为布尔值')
+                path = self.root / 'harness/integration.json'
+                write_json(path, {**read_json(path, {}), option: params[option]})
             if 'paused' in params:
                 if type(params['paused']) is not bool:
                     raise ValueError('暂停开关必须是布尔值')
@@ -100,6 +109,13 @@ class Workbench:
         if action == 'memory.status':
             from memory_maintenance import MemoryMaintenance
             return MemoryMaintenance(self.root).status()
+        if action.startswith('language.'):
+            from language_workbench import LanguageWorkbench
+            language = LanguageWorkbench(self.root)
+            if action == 'language.status': return language.status()
+            if action == 'language.list': return language.list(**params)
+            if action == 'language.save': return language.save(**params, owner=Governance(self.root).owner_id())
+            if action == 'language.manage': return language.manage(params['id'], params['status'])
         if action == 'channels.status':
             import requests
             from core import HarnessConfig

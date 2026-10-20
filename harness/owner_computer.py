@@ -95,6 +95,7 @@ def context(root,identity,body=None):
         '完成后根据实际工具结果确认文件存在、保存路径与执行结果，失败就说明实际错误。'
         '现有 QQ 回复协议继续有效；原版 MCP 会话仍通过其真实发送工具回复，不重复发送最终文字。'
         '延后执行可使用当前原生 schedule 工具；到期真正执行任务并按当前入口的实际发送协议回报。'
+        '主人要求把成果文件发到QQ时，使用 fish_owner_admin 的 file_send，传 target=owner 和已生成文件的绝对 path；根据真实上传回执确认。'
         '其他群的明确发送请求使用 fish_owner_admin 的 message_send；群聊旁听开关与单次交办分开。\n')}
 
 
