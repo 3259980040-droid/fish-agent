@@ -132,6 +132,20 @@ class Workbench:
                                  {'name': '原生 DSH 工作环境', 'ready': ready, 'detail': '可用' if ready else '未启动'},
                                  {'name': '工具与记忆', 'ready': True, 'detail': '已连接'}],
                     'note': '主人交办的单次群发送与群聊自动参与分开设置。'}
+        if action == 'channels.update':
+            from group_policy import GroupPolicy
+            from storage import read_json
+            group_id = str(params.get('group_id', ''))
+            config = read_json(self.root / 'channels/fish_qq/config.json', {})
+            allowed = {str(value) for value in config.get('allowlist', {}).get('group_ids', [])}
+            if group_id not in allowed:
+                raise ValueError('只能修改白名单群')
+            changes = {key: params[key] for key in ('listen', 'reply') if key in params}
+            if not changes:
+                raise ValueError('没有要保存的群设置')
+            if any(type(value) is not bool for value in changes.values()):
+                raise ValueError('群设置必须是开关值')
+            return GroupPolicy(self.root).configure('group:' + group_id, changes)
         if action == 'personas.list':
             contexts = SocialContext(self.root)
             return [{**row, 'body': contexts.persona(row['id'])['body']} for row in PersonaLibrary(self.root).list()]
