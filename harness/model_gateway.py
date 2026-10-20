@@ -66,6 +66,15 @@ class ModelGateway:
         if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError('API 地址不合法')
         self.key = SecretStore(root).get('agent-' + role, agent.apiKeyEnv)
+        if not self.key:
+            # The native DSH profile already stores the user's provider key.
+            # Reuse it locally when Fish has no separate DPAPI copy; never log it.
+            try:
+                import yaml
+                credentials = yaml.safe_load((Path.home() / '.dsh/.credentials.yaml').read_text(encoding='utf-8')) or {}
+                self.key = str((credentials.get('refs') or {}).get('DEEPSEEK_API_KEY') or '')
+            except (OSError, ValueError, ImportError):
+                self.key = ''
         self.ledger = ModelLedger(root, role)
 
     def call(self, messages, *, origin='background', cancelled=None, json_output=False):

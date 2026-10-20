@@ -16,7 +16,31 @@ class WebKnowledge:
         with database(self.path) as db:
             db.execute('CREATE TABLE IF NOT EXISTS searches(id TEXT PRIMARY KEY,chat TEXT,query TEXT,result TEXT,created REAL,expires REAL)')
 
+    def fetch(self, url):
+        """Fetch one readable page through the same provider; return truthful failure text."""
+        from urllib.parse import urlparse
+        target=str(url or '').strip()
+        parsed=urlparse(target)
+        if parsed.scheme not in ('http','https') or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError('无效的网页地址')
+        gateway=ModelGateway(self.root,'qq')
+        if not gateway.key:
+            return '[本轮网页读取失败：未配置 API 凭证。不能假称已读取。]'
+        try:
+            response=requests.post(gateway.base.rstrip('/')+'/v1/tools/fetch',
+                headers={'Authorization':'Bearer '+gateway.key},
+                json={'url':target},timeout=(8,30),**request_options(self.root,gateway.base))
+            if not response.ok:raise RuntimeError('HTTP '+str(response.status_code))
+            payload=response.json()
+            content=str(payload.get('content') or '')
+            title=str(payload.get('title') or '')
+            return f'[已读取网页：{title or target}]\n{content[:12000]}'
+        except Exception as exc:
+            error=str(exc) if isinstance(exc,RuntimeError) else type(exc).__name__
+            return '[本轮网页读取失败：'+error+'。不能声称已读取。]'
+
     @staticmethod
+
     def query_for(text):
         text=str(text).strip()
         if not re.search(r'上网|联网|搜索|搜一下|搜一搜|查一下|查查|什么梗|什么意思|介绍一下|讲讲.{1,50}(生涯|历史|经历)|哪年|最新.{1,20}(版本|消息|新闻)',text):return ''
