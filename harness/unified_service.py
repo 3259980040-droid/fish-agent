@@ -10,16 +10,32 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'harness'), str(ROOT / 'vendor/python')]
 
 
+def _stop():
+    """Ask the running loopback service to stop without importing its runtime deps."""
+    import urllib.request
+    try:
+        config = json.loads((ROOT / 'harness/agents.json').read_text(encoding='utf-8'))
+        port = int(config.get('runtime', {}).get('tool_host_port', 3103))
+        token = (ROOT / 'harness/runtime/control.token').read_text(encoding='utf-8').strip()
+        request = urllib.request.Request(
+            f'http://127.0.0.1:{port}/system/stop', data=b'{}', method='POST',
+            headers={'x-fish-token': token, 'x-fish-role': 'qq'})
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=5) as response:
+            return 0 if response.status == 200 else 1
+    except Exception as exc:
+        print(f'停止后台失败：{exc}', file=sys.stderr)
+        return 1
+
+
 def main():
-    from fish_desktop.services import FishServices
-    from tool_host import ToolHost, request
-    from storage import write_json
     parser = argparse.ArgumentParser()
     parser.add_argument('--stop', action='store_true')
     args = parser.parse_args()
     if args.stop:
-        request(ROOT, '/system/stop')
-        return 0
+        return _stop()
+    from fish_desktop.services import FishServices
+    from tool_host import ToolHost, request
+    from storage import write_json
     try:
         health = request(ROOT, '/health', timeout=1)
     except Exception:
