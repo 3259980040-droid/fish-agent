@@ -2,8 +2,16 @@
 from copy import deepcopy
 
 
+def now_line() -> str:
+    """The one fact she cannot infer: what time it is where she lives."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    at = datetime.now(ZoneInfo('Asia/Shanghai'))
+    return '现在是 ' + at.strftime('%Y-%m-%d %H:%M:%S') + ' ' + '星期' + '一二三四五六日'[at.weekday()] + '（Asia/Shanghai）'
+
+
 def assemble_chat_request(*, persona, history, memory, expression, references, current, sources):
-    fixed = '\n'.join(v for v in (persona, expression['prompt']) if v)
+    fixed = '\n'.join(v for v in (persona, now_line(), expression['prompt']) if v)
     messages = [{'role': 'system', 'content': fixed}] if fixed else []
     for value, layer in ((memory, 4), (references, 4)):
         if value:

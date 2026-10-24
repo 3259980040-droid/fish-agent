@@ -646,7 +646,8 @@ class ToolHost:
             chat = scope[len('chat:'):]
             out = _self_wake(self.root, chat, arguments.get('interest'), arguments.get('topic', ''),
                              arguments.get('delay', 3))
-            return {**out, 'note': '已安排；本轮说完之后才会再看，不会打断当前思考'}
+            return {**out, 'delay_s': max(3.0, min(600.0, float(arguments.get('delay', 3) or 3))),
+                    'note': '已安排；本轮说完之后才会再看，不会打断当前思考'}
         if name == 'fish_tool_list':
             # The shortlist trims what is advertised, never what can be executed; this
             # is how she finds the rest without paying for every schema every turn.

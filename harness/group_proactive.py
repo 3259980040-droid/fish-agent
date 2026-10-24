@@ -73,8 +73,19 @@ def request_self_wake(root, chat, interest, topic, delay=3.0, now=None):
 
 
 def take_self_wake(root, chat, now=None):
-    """Consume a due self-wake; only counts when something new actually arrived."""
+    """Consume a due self-wake; only counts when something new actually arrived.
+
+    Nothing here may throw: this runs on the hot path of every round, so a busy
+    database must mean "no self-wake this time", not "the round failed".
+    """
     now = time.time() if now is None else float(now)
+    try:
+        return _take_self_wake(root, chat, now)
+    except sqlite3.OperationalError:
+        return None
+
+
+def _take_self_wake(root, chat, now):
     with database(_path(root)) as db:
         _self_wake_schema(db)
         row = db.execute('SELECT * FROM group_self_wake WHERE chat=?', (str(chat),)).fetchone()
@@ -208,6 +219,9 @@ def claim(root, chat, now=None):
     now = time.time() if now is None else float(now)
     config = GroupPolicy(root).config(str(chat))
     low, high = _interval(config, root)
+    # Consume any due self-wake *before* taking the write lock: it opens its own
+    # connection, and writing from inside this transaction is what deadlocked.
+    pending = take_self_wake(root, chat, now)
     with database(_path(root)) as db:
         db.execute('BEGIN IMMEDIATE')
         _ensure_schema(db)
@@ -225,7 +239,6 @@ def claim(root, chat, now=None):
                                             "AND ts > datetime(?,'unixepoch','localtime')", (str(chat), last_attempt)).fetchone()[0])
             except Exception:
                 burst = 0
-        pending = take_self_wake(root, chat, now)
         if pending is not None and int(pending.get('fresh') or 0) > 0:
             # She asked for this look, and something new did arrive: allow it now.
             streak = 0

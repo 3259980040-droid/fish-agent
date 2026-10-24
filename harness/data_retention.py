@@ -63,6 +63,14 @@ class DataRetention:
         cache=self.root/'data/qq/web-cache.db';pruned=0
         if cache.exists():
             with database(cache) as db:pruned+=db.execute('DELETE FROM searches WHERE expires<?',(now,)).rowcount
+        # Context usage is observation, not content: old rows keep their token
+        # numbers and lose the 31KB budget snapshot that made the file 40MB.
+        usage=self.root/'data/social/context-usage.db'
+        if usage.exists():
+            cutoff=now-30*86400
+            with database(usage) as db:
+                pruned+=db.execute("UPDATE context_requests SET budget='{}' "
+                                   "WHERE created<? AND LENGTH(budget)>2",(cutoff,)).rowcount
         jobs=self.root/'data/social/group-replies.db'
         if jobs.exists():
             with database(jobs) as db:

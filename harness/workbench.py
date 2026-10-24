@@ -975,6 +975,30 @@ class Workbench:
                 return {'connections': [], 'active': '', 'note': '还没有模型连接清单'}
             data = _json.loads(path.read_text(encoding='utf-8') or '{}')
             return {'connections': data.get('connections', []), 'active': data.get('active', '')}
+        if action == 'system.storage':
+            # Read-only map of where the disk goes, so cleanup is decided on numbers
+            # instead of worry. Nothing here deletes anything.
+            import os as _os
+            def _dir(path):
+                total = 0
+                for base, _dirs, files in _os.walk(path):
+                    for name in files:
+                        try:
+                            total += _os.path.getsize(_os.path.join(base, name))
+                        except OSError:
+                            pass
+                return round(total / 1024 / 1024, 1)
+            root = self.root
+            layers = {
+                'raw_messages_and_media': {'bytes_mb': _dir(root / 'data/qq'), 'what': '原始消息、附件、媒体' },
+                'memory': {'bytes_mb': _dir(root / 'data/qq/memory.db') if False else round((root / 'data/qq/memory.db').stat().st_size / 1024 / 1024, 1) if (root / 'data/qq/memory.db').exists() else 0.0, 'what': '长期记忆数据库' },
+                'social_models_and_logs': {'bytes_mb': _dir(root / 'data/social'), 'what': '用量、任务、摘要、目录' },
+                'embeddings': {'bytes_mb': _dir(root / 'data/shared'), 'what': '中文向量模型（不可删）' },
+                'research_cache': {'bytes_mb': _dir(root / 'data/research'), 'what': '调研缓存（可重建）' },
+                'backups': {'bytes_mb': _dir(root / 'backups'), 'what': '自动备份（保留 14 份）' },
+                'archived_for_owner': {'bytes_mb': _dir(root / '需要清理'), 'what': '已归档、等主人处理' },
+            }
+            return {'layers': layers, 'note': '这里只统计，不删除；清理由 data_retention 按保留期处理可重建的部分'}
         if action in ('models.current', 'models.test'):
             # Read-only view of what she actually talks to. Switching the model is a
             # behaviour change and needs its own decision, so this only reports and probes.
