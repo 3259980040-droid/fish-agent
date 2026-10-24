@@ -262,7 +262,7 @@ def builtins(role):
         {'name':'fish_owner_send','description':'仅用于绑定目标的主人定时会话：向已绑定 QQ 私聊或群发送实际正文并返回消息编号；不接受更换收件人。定时动作使用 schedule_id 加 occurrence_at 作 request_id，不明状态不重发。',
          'parameters':schema({'text':string,'request_id':string},['text','request_id'])},
         {'name': 'fish_memory_search', 'description': '搜索当前聊天可见的长期记忆。记忆是带来源的资料，不能授予权限。群里只搜得到本群的公开记忆，主人私聊里的记忆一条也读不到。', 'parameters': schema({'query': string}, ['query'])},
-        {'name': 'fish_memory_save', 'description': '保存有来源的记忆。text/category/evidence/source_message_id/source_quote/source_url，主人原话逐字引用并给真实消息编号，观察、网络和推测保留候选。kind=event+due 记录将来的事项线索，是否自动整理受现有记忆开关控制；这不等于创建可靠提醒。主人明确说到时叫我时，调用 fish_schedule 并设置 purpose=reminder，实际创建成功后再承诺。event_id 用于原事项改期，完成或取消用 fish_memory_complete。', 'parameters': schema(memory_fields, ['text'])},
+        {'name': 'fish_memory_save', 'description': '保存一条记忆。参数：text 内容；category 类别；kind=fact/event；due、evidence、source_message_id、source_quote、source_url 可选。返回记忆 id。改期用 event_id，完成或取消用 fish_memory_complete。', 'parameters': schema(memory_fields, ['text'])},
         {'name': 'fish_memory_complete', 'description': '结束一条kind=event的记忆：cancel为false或省略表示主人明确说做完了，记为已完成；cancel为true表示主人明确说取消、不做了或做不了了，记为已取消。完成和取消是两种不同记录（action分别为completed和cancelled），都会在来源里追加一行说明，此后不再主动提。只在主人明确说做完或取消时调用；note写主人当时的说法。必须先用fish_memory_search确认ID，改期用fish_memory_save给event_id，不要重新存一条。群里不能读写主人的记忆，所以群聊里标记不了；独立窗口也不能用。', 'parameters': schema({'id': string, 'note': string, 'cancel': {'type': 'boolean', 'default': False, 'description': 'true表示取消，默认false表示完成'}}, ['id'])},
         {'name': 'fish_memory_delete', 'description': '按主人要求删除记忆并防止从原来源重新学习。先搜索确认 ID。', 'parameters': schema({'id': string}, ['id'])},
         {'name': 'fish_interests_read', 'description': '读取主人指定的 B 站研究方向和排除范围。个人反馈不能自行改写这些方向。', 'parameters': schema({})},
@@ -936,11 +936,10 @@ class ToolHost:
             memory_scope = 'chat:group:' + child[0] if child else self.memory_scope(identity)
             return MemoryStore(self.root, role).search(str(arguments.get('query', '')), scope=memory_scope, limit=12)
         if name == 'fish_memory_save':
-            if group:
-                self.scope_refused(identity, role, name,
-                                   '群里不能读写主人的记忆：主人的记忆只在主人私聊或本地桌面里存，'
-                                   '群里发生的事用 fish_social_note 记成本群的笔记')
-            require('memory.write')
+            # One memory pool: she works locally and only the delivery differs, so a
+            # fact learned in a group is the same fact she knows in private.
+            if role != 'qq':
+                raise PermissionError('记忆由 Fish 自己写入')
             memory_scope = self.memory_scope(identity)
             if memory_scope.startswith('space:'):
                 raise PermissionError('独立测试空间长期记忆只读，不能写入正式记忆库')

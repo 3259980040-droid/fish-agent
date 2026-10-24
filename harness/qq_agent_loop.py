@@ -217,9 +217,6 @@ class QQAgentLoop:
         self.group_tasks: set[asyncio.Task] = set()
         self.group_inbox: dict[str, dict] = {}
         self.group_pumps: dict[str, asyncio.Task] = {}
-        # Messages that arrive within three seconds are one thought, not three.
-        self.group_batch: dict[str, asyncio.Task] = {}
-        self.group_batch_start: dict[str, float] = {}
         self.control_token = control_token(root)
         self._runtime_lock = asyncio.Lock()
         self.active_test_session = None
@@ -429,41 +426,7 @@ class QQAgentLoop:
             return
         text = ''.join(str(part.get('text') or '') for part in payload.get('segments') or [] if part.get('type') == 'text')
         self._fish_record(chat, payload, text=text, direction='inbound', status='observed', reply_to=str(payload.get('reply_to') or ''))
-        frame = {**payload, '_fish_observed': seen}
-        me = str((self.channel.bot or {}).get('id') or '')
-        mentioned = any(str(part.get('type') or '') == 'at' and str(part.get('qq') or part.get('id') or '') == me
-                        for part in payload.get('segments') or [])
-        if mentioned:
-            # Being called by name is never batched: it was addressed to her.
-            pending = self.group_batch.pop(chat, None)
-            if pending is not None and not pending.done():
-                pending.cancel()
-            self.group_batch_start.pop(chat, None)
-            self._fish_start(frame, chat)
-            return
-        self.group_inbox[chat] = frame
-        loop = asyncio.get_running_loop()
-        started = self.group_batch_start.setdefault(chat, loop.time())
-        wait = max(0.0, min(3.0, 3.0 - (loop.time() - started)))
-        previous = self.group_batch.get(chat)
-        if previous is not None and not previous.done():
-            previous.cancel()
-
-        async def flush():
-            try:
-                await asyncio.sleep(wait)
-                self.group_batch.pop(chat, None)
-                self.group_batch_start.pop(chat, None)
-                latest = self.group_inbox.get(chat)
-                if latest is not None:
-                    self._fish_start(latest, chat)
-            except asyncio.CancelledError:
-                raise
-
-        task = asyncio.create_task(flush(), name='fish-group-batch:' + chat)
-        self.group_batch[chat] = task
-        self.group_tasks.add(task)
-        task.add_done_callback(self._group_task_done)
+        self._fish_start({**payload, '_fish_observed': seen}, chat)
 
     def _fish_start(self, payload: dict[str, Any], chat: str) -> None:
         # All records are saved on arrival. The next thought snapshots their actual
