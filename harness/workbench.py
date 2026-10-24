@@ -837,6 +837,39 @@ class Workbench:
             return [{'id': row['id'], 'name': row['name'], 'body': row['body']} for row in rows]
         if action == 'personas.apply':
             return PersonaLibrary(self.root).apply(params['revision'])
+        if action == 'memory.layers':
+            # The three layers in one read: what she remembers, what got digested,
+            # what is still raw. Read-only; it answers "is the pipeline alive".
+            import sqlite3 as _s
+            from contextlib import closing as _c
+            def _one(path, sql, args=()):
+                if not path.is_file():
+                    return None
+                with _c(_s.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
+                    row = db.execute(sql, args).fetchone()
+                    return row[0] if row else None
+            memory_db = self.root / 'data/qq/memory.db'
+            qq_db = self.root / 'data/qq/qq.db'
+            exp = self.root / 'data/social/experience.db'
+            layers = {
+                'retrieval': {
+                    'active': _one(memory_db, "SELECT COUNT(*) FROM memories WHERE status='active'"),
+                    'archived': _one(memory_db, "SELECT COUNT(*) FROM memories WHERE status='archived'"),
+                    'candidate': _one(memory_db, "SELECT COUNT(*) FROM memories WHERE status='candidate'"),
+                },
+                'overview': {
+                    'digest_days': _one(memory_db, 'SELECT COUNT(*) FROM memory_digest'),
+                    'latest_digest_day': _one(memory_db, 'SELECT MAX(day) FROM memory_digest'),
+                    'checkpoints': _one(exp, 'SELECT COUNT(*) FROM context_checkpoints'),
+                    'catalog_entries': _one(exp, 'SELECT COUNT(*) FROM chat_catalog'),
+                },
+                'detail': {
+                    'messages': _one(qq_db, 'SELECT COUNT(*) FROM messages'),
+                    'indexed': _one(qq_db, 'SELECT COUNT(*) FROM messages_fts'),
+                },
+            }
+            return {'layers': layers,
+                    'note': '检索层=她记得的事；概述层=每天的摘要与段落目录；细化层=原始消息与索引'}
         if action == 'memory.overview':
             from memory_digest import overview
             from daily_curate import latest
