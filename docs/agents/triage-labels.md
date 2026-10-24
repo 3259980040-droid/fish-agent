@@ -8,4 +8,4 @@
 | ready-for-human | ready-for-human | 需人工实施 |
 | wontfix | wontfix | 不执行 |
 
-triage 技能已安装，用户本轮授权采用默认配置。GitHub 远端尚未创建，这些标签当前仅完成配置，未声称远端存在。
+triage技能已安装，主人已授权默认配置。2026-10-25已在当前fish-agent仓库核实/创建上述五种标签；当前子票使用ready-for-agent，表示说明具备且需遵守前置，不表示已经实施。父汇总项不以此标签作为直接领取任务。

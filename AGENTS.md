@@ -6,7 +6,7 @@
 
 ### Issue tracker
 
-目标为用户 GitHub 下独立私有 Fish 仓库；远端尚待创建，连接未完成期间使用已存在的本地工单，不生成第二套。见 `docs/agents/issue-tracker.md`。
+工单使用当前源码 origin 对应的 `3259980040-droid/fish-agent` 仓库；本地同源文件用于交接，远端 Issues 记录执行进度。领取、发布或更新任务时读 `docs/agents/issue-tracker.md`，从当前子票前沿推进。
 
 ### Triage labels
 
