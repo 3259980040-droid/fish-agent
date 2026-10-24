@@ -30,6 +30,34 @@ class ChatResult:
     first_output_at: float | None = None
 
 
+
+class ModelRequestError(RuntimeError):
+    """An actual provider HTTP failure, with safe actionable text and its status."""
+    def __init__(self, status_code, payload=None):
+        from governance import sanitize_fault_detail
+        self.status_code = int(status_code)
+        detail = payload.get('error', payload) if isinstance(payload, dict) else {}
+        detail = detail if isinstance(detail, dict) else {}
+        raw = str(detail.get('message') or detail.get('code') or '')
+        safe = sanitize_fault_detail(raw).partition(': ')[2]
+        self.provider_code = str(detail.get('code') or '')[:80]
+        reasons = {400:'模型请求格式不符合服务要求', 401:'模型认证失败，请检查 API 密钥',
+                   402:'DeepSeek API 余额不足，请充值当前 API 账户后再试',
+                   403:'模型服务拒绝访问', 422:'模型请求参数不符合服务要求',
+                   429:'模型服务请求过于频繁', 500:'模型服务内部错误',503:'模型服务暂时不可用'}
+        reason = reasons.get(self.status_code, '模型请求失败')
+        if safe and self.status_code in (400,422): reason += '：' + safe
+        super().__init__(f'{reason}（HTTP {self.status_code}）')
+
+
+def response_error(status_code, response_body):
+    try:
+        payload = json.loads(response_body)
+    except (ValueError, TypeError, UnicodeDecodeError):
+        payload = {}
+    return ModelRequestError(status_code, payload)
+
+
 def chat_options(root):
     settings = read_json(root / 'harness/control.json')
     effort = settings.get('chat_reasoning_effort', 'high')
@@ -198,7 +226,7 @@ class ModelGateway:
                 async with client.stream('POST', self.base.rstrip('/') + '/chat/completions',
                                          headers={'Authorization': 'Bearer ' + self.key}, json=body) as response:
                     if response.status_code != 200:
-                        raise RuntimeError(f'Fish 模型请求失败（HTTP {response.status_code}）；没有转投 DSH，也没有移除附件重试')
+                        raise response_error(response.status_code, await response.aread())
                     async for line in response.aiter_lines():
                         if not line.startswith('data:'):
                             continue
@@ -251,7 +279,7 @@ class ModelGateway:
         text = ''.join(chunks).strip()
         if not text:
             raise RuntimeError('模型没有返回可展示的回复正文')
-        return ChatResult(text, state['usage'] or {}, finish, first_output_at=state['first_output_at'])
+        return ChatResult(text, state['usage'] or {}, finish, reasoning_content=''.join(reasoning), first_output_at=state['first_output_at'])
 
     def call(self, messages, *, origin='background', cancelled=None, json_output=False):
         if not self.key:
@@ -270,7 +298,7 @@ class ModelGateway:
             response = requests.post(self.base.rstrip('/') + '/chat/completions',
                 headers={'Authorization': 'Bearer ' + self.key}, json=body, timeout=(8, 100), **__import__('network_config').request_options(self.root, self.base))
             if not response.ok:
-                raise RuntimeError(f'DeepSeek 请求失败（HTTP {response.status_code}）')
+                raise response_error(response.status_code, response.content)
             data = response.json()
             usage = data.get('usage')
             self.ledger.finish(rid, usage, 'done' if usage else 'unknown')

@@ -671,7 +671,41 @@ class Workbench:
             OwnerMode(self.root).set(params['mode'], params.get('workspace'))
             return self.status()
         if action == 'settings.get':
-            return self.status()
+            result = self.status()
+            # The pacing numbers are read straight from where they are written, so the
+            # settings page shows the value that actually paces her.
+            import json as _json
+            path = self.root / 'harness/context-settings.json'
+            pacing = _json.loads(path.read_text(encoding='utf-8') or '{}') if path.is_file() else {}
+            keys = ('proactive_check_min_s', 'proactive_check_max_s', 'round_backoff_base',
+                    'round_backoff_cap', 'round_backoff_start_after', 'round_bypass_messages',
+                    'round_min_interval')
+            result['pacing'] = {k: int(pacing[k]) for k in keys if k in pacing}
+            return result
+        if action == 'settings.save' and any(k in params for k in (
+                'proactive_check_min_s', 'proactive_check_max_s', 'round_backoff_base',
+                'round_backoff_cap', 'round_backoff_start_after', 'round_bypass_messages',
+                'round_min_interval', 'maintenance_interval_s')):
+            # Autonomous pacing lives in context-settings.json: governance rewrites
+            # control.json, and a number the owner typed must survive that.
+            import json as _json
+            path = self.root / 'harness/context-settings.json'
+            current = {}
+            if path.is_file():
+                current = _json.loads(path.read_text(encoding='utf-8') or '{}')
+            limits = {'proactive_check_min_s': (30, 3600), 'proactive_check_max_s': (30, 3600),
+                      'round_backoff_base': (15, 3600), 'round_backoff_cap': (30, 3600),
+                      'round_backoff_start_after': (1, 20), 'round_bypass_messages': (1, 200),
+                      'round_min_interval': (30, 3600), 'maintenance_interval_s': (20, 300)}
+            for key, (low, high) in limits.items():
+                if key not in params:
+                    continue
+                value = int(params[key])
+                if value < low or value > high:
+                    raise ValueError('%s 需在 %d–%d 之间' % (key, low, high))
+                current[key] = value
+            path.write_text(_json.dumps(current, ensure_ascii=False, indent=2), encoding='utf-8')
+            return {'saved': True, 'pacing': {k: current[k] for k in limits if k in current}}
         if action == 'settings.save':
             changes = {}
             if 'image_identification_enabled' in params:
@@ -838,6 +872,31 @@ class Workbench:
             store = MemoryStore(self.root, 'qq')
             store.get(str(params['id']), scope='owner')
             return store.history(str(params['id']))
+        if action in ('memory.disable', 'memory.enable'):
+            # Recall only reads status='active'; disabling keeps the record and its
+            # history but stops her from bringing it up again.
+            import time as _time
+            status = 'disabled' if action == 'memory.disable' else 'active'
+            store = MemoryStore(self.root, 'qq')
+            store.get(str(params['id']), scope='owner')
+            from storage import database as _db_factory
+            with _db_factory(store.path) as db:
+                db.execute('UPDATE memories SET status=?,updated=? WHERE id=?', (status, _time.time(), str(params['id'])))
+            return {'id': str(params['id']), 'status': status}
+        if action == 'memory.merge':
+            # Merging never deletes: the dropped record is marked and keeps its history.
+            import time as _time
+            keep, drop = str(params['keep']), str(params['drop'])
+            if keep == drop:
+                raise ValueError('同一条记忆不需要合并')
+            store = MemoryStore(self.root, 'qq')
+            store.get(keep, scope='owner')
+            store.get(drop, scope='owner')
+            from storage import database as _db_factory
+            with _db_factory(store.path) as db:
+                db.execute("UPDATE memories SET status='merged',action=?,updated=? WHERE id=?",
+                           ('merged_into:' + keep, _time.time(), drop))
+            return {'keep': keep, 'drop': drop, 'drop_status': 'merged'}
         if action == 'memory.search':
             return MemoryStore(self.root, 'qq').search(params.get('query', ''), scope='owner', limit=60, include_candidates=True)
         if action == 'memory.save':
@@ -857,6 +916,114 @@ class Workbench:
                 return control.execute('schedule_delete', {'id': params['id']})
             if action == 'schedules.update':
                 return control.execute('schedule_update', params)
+            if action == 'schedules.run':
+                # Manual run of one plan, by the owner, from the task page. It uses the
+                # same execution path as the scheduled run; pause only stops the timer.
+                return control.run_now(params['id'])
+        if action == 'workspace.write':
+            # One writer only: this delegates to the agent's own file tool, so the
+            # workspace never gets a second, differently-guarded write path.
+            base = (self.root / 'workspace').resolve()
+            base.mkdir(parents=True, exist_ok=True)
+            wanted = str(params.get('path', '') or '').strip()
+            if not wanted:
+                raise ValueError('需要文件路径')
+            target = (base / wanted).resolve()
+            if base not in target.parents:
+                raise PermissionError('只能写 Fish 自己的 workspace 目录')
+            from agent_tools import AgentTools
+            tools = AgentTools(self.root)
+            identity = {'scope': 'desktop', 'session': 'workspace-write', 'allowed_paths': [str(base)],
+                        'owner': 1, 'desktop': 1}
+            return tools.execute('fish_file_write',
+                                  {'path': str(target), 'text': str(params.get('text', '')),
+                                   **({'expected_mtime_ns': params['expected_mtime_ns']} if 'expected_mtime_ns' in params else {})},
+                                  identity, 'workspace-write-' + uuid.uuid4().hex[:8])
+        if action == 'models.preflight':
+            # Prove the registry can drive a gateway *before* switching her live one.
+            import json as _json, os as _os, urllib.request as _url
+            path = self.root / 'harness/models.json'
+            if not path.is_file():
+                return {'ok': False, 'reason': '还没有模型连接清单'}
+            data = _json.loads(path.read_text(encoding='utf-8') or '{}')
+            chosen = next((c for c in data.get('connections', []) if c.get('id') == data.get('active')), None)
+            if chosen is None:
+                return {'ok': False, 'reason': 'active 指向的连接不存在'}
+            key = _os.environ.get(str(chosen.get('key_ref', '')), '')
+            if not key:
+                try:
+                    from secrets_store import SecretStore
+                    key = SecretStore(self.root).get('channel-core', str(chosen.get('key_ref', ''))) or ''
+                except Exception:
+                    key = ''
+            if not key:
+                return {'ok': False, 'connection': chosen, 'reason': '清单里的密钥引用取不到值'}
+            req = _url.Request(str(chosen.get('base', '')).rstrip('/') + '/models',
+                               headers={'Authorization': 'Bearer ' + key})
+            try:
+                with _url.urlopen(req, timeout=20) as reply:
+                    body = reply.read().decode('utf-8', 'replace')
+                return {'ok': True, 'connection': chosen, 'models_seen': body.count('"id"'),
+                        'note': '清单能驱动网关；切换前的一切条件已满足'}
+            except Exception as exc:
+                return {'ok': False, 'connection': chosen, 'reason': type(exc).__name__ + ': ' + str(exc)[:160]}
+        if action == 'models.list':
+            # The registry, not the live gateway: one place lists what exists.
+            import json as _json
+            path = self.root / 'harness/models.json'
+            if not path.is_file():
+                return {'connections': [], 'active': '', 'note': '还没有模型连接清单'}
+            data = _json.loads(path.read_text(encoding='utf-8') or '{}')
+            return {'connections': data.get('connections', []), 'active': data.get('active', '')}
+        if action in ('models.current', 'models.test'):
+            # Read-only view of what she actually talks to. Switching the model is a
+            # behaviour change and needs its own decision, so this only reports and probes.
+            from model_gateway import ModelGateway
+            gateway = ModelGateway(self.root, 'qq')
+            current = {'base': str(getattr(gateway, 'base', '')), 'model': str(getattr(gateway, 'model', '')),
+                       'has_key': bool(getattr(gateway, 'key', ''))}
+            if action == 'models.current':
+                return current
+            if not current['has_key']:
+                return {**current, 'ok': False, 'reason': '没有可用的密钥，无法测试连接'}
+            import urllib.request as _url
+            request_url = current['base'].rstrip('/') + '/models'
+            req = _url.Request(request_url, headers={'Authorization': 'Bearer ' + gateway.key})
+            try:
+                with _url.urlopen(req, timeout=20) as reply:
+                    body = reply.read().decode('utf-8', 'replace')
+                count = body.count('"id"')
+                return {**current, 'ok': True, 'status': 200, 'models_seen': count}
+            except Exception as exc:
+                return {**current, 'ok': False, 'reason': type(exc).__name__ + ': ' + str(exc)[:160]}
+        if action in ('workspace.list', 'workspace.read'):
+            # Read-only view of Fish's own workspace. Writes stay with the tool path,
+            # which already has its own permission story; a second writer would be a
+            # second truth about who may touch the disk.
+            base = (self.root / 'workspace').resolve()
+            base.mkdir(parents=True, exist_ok=True)
+            wanted = str(params.get('path', '') or '').strip()
+            target = (base / wanted).resolve() if wanted else base
+            if target != base and base not in target.parents:
+                raise PermissionError('只能查看 Fish 自己的 workspace 目录')
+            if action == 'workspace.list':
+                if target.is_file():
+                    raise ValueError('这是一个文件，请用 workspace.read')
+                entries = []
+                for item in sorted(target.iterdir(), key=lambda p: p.name.casefold())[:400]:
+                    entries.append({'name': item.name, 'directory': item.is_dir(),
+                                    'bytes': item.stat().st_size if item.is_file() else None})
+                return {'path': str(target.relative_to(base)), 'entries': entries}
+            if not target.is_file():
+                raise ValueError('文件不存在或不是文件')
+            limit = min(400, max(20, int(params.get('lines', 200) or 200)))
+            text = []
+            with target.open(encoding='utf-8', errors='replace') as source:
+                for number, line in enumerate(source, 1):
+                    if number > limit:
+                        break
+                    text.append(line.rstrip('\n'))
+            return {'path': str(target.relative_to(base)), 'lines': len(text), 'text': text}
         if action == 'chat.new':
             from owner_mode import OwnerMode
             contexts = SocialContext(self.root)
@@ -913,6 +1080,40 @@ class Workbench:
             for row in result['messages']:
                 row['id'] = str(row['id'])
             return result
+        if action == 'chat.thoughts':
+            # Scrollable list of stored thinking records, newest first.
+            import sqlite3 as _sqlite3
+            from contextlib import closing as _closing
+            limit = min(200, max(5, int(params.get('limit', 40) or 40)))
+            path = self.root / 'data/social/experience.db'
+            if not path.is_file():
+                return {'thoughts': []}
+            with _closing(_sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
+                rows = list(db.execute('SELECT reference, updated, phase, reasoning, error FROM turn_traces '
+                                       'WHERE reasoning!=\'\' ORDER BY updated DESC LIMIT ?', (limit,)))
+            out = []
+            for reference, updated, phase, reasoning, error in rows:
+                text = ' '.join(str(reasoning or '').split())
+                out.append({'reference': str(reference or ''), 'updated': float(updated or 0),
+                            'phase': str(phase or ''), 'chars': len(str(reasoning or '')),
+                            'preview': text[:120], 'error': str(error or '')[:200]})
+            return {'thoughts': out}
+        if action == 'chat.reasoning':
+            # Stored display copy of the provider's own reasoning for one turn.
+            # Nothing is regenerated here: a turn without a trace answers empty.
+            import sqlite3 as _sqlite3
+            from contextlib import closing as _closing
+            reference = str(params.get('reference', '') or '')
+            path = self.root / 'data/social/experience.db'
+            if not reference or not path.is_file():
+                return {'reference': reference, 'reasoning': '', 'phase': '', 'error': ''}
+            with _closing(_sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
+                row = db.execute('SELECT phase, reasoning, error FROM turn_traces WHERE reference=? ORDER BY updated DESC LIMIT 1',
+                                 (reference,)).fetchone()
+            if not row:
+                return {'reference': reference, 'reasoning': '', 'phase': '', 'error': ''}
+            return {'reference': reference, 'phase': str(row[0] or ''),
+                    'reasoning': str(row[1] or '')[:20000], 'error': str(row[2] or '')[:500]}
         if action == 'chat.delete':
             return self.delete_conversations(params)
         if action == 'chat.mode':

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "note": "Fish 模型连接清单：唯一来源。密钥只存引用名，不存明文。切换当前模型需要 gateway 读取本文件（尚未接线，见更新表）。",
+  "active": "deepseek-flash",
+  "connections": [
+    {
+      "id": "deepseek-flash",
+      "name": "DeepSeek Flash",
+      "base": "https://api.deepseek.com",
+      "model": "deepseek-flash",
+      "key_ref": "FISH_QQ_DEEPSEEK_API_KEY"
+    }
+  ]
+}

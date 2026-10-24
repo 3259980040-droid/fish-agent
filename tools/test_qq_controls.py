@@ -164,22 +164,24 @@ class QQControlsTests(unittest.IsolatedAsyncioTestCase):
         contexts = SocialContext(self.root)
         space = contexts.create_space('qq', origin='owner-qq')
         contexts.bind_runtime(space['id'], 'fixture-durable-session')
+        contexts.select_owner_space(space['id'], self.owner)
         conversation = self.loop.store.get_or_create_conversation('test:' + space['id'], 'qq')
         payload = {'chat_id': 'private:' + self.owner, 'segments': [{'type': 'text', 'text': 'hello'}]}
         mid = self.loop.store.record_message(conversation['id'], payload['chat_id'], self.owner, 'inbound',
             'fixture-history', None, payload['segments'], 'hello', 'queued')
-        client = Mock(auth=AsyncMock(), baseline=AsyncMock(side_effect=TimeoutError()))
-        with patch('owner_tests.DSHRuntimeAdapter.connect', return_value=client), patch('owner_tests.bind_session'):
+        with patch('desktop_context.DesktopContext.history', side_effect=TimeoutError('历史暂时不可读')), \
+             patch('model_gateway.ModelGateway') as gateway:
             await process(self.loop, {'message_id': mid, 'conversation': conversation, 'payload': payload,
                                      'space_id': space['id'], 'text': 'hello'})
         self.assertEqual(contexts.space(space['id'])['session'], 'fixture-durable-session')
         with closing(self.loop.store.connect()) as db:
             row = db.execute('SELECT status,error,runtime_session_id FROM messages WHERE id=?', (mid,)).fetchone()
         self.assertEqual(row['status'], 'failed')
-        self.assertEqual(row['error'], 'TimeoutError')
-        self.assertEqual(row['runtime_session_id'], 'fixture-durable-session')
+        self.assertEqual(row['error'], '历史暂时不可读')
+        self.assertEqual(row['runtime_session_id'], '')
+        gateway.return_value.chat.assert_not_called()
         self.assertEqual(len(self.actions), 1)
-        self.assertIn('未能完成', self.actions[0]['payload']['segments'][0]['text'])
+        self.assertIn('聊天记录已保留', self.actions[0]['payload']['segments'][0]['text'])
 
 
 if __name__ == '__main__':

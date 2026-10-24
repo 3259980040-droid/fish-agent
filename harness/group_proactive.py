@@ -31,7 +31,80 @@ from storage import database
 # group runs on and the clock this module keeps for it must not be able to disagree
 # about which group they are talking about.
 SCHEMA = ('CREATE TABLE IF NOT EXISTS group_proactive(chat TEXT PRIMARY KEY,'
-          'next_check REAL,last_attempt REAL,last_sent REAL)')
+          'next_check REAL,last_attempt REAL,last_sent REAL,streak INTEGER NOT NULL DEFAULT 0)')
+
+
+def _ensure_schema(db):
+    """Existing tables predate the streak column; add it once, never rewrite rows."""
+    db.execute(SCHEMA)
+    if 'streak' not in {row[1] for row in db.execute('PRAGMA table_info(group_proactive)')}:
+        db.execute('ALTER TABLE group_proactive ADD COLUMN streak INTEGER NOT NULL DEFAULT 0')
+
+
+def _self_wake_schema(db):
+    db.execute('CREATE TABLE IF NOT EXISTS group_self_wake(chat TEXT PRIMARY KEY, at REAL NOT NULL,'
+               'chain INTEGER NOT NULL DEFAULT 0, interest REAL NOT NULL DEFAULT 0,'
+               "topic TEXT NOT NULL DEFAULT '', created REAL NOT NULL)")
+
+
+def request_self_wake(root, chat, interest, topic, delay=3.0, now=None):
+    """She asked to look again after this turn; nothing here interrupts thinking."""
+    now = time.time() if now is None else float(now)
+    try:
+        score = float(interest)
+    except (TypeError, ValueError):
+        raise ValueError('兴趣值需为 0–1 的数字')
+    if not 0.0 <= score <= 1.0:
+        raise ValueError('兴趣值需为 0–1 的数字')
+    if score < 0.7:
+        raise ValueError('兴趣不足 0.7，不需要再看一眼')
+    wait = max(3.0, min(600.0, float(delay or 3.0)))
+    with database(_path(root)) as db:
+        _self_wake_schema(db)
+        row = db.execute('SELECT chain FROM group_self_wake WHERE chat=?', (str(chat),)).fetchone()
+        chain = int(row[0] or 0) if row else 0
+        if chain >= 3:
+            raise ValueError('连续自唤醒已达 3 次，这一轮不再找你')
+        db.execute('INSERT INTO group_self_wake(chat,at,chain,interest,topic,created) VALUES(?,?,?,?,?,?) '
+                   'ON CONFLICT(chat) DO UPDATE SET at=excluded.at,chain=excluded.chain,'
+                   'interest=excluded.interest,topic=excluded.topic,created=excluded.created',
+                   (str(chat), now + wait, chain + 1, score, str(topic or '')[:120], now))
+    return {'scheduled_at': now + wait, 'chain': chain + 1, 'interest': score}
+
+
+def take_self_wake(root, chat, now=None):
+    """Consume a due self-wake; only counts when something new actually arrived."""
+    now = time.time() if now is None else float(now)
+    with database(_path(root)) as db:
+        _self_wake_schema(db)
+        row = db.execute('SELECT * FROM group_self_wake WHERE chat=?', (str(chat),)).fetchone()
+        if row is None or float(row['at'] or 0.0) > now:
+            return None
+        last_attempt = None
+        attempt = db.execute('SELECT last_attempt FROM group_proactive WHERE chat=?', (str(chat),)).fetchone()
+        last_attempt = float(attempt[0] or 0.0) if attempt else 0.0
+        db.execute('DELETE FROM group_self_wake WHERE chat=?', (str(chat),))
+    try:
+        import sqlite3 as _sqlite3
+        from contextlib import closing as _closing
+        with _closing(_sqlite3.connect((Path(root) / 'data/qq/qq.db').resolve().as_uri() + '?mode=ro', uri=True)) as _db:
+            fresh = int(_db.execute("SELECT COUNT(*) FROM messages WHERE chat_id=? AND direction='inbound' "
+                                    "AND ts > datetime(?,'unixepoch','localtime')", (str(chat), last_attempt)).fetchone()[0])
+    except Exception:
+        fresh = 0
+    return {'topic': str(row['topic'] or ''), 'interest': float(row['interest'] or 0.0), 'fresh': fresh}
+
+
+def _backoff(root):
+    """Owner-tunable pacing: base/cap/start_after plus a busy-chat bypass."""
+    from storage import read_json
+    settings = dict(read_json(Path(root) / 'harness/control.json'))
+    settings.update(read_json(Path(root) / 'harness/context-settings.json', {}) or {})
+    return (float(settings.get('round_backoff_base', 15)),
+            float(settings.get('round_backoff_cap', 300)),
+            int(settings.get('round_backoff_start_after', 2)),
+            int(settings.get('round_bypass_messages', 6)),
+            float(settings.get('round_min_interval', 60)))
 # A generation is a paid model call on a maintenance thread; an overrun is audited
 # and never sent, exactly like the group reply path's own bound.
 TIMEOUT_S = 60.0
@@ -90,10 +163,21 @@ def _stamp(value):
         return 0.0
 
 
-def _interval(config):
-    """The random check interval, clamped so a broken value cannot become a flood."""
-    low = float(config.get('proactive_check_min_s') or DEFAULTS['proactive_check_min_s'])
-    high = float(config.get('proactive_check_max_s') or DEFAULTS['proactive_check_max_s'])
+def _interval(config, root=None):
+    """The random check interval, clamped so a broken value cannot become a flood.
+
+    The owner's pacing in context-settings.json wins over the per-chat policy, so the
+    number edited in the settings page is the number that actually paces her.
+    """
+    override = {}
+    if root is not None:
+        from storage import read_json
+        merged = dict(read_json(Path(root) / 'harness/control.json'))
+        merged.update(read_json(Path(root) / 'harness/context-settings.json', {}) or {})
+        override = {k: v for k, v in merged.items() if k in ('proactive_check_min_s', 'proactive_check_max_s')}
+    source = {**config, **override}
+    low = float(source.get('proactive_check_min_s') or DEFAULTS['proactive_check_min_s'])
+    high = float(source.get('proactive_check_max_s') or DEFAULTS['proactive_check_max_s'])
     low, high = min(low, high), max(low, high)
     return max(60.0, low), max(60.0, high)
 
@@ -123,18 +207,42 @@ def claim(root, chat, now=None):
     """
     now = time.time() if now is None else float(now)
     config = GroupPolicy(root).config(str(chat))
-    low, high = _interval(config)
+    low, high = _interval(config, root)
     with database(_path(root)) as db:
         db.execute('BEGIN IMMEDIATE')
-        db.execute(SCHEMA)
+        _ensure_schema(db)
         row = db.execute('SELECT * FROM group_proactive WHERE chat=?', (str(chat),)).fetchone()
-        if row is not None and float(row['next_check'] or 0.0) > now:
+        base, cap, start_after, bypass, floor_s = _backoff(root)
+        streak = int(row['streak'] or 0) if row is not None else 0
+        last_attempt = float(row['last_attempt'] or 0.0) if row is not None else 0.0
+        burst = 0
+        if last_attempt > 0:
+            try:
+                import sqlite3 as _sqlite3
+                from contextlib import closing as _closing
+                with _closing(_sqlite3.connect((Path(root) / 'data/qq/qq.db').resolve().as_uri() + '?mode=ro', uri=True)) as _db:
+                    burst = int(_db.execute("SELECT COUNT(*) FROM messages WHERE chat_id=? AND direction='inbound' "
+                                            "AND ts > datetime(?,'unixepoch','localtime')", (str(chat), last_attempt)).fetchone()[0])
+            except Exception:
+                burst = 0
+        pending = take_self_wake(root, chat, now)
+        if pending is not None and int(pending.get('fresh') or 0) > 0:
+            # She asked for this look, and something new did arrive: allow it now.
+            streak = 0
+        elif burst >= bypass:
+            # A busy group wins over any backoff: worth looking immediately, streak reset.
+            streak = 0
+        elif row is not None and float(row['next_check'] or 0.0) > now:
             return None
-        scheduled = now + random.uniform(low, high)
-        db.execute('INSERT INTO group_proactive(chat,next_check,last_attempt,last_sent) VALUES(?,?,?,?) '
+        wait = random.uniform(low, high)
+        if streak >= start_after:
+            wait = max(wait, min(cap, base * (2 ** (streak - start_after))))
+        wait = max(wait, floor_s)
+        scheduled = now + wait
+        db.execute('INSERT INTO group_proactive(chat,next_check,last_attempt,last_sent,streak) VALUES(?,?,?,?,?) '
                    'ON CONFLICT(chat) DO UPDATE SET next_check=excluded.next_check,'
-                   'last_attempt=excluded.last_attempt',
-                   (str(chat), scheduled, now, float(row['last_sent'] or 0.0) if row is not None else 0.0))
+                   'last_attempt=excluded.last_attempt,streak=excluded.streak',
+                   (str(chat), scheduled, now, float(row['last_sent'] or 0.0) if row is not None else 0.0, streak + 1))
     return scheduled
 
 
@@ -143,9 +251,9 @@ def mark_sent(root, chat, now=None):
     now = time.time() if now is None else float(now)
     with database(_path(root)) as db:
         db.execute('BEGIN IMMEDIATE')
-        db.execute(SCHEMA)
-        db.execute('INSERT INTO group_proactive(chat,next_check,last_attempt,last_sent) VALUES(?,?,?,?) '
-                   'ON CONFLICT(chat) DO UPDATE SET last_sent=excluded.last_sent',
+        _ensure_schema(db)
+        db.execute('INSERT INTO group_proactive(chat,next_check,last_attempt,last_sent,streak) VALUES(?,?,?,?,0) '
+                   'ON CONFLICT(chat) DO UPDATE SET last_sent=excluded.last_sent,streak=0',
                    (str(chat), 0.0, now, now))
 
 

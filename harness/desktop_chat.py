@@ -256,7 +256,7 @@ class DesktopChat:
             if not inbound:
                 raise ValueError('已接收的原始消息不存在，未重复建立消息')
             from experience import was_considered
-            if was_considered(self.root, 'desktop:' + str(mid)):
+            if was_considered(self.root, 'desktop:' + str(mid), session='desktop:' + cid):
                 self._status(mid, 'considered', '')
                 return self.snapshot(cid)
             imported = json.loads(inbound['segments'] or '[]')

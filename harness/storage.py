@@ -12,6 +12,8 @@ from pathlib import Path
 
 _mutex = threading.RLock()
 _local = threading.local()
+_thinking_queues = {}
+_thinking_queue_mutex = threading.Lock()
 
 
 def locked_settings(function):
@@ -130,7 +132,7 @@ def database(path: Path):
 
 
 @contextlib.contextmanager
-def thinking_slot(root, role, cancelled=None, *, key=None):
+def _file_thinking_slot(root, role, cancelled=None, *, key=None):
     """Serialize the same Fish's main turns across desktop and QQ processes."""
     path = Path(root) / 'data/social' / (str(key or role) + '-thinking.lock')
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,6 +173,38 @@ def thinking_slot(root, role, cancelled=None, *, key=None):
             else:
                 import fcntl
                 fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+
+@contextlib.contextmanager
+def thinking_slot(root, role, cancelled=None, *, key=None):
+    """FIFO within the unified process; the existing file lock also excludes other processes."""
+    queue_key = (str(Path(root).resolve()), str(key or role))
+    with _thinking_queue_mutex:
+        condition, queue = _thinking_queues.setdefault(queue_key, (threading.Condition(), []))
+    ticket = object()
+    with condition:
+        waited = bool(queue)
+        queue.append(ticket)
+    started = time.monotonic()
+    try:
+        if waited:
+            from governance import Governance
+            Governance(Path(root), role).audit('chat.queued', '主思考正在处理上一轮，当前输入继续等待')
+        with condition:
+            while queue[0] is not ticket:
+                if cancelled is not None and cancelled.is_set():
+                    raise InterruptedError('主人已取消等待中的回合')
+                condition.wait(.05)
+        with _file_thinking_slot(root, role, cancelled, key=key):
+            if waited:
+                from governance import Governance
+                Governance(Path(root), role).audit('chat.dequeued', '已进入主思考；实际等待 %.3f 秒' % (time.monotonic()-started))
+            yield
+    finally:
+        with condition:
+            queue.remove(ticket)
+            condition.notify_all()
 
 
 def serial_thinking(function):

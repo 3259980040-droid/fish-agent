@@ -210,6 +210,25 @@ def previewed_assets(root, session):
                 db.execute('SELECT asset FROM chat_previews WHERE session=?', (session,))}
 
 
+def _fish_settings(root):
+    """Context/tool settings live in a file the governance schema never rewrites."""
+    from storage import read_json
+    merged = dict(read_json(Path(root) / 'harness/control.json'))
+    merged.update(read_json(Path(root) / 'harness/context-settings.json', {}) or {})
+    return merged
+
+
+def visible_tool_names(root):
+    """Owner-chosen shortlist; an empty list advertises every builtin as before."""
+    value = _fish_settings(root).get('tools_visible') or []
+    return {str(name) for name in value}
+
+
+def plugin_tools_visible(root):
+    """One switch for advertising the MCP plugin catalogue; execution stays available."""
+    return bool(_fish_settings(root).get('mcp_tools_visible', False))
+
+
 def builtins(role):
     from attachment_store import READ_BYTES
     string = {'type': 'string'}
@@ -233,6 +252,10 @@ def builtins(role):
          'parameters': schema({'action': {'type': 'string', 'enum': ['create','list','update','cancel','run_now']}, 'params': {'type':'object'}}, ['action'])},
         {'name': 'fish_message_send', 'description': 'Fish 以自己的 QQ 身份实际发消息，选择联系主人或当前已接通的群；不是借用主人的账号或替主人发言。target=owner 或 group:实际群号，texts 为按语义分段的文字数组。只报告真实回执，uncertain 表示可能已发且不自动重发。普通当前场所发言也可以用 fish_say。',
          'parameters': schema({'target': string, 'texts': {'type': 'array', 'items': string, 'minItems': 1}}, ['target','texts'])},
+        {'name': 'fish_tool_list', 'description': '按关键词列出你可以调用、但目录里没有直接公布的其余工具，返回名字、用途与参数；找到后直接用这个名字调用。<b>清单为空表示没有更多匹配工具。</b>',
+         'parameters': schema({'query': string}, ['query'])}, 
+        {'name': 'fish_think_again', 'description': '本轮说完之后，给自己安排一次“再看一眼”这个群：只在真的感兴趣时调用，不打断当前思考。interest 必须 ≥0.7（你对这话题的兴趣），topic 一句话说在聊什么。连续自唤醒超过 3 次会被拒绝；这期间没有新消息也不会真的醒。',
+         'parameters': schema({'interest': {'type': 'number', 'minimum': 0, 'maximum': 1, 'description': '兴趣 0–1，低于 0.7 会被拒绝'}, 'topic': string, 'delay': {'type': 'integer', 'minimum': 3, 'maximum': 600, 'description': '多少秒后再看一眼，默认 3'}}, ['interest', 'topic'])}, 
         {'name':'fish_capabilities','description':'查询当前实际模型、模式、思考强度、展示方式、可用工具、联网工具及用量开关。历史工具名与人格描述不能代替本轮真实能力。','parameters':schema({})},
         {'name':'fish_owner_admin','description':'已核验主人可实际管理 Fish，群聊和私聊均可用。action：status、pause、resume；message_send 参数 target(owner或group:白名单群号),text，真实单次发送并返回消息编号；file_send 参数 target(owner或group:白名单群号),path(已存在文件的绝对路径)，通过QQ上传真实文件，不能用chat_files能力标志推断QQ不支持文件；qzone_draft 参数 content,images(图片路径或URL数组),ugc_right(1公开/4好友/64自己)，保存动态草稿但不发布；qzone_publish 参数 draft_id，在客户端空间发布开关开启后调用NapCat真实发布并返回tid；personas 列出版本；persona_import 参数 text/name/source；persona_apply 参数 revision,target(owner或group:群号),new(默认false保留历史)；memory_search 参数query；memory_save 参数text/category/evidence(owner_quote、image_observation、web_source、model_inference)/source_message_id/source_quote/source_url；主人原话必须逐字引用并给实际消息编号，网络资料及模型推测保存为候选，工具身份不代表主人确认；memory_delete 参数id（群里只管理本群记忆，私聊管理主人记忆）；group_get/group_set 参数 group_id/settings(如reply、mode、debounce_s、reply_limits)；schedule_list；schedule_create 参数 target,title,prompt 及一个时间选择 after_seconds/every_seconds/at/daily；at={date,time,time_zone}，daily={time,time_zone}，时区Asia/Shanghai，周期使用实际时间参数，不另设第二套频率规则；schedule_update 参数 id,title,prompt,change；schedule_delete 参数id。先查询实际编号，再执行并按回执报告。',
          'parameters':schema({'action':string,'params':{'type':'object','description':'对应 action 的参数对象，结构见工具说明'}},['action'])},
@@ -302,7 +325,12 @@ def builtins(role):
              'parameters': schema({'group_id': {'type': 'string', 'description': '群号，取自 fish_group_list'},
                  'minutes': {'type': 'integer', 'minimum': 1, 'maximum': 120, 'default': 30, 'description': '回溯分钟数'},
                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 50, 'default': 50, 'description': '本次最多条数'},
+                 'query': {'type': 'string', 'description': '可选：按关键词查全部已索引的历史（含私聊与其他群），返回命中原文摘要；给了 query 就忽略分钟与游标'},
                  'before': {'type': 'integer', 'minimum': 1, 'description': '翻页游标，用上一次返回的 next_before'}}, ['group_id'])},
+            {'name': 'fish_history_catalog', 'description': '按主题/关键词查压缩目录，返回时间段、场所、主题、简述和消息号区间（不返回原文）。要确认原话时再用 fish_history_read 按区间取。没有压缩记录时说明没有，不要编造。',
+             'parameters': schema({'query': {'type': 'string', 'description': '要找的主题词，可用逗号分隔多个'}, 'place': {'type': 'string', 'description': '可选，限定场所如群号或 private'}}, ['query'])}, 
+            {'name': 'fish_history_read', 'description': '按目录条目里的消息号区间取回原文（最多 40 条）。只能取本场所或主人私聊范围内的记录；未送达或未知的记录不得当作已经说过。',
+             'parameters': schema({'source': {'type': 'string', 'enum': ['qq.db', 'desktop-chat.db']}, 'conversation': {'type': 'string'}, 'from_id': {'type': 'integer', 'minimum': 1}, 'to_id': {'type': 'integer', 'minimum': 1}}, ['source', 'conversation', 'from_id', 'to_id'])}, 
             {'name': 'fish_web_search', 'description': '真实联网搜索，返回标题、网址和摘要。搜索失败会返回错误事实，此时不得编造来源或结果。',
              'parameters': schema({'query': string}, ['query'])},
             {'name': 'fish_web_fetch', 'description': '读取一个公开 http/https 网页正文（最多约12000字）。只允许公网 80/443；本机、内网和云元数据地址会被拒绝。',
@@ -610,6 +638,28 @@ class ToolHost:
             if name not in self.OPEN_READ_TOOLS:
                 raise
             return self.unbound(role, session, name)
+        if name == 'fish_think_again':
+            from group_proactive import request_self_wake as _self_wake
+            scope = str(identity.get('scope') or '')
+            if not scope.startswith('chat:group:'):
+                raise ValueError('只有群聊里才需要“再看一眼”')
+            chat = scope[len('chat:'):]
+            out = _self_wake(self.root, chat, arguments.get('interest'), arguments.get('topic', ''),
+                             arguments.get('delay', 3))
+            return {**out, 'note': '已安排；本轮说完之后才会再看，不会打断当前思考'}
+        if name == 'fish_tool_list':
+            # The shortlist trims what is advertised, never what can be executed; this
+            # is how she finds the rest without paying for every schema every turn.
+            query = str(arguments.get('query', '') or '').strip().casefold()
+            shown = visible_tool_names(self.root)
+            everything = builtins(role)
+            found = [item for item in everything
+                     if item['name'] not in shown
+                     and (not query or query in (item['name'] + ' ' + str(item.get('description', ''))).casefold())]
+            return {'tools': [{'name': item['name'], 'description': item.get('description', ''),
+                               'parameters': item.get('parameters', {})} for item in found[:12]],
+                    'hidden_total': max(0, len(everything) - len(shown)),
+                    'note': '这些工具按名字直接调用即可；清单为空表示没有匹配的剩余工具'}
         if name == 'fish_capabilities':
             from current_capabilities import capabilities_brief, current_capabilities
             # The live text leads; the snapshot behind it is evidence, not the answer.
@@ -712,7 +762,8 @@ class ToolHost:
             definition = next(item for item in computer_definitions() if item['name'] == name)
             validate(arguments, definition['parameters'])
             return self.computer.execute(name, arguments, identity, call_id)
-        if name in ('fish_group_list', 'fish_group_history', 'fish_web_search', 'fish_web_fetch'):
+        if name in ('fish_group_list', 'fish_group_history', 'fish_web_search', 'fish_web_fetch',
+                    'fish_history_catalog', 'fish_history_read'):
             # Read-only reach: a bound group reads only itself, and the owner's own
             # chat or console reads the authorised groups. Neither path takes a
             # target out of the arguments when the surface already fixes it.
@@ -721,9 +772,26 @@ class ToolHost:
                     self.scope_refused(identity, role, name,
                                        '群里不能列出主人的授权群：那等于把主人在别的群做什么说出去；要查就在主人私聊里问')
                 if name == 'fish_group_history':
+                    query = str(arguments.get('query', '') or '').strip()
+                    if query:
+                        # One entry for both readings of "history": a time window or a
+                        # keyword looked up in the index, so she never needs two tools.
+                        from history_index import search as search_history
+                        hits = search_history(self.root, query, limit=int(arguments.get('limit', 8)))
+                        return {'query': query, 'hits': hits,
+                                'note': '按关键词命中索引；原文摘要只到 120 字，需要上下文再用消息号按区间取'}
                     from group_read import read_group
                     bounded = {key: arguments[key] for key in ('minutes', 'limit', 'before') if key in arguments}
                     return read_group(self.root, scope_text[len('chat:group:'):], **bounded)
+                if name == 'fish_history_catalog':
+                    from history_catalog import search_catalog
+                    return search_catalog(self.root, str(arguments.get('query', '')),
+                                          place=str(arguments.get('place', '') or ''), limit=5)
+                if name == 'fish_history_read':
+                    from history_catalog import read_range
+                    return read_range(self.root, source=str(arguments.get('source', 'qq.db')),
+                                      conversation=str(arguments.get('conversation', '')),
+                                      from_id=int(arguments.get('from_id', 1)), to_id=int(arguments.get('to_id', 1)))
                 from web_knowledge import WebKnowledge
                 knowledge = WebKnowledge(self.root)
                 if name == 'fish_web_search':
@@ -736,6 +804,12 @@ class ToolHost:
                 return {'groups': authorized_groups(self.root),
                         'note': '这里只列出主人单独开启读取授权的群；read、listen、reply 是三种独立权限，读取历史不等于旁听，也不等于可以发言。'}
             if name == 'fish_group_history':
+                query = str(arguments.get('query', '') or '').strip()
+                if query:
+                    from history_index import search as search_history
+                    hits = search_history(self.root, query, limit=int(arguments.get('limit', 8)))
+                    return {'query': query, 'hits': hits,
+                            'note': '按关键词命中索引；摘要只到 120 字，需要上下文再用消息号按区间取'}
                 from group_read import read_group
                 bounded = {key: arguments[key] for key in ('minutes', 'limit', 'before') if key in arguments}
                 return read_group(self.root, arguments.get('group_id'), **bounded)
@@ -1624,7 +1698,13 @@ class ToolHost:
             text = contexts.persona(space['revision'])['body']
             return {'revision': space['revision'], 'text': text,'reload':True}
         if route == '/catalog':
-            return {'tools': builtins(role) + self.registry.catalog(role), 'native_tools': self.registry.native_catalog(role)}
+            # The MCP server duplicates most of Fish's own abilities and costs ~26k tokens
+            # per request. It stays installed and callable; it is only not advertised
+            # unless the owner turns it on in settings.
+            shown = self.registry.catalog(role) if plugin_tools_visible(self.root) else []
+            shortlist = visible_tool_names(self.root)
+            own = [item for item in builtins(role) if not shortlist or item['name'] in shortlist]
+            return {'tools': own + shown, 'native_tools': self.registry.native_catalog(role)}
         if route == '/bind':
             if not admin:
                 raise PermissionError('只有本地控制台能绑定身份')
@@ -1690,8 +1770,11 @@ class ToolHost:
                     if role == 'qq':
                         from emoji_store import EmojiStore
                         EmojiStore(self.root).learn_one(gateway)
-                        from context_compaction import tick as compact_context
+                        from context_compaction import tick as compact_context, auto_enqueue
+                        auto_enqueue(self.root, gateway)
                         compact_context(self.root)
+                        from history_index import ensure as index_history
+                        index_history(self.root)
                 except Exception:
                     # Each job retains its own failure; never silently retry paid calls.
                     continue
@@ -1723,6 +1806,16 @@ class ToolHost:
                     code, data = 200, {'ok': True, 'result': result}
                 except Exception as exc:
                     code = 403 if isinstance(exc, PermissionError) else 400
+                    # The HTTP answer stays generic, but the real traceback must land
+                    # somewhere local or a masked class name is impossible to fix.
+                    try:
+                        import traceback as _tb
+                        from governance import Governance as _G
+                        _G(host.root, role).audit('tool.exception', (
+                            str(body.get('name', '')) + ' ' + type(exc).__name__ + '\n'
+                            + _tb.format_exc())[-1500:])
+                    except Exception:
+                        pass
                     # Exception details can contain user/plugin data; keep private console only.
                     data = {'ok': False, 'error': str(exc)[:500] if isinstance(exc, (ValueError, PermissionError, InterruptedError, TimeoutError)) else type(exc).__name__ + '：操作失败，请查看对应功能的记录'}
                 payload = json.dumps(data, ensure_ascii=False).encode()

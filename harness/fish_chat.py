@@ -178,7 +178,7 @@ def respond(root, role, *, persona, history, history_source, memory, scope,
         experience.session = session
         history, history_source = experience.prepare(cancelled)
         from experience import was_considered
-        if was_considered(root, history_source['current_reference']):
+        if was_considered(root, history_source['current_reference'], session=session):
             experience.finish('silent')
             raise TurnSilent('本消息已在上一轮实际考虑，未重复生成')
         event = history_source['current_event']
@@ -309,7 +309,7 @@ def _respond(root, role, *, persona, history, history_source, memory, scope,
                 return turn_says(root, role, session, result.text)
             return result.text
         assistant={'role':'assistant','content':result.text or '', 'tool_calls':list(result.tool_calls)}
-        if result.reasoning_content:assistant['reasoning_content']=result.reasoning_content
+        assistant['reasoning_content']=result.reasoning_content
         messages.append(assistant)
         previews=[]
         for call in result.tool_calls:

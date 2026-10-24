@@ -126,33 +126,33 @@ class TakeoverTests(unittest.TestCase):
         with self.assertRaises(ValueError): save_config(self.root,{"vision":{"base_url":"file:///tmp/x"}})
         self.assertEqual(load_config(self.root), before)
 
-    def test_qq_loop_passes_attachment_observation_into_dsh(self):
+    def test_qq_loop_passes_native_image_into_independent_fish_api(self):
         from qq_agent_loop import QQAgentLoop
+        from model_gateway import ChatResult
+        from social_context import SocialContext
+        from unittest.mock import MagicMock, AsyncMock
         owner_cfg = self.root / "channels/fish_qq/config.json"
         owner_cfg.parent.mkdir(parents=True, exist_ok=True)
         owner_cfg.write_text(json.dumps({"allowlist":{"owner_id":"111"}}))
         loop = QQAgentLoop(self.root, owner="111")
-        loop.conversation = loop.store.get_or_create_conversation("private:111", "qq")
-        loop.session_id = "fixture-session"
-        captured = []
-        class DSH:
-            async def baseline(self, sid): return 0
-            async def prompt(self, sid, text): captured.append(text)
-            async def wait_response(self, *a, **kw): return {"ok":True,"text":"我看到了蓝色方块。"}
-        class Channel:
-            async def action(self, *a, **kw): return {"ok":True,"payload":{"message_id":"out-1"}}
-        loop.dsh = DSH(); loop.channel = Channel()
-        async def ready(): pass
-        loop.ensure_runtime = ready
+        contexts=SocialContext(self.root)
+        persona=contexts.save_persona('qq','test','Fish persona')
+        space=contexts.create_space('qq',revision=persona['id'],origin='owner-qq')
+        contexts.select_owner_space(space['id'],'111')
+        loop.conversation = loop.store.get_or_create_conversation('test:'+space['id'], "qq")
+        loop.channel=MagicMock(action=AsyncMock(return_value={"ok":True,"payload":{"message_id":"out-1"}}))
+        gateway=MagicMock(base='https://api.deepseek.com',model='test',chat=MagicMock(return_value=ChatResult(json.dumps({'bubbles':[{'kind':'text','text':'我看到了蓝色方块。'}]}),{},'stop')))
         segments = [{"type":"image","url":"https://gchat.qpic.cn/test"}]
         mid = loop.store.record_message(loop.conversation["id"],"private:111","111","inbound","in-1",None,segments,"看看", "queued")
-        with patch.object(MediaService,"_download",return_value=self.image), patch('tool_host.bind_session'):
-            asyncio.run(loop._process({"message_id":mid,"text":"看看","payload":{"segments":segments}}))
-        self.assertTrue(captured[0][0]["text"].endswith("看看"))
-        self.assertIn("来自主人账号", captured[0][0]["text"])
-        self.assertEqual(captured[0][1]["type"], "image")
-        self.assertEqual(captured[0][1]["mediaType"], "image/jpeg")
-        self.assertGreater(len(captured[0][1]["data"]),100)
+        with patch.object(MediaService,"_download",return_value=self.image),patch('model_gateway.ModelGateway',return_value=gateway),patch('web_knowledge.WebKnowledge.resolve',return_value=''),patch('vision_identification.VisionIdentification.resolve',return_value=''),patch('conversation_style.private_context',return_value=''):
+            asyncio.run(loop._process({"message_id":mid,"text":"看看","conversation":loop.conversation,'space_id':space['id'],"payload":{"chat_id":"private:111","segments":segments}}))
+        request=gateway.chat.call_args.args[0]
+        self.assertEqual(request[-1]['content'][0]['text'],'看看')
+        image=next(block for block in request[-1]['content'] if block['type']=='image_url')
+        self.assertTrue(image['image_url']['url'].startswith('data:image/png;base64,'))
+        self.assertIsNone(loop.dsh)
+        import gc
+        gc.collect()
 
     def test_role_editor_saves_real_sources_and_preserves_unknown_config(self):
         from fish_desktop.services import FishServices

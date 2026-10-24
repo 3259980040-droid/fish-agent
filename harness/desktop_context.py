@@ -1,9 +1,40 @@
 """Local conversation history and incremental compaction; raw messages stay intact."""
 import json
+from functools import lru_cache
+from pathlib import Path
 from storage import database, read_json
 
 
+@lru_cache(maxsize=2)
+def _tokenizer(path):
+    from context_budget import _tokenizer as load
+    return load(path)
+
+
+def _tokens(root, text):
+    path = str(Path(root) / 'vendor/tokenizers/deepseek-v4/tokenizer.json')
+    return len(_tokenizer(path).encode(str(text or '')).ids)
+
+
+def retain_tokens(root):
+    """Verbatim room for one turn, derived from the real window and the working ratio."""
+    control = dict(read_json(Path(root) / 'harness/control.json'))
+    control.update(read_json(Path(root) / 'harness/context-settings.json', {}) or {})
+    ratio = float(control.get('context_window_ratio', .08))
+    retain = float(control.get('retain_ratio', .16))
+    window = 0
+    for value in (read_json(Path(root) / 'data/social/model-metadata.json', {}) or {}).values():
+        if isinstance(value, dict) and isinstance(value.get('context_window'), int):
+            window = max(window, int(value['context_window']))
+    window = window or 1048576
+    budget = min(int(window * ratio), window - 8192)
+    return max(1500, int(budget * retain))
+
+
 class DesktopContext:
+    # Verbatim material is bounded by real tokens, not characters: the working budget
+    # comes from the model window, and older records travel as the continuation summary.
+
     def __init__(self, root, path, *, channel='desktop'):
         self.root, self.path, self.channel = root, path, channel
         with database(path) as db:
@@ -167,11 +198,40 @@ class DesktopContext:
                 attached = [{k: v for k, v in a.items() if k in ('type','id','asset_id','name','path','url','file_id','message_id')}
                             for a in event['attachments']]
                 body += '\n附件引用：' + json.dumps(attached, ensure_ascii=False)
-            role = 'assistant' if event['outbound'] and event['delivery'] == '已确认' and event['current_place'] else 'user'
+            # A delivered message is a source event, not the original provider
+            # assistant envelope (its full protocol reasoning may be unavailable).
+            # Keep the explicit Fish/sender metadata, never invent reasoning or
+            # insert an incomplete assistant envelope into a thinking/tool request.
+            role = 'user'
             picked.append((event['time'], event['reference'],
                            {'role': role, 'content': body, '_fish_layer': 1 if event['current_conversation'] else 2,
-                            '_fish_refs': [event['reference']], '_fish_bundle': event['bundle']}))
+                            '_fish_refs': [event['reference']], '_fish_bundle': event['bundle']},
+                           {'source': path.name, 'conversation': str(row.get('conversation_id') or cid),
+                            'id': int(row['id'])}))
         picked.sort(key=lambda item: (item[0], item[1]))
+        # Newest slice of each layer stays verbatim; older records are queued for the
+        # continuation summary instead of being re-sent whole every turn. Originals kept.
+        older = []
+        if after is None:
+            room = retain_tokens(self.root)
+            limits = {1: room, 2: max(600, room // 3)}
+            used = {1: 0, 2: 0}
+            full = set()
+            keep = []
+            for item in reversed(picked):
+                layer = item[2].get('_fish_layer', 1)
+                if layer in full:
+                    older.append(item[3])
+                    continue
+                size = _tokens(self.root, item[2].get('content'))
+                if used[layer] + size > limits[layer]:
+                    full.add(layer)
+                    older.append(item[3])
+                    continue
+                used[layer] = used[layer] + size
+                keep.append(item)
+            keep.reverse()
+            picked = keep
         history = [item[2] for item in picked]
         if after is None and summary and summary['summary']:
             history.insert(0, {'role': 'user', 'content': '[较早续聊摘要，以原文及更正为准]\n' + summary['summary'],
@@ -193,6 +253,7 @@ class DesktopContext:
         return history, {'source': 'common-experience over original message stores',
                          'stores': [p.name for p in paths], 'current_place': current_place,
                          'current_reference': reference, 'current_event': current_event, 'positions': positions,
+                         'older': older,
                          'material_count': len(history), 'budget': 'shared actual-model token budget'}
 
     def period_material(self, question, words):

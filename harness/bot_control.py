@@ -339,7 +339,9 @@ class BotControl:
                 confirmed = bool(receipt.get('ok') and (payload.get('message_id') or payload.get('message_ids')))
                 state = ('SUCCEEDED' if confirmed else 'UNKNOWN' if receipt.get('ok') or error.get('may_have_sent') else 'FAILED')
             except Exception as exc:
-                receipt = {'ok': False, 'error': {'code': type(exc).__name__, 'message': str(exc), 'may_have_sent': True}}
+                import traceback as _tb
+                receipt = {'ok': False, 'error': {'code': type(exc).__name__, 'message': str(exc), 'may_have_sent': True,
+                                                 'trace': _tb.format_exc()[-1200:]}}
                 state = 'UNKNOWN'
         with database(self.path) as db:
             db.execute('UPDATE sends SET state=?,receipt=? WHERE id=?', (state, json.dumps(receipt, ensure_ascii=False), request_id))

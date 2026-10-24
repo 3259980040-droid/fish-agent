@@ -50,9 +50,9 @@ class ContextBudget:
         self.gateway = gateway
         self.metadata = metadata if metadata is not None else model_metadata(root, gateway)
         self.window = int(self.metadata['context_window'])
-        ratio = float(read_json(self.root / 'harness/control.json').get('context_window_ratio', .30))
-        if not .25 <= ratio <= .35:
-            raise ValueError('上下文预算比例应在25%到35%之间')
+        ratio = float(read_json(self.root / 'harness/control.json').get('context_window_ratio', .08))
+        if not .04 <= ratio <= .35:
+            raise ValueError('上下文预算比例应在4%到35%之间')
         self.ratio = ratio
         model = str(self.metadata.get('id') or gateway.model)
         if not model.startswith(('deepseek-flash', 'deepseek-v4')):

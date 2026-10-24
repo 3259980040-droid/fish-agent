@@ -20,9 +20,25 @@ from group_workflow import GroupWorkflow
 from qq_agent_loop import QQAgentLoop
 from memory_store import MemoryStore
 from dsh_web import DSHWebClient
+from storage import database
 
 
 class ConcurrentTests(Fixture):
+    def test_rebuilt_session_carries_selected_reply_recipient_for_other_person(self):
+        self.setup_dialogue()
+        async def run():
+            await self.d.observe(self.payload('我喜欢乌龙茶','person-a',sender='333333333'))
+            await self.drain()
+            question=self.payload('你刚才回的是谁','person-b',sender='444444444')
+            question['reply_to']='out-1'
+            await self.d.observe(question);await self.drain()
+        asyncio.run(run())
+        envelope=json.loads(list(self.contexts.values())[-1]);context=envelope['context']
+        self.assertIn('"reply_target": "444444444"',context)
+        self.assertIn('"reply_target_id": "333333333"',context)
+        self.assertIn('"message_id": "out-1"',context)
+        self.assertEqual(sum(c.create_session.await_count for c in self.clients),2)
+
     def test_recent_background_picture_uses_prompt_attachments_not_text_envelope(self):
         self.setup_dialogue();self.d.workflow.policy.configure(self.chat,{'mode':'mention'})
         picture=self.payload('刚才这张图','picture',direct=False)
@@ -103,7 +119,7 @@ class ConcurrentTests(Fixture):
             if not tasks:return
             await asyncio.wait_for(asyncio.gather(*tasks,return_exceptions=True),4)
 
-    def test_two_people_reply_in_order_and_reuse_window_session(self):
+    def test_two_people_reply_in_order_with_distinct_focused_sessions(self):
         self.setup_dialogue();release=asyncio.Event();started=asyncio.Event()
         async def reply(c,kwargs):
             if 'SLOW_A' in c.content[0]['text']:
@@ -120,8 +136,12 @@ class ConcurrentTests(Fixture):
             release.set();await self.drain()
         asyncio.run(run())
         self.assertEqual([s['reply_to'] for s in self.sent],['a','b'])
-        self.assertEqual(sum(c.create_session.await_count for c in self.clients),1)
-        self.assertEqual(self.clients[0].prompt.await_args.args[0],self.clients[1].prompt.await_args.args[0])
+        self.assertEqual(sum(c.create_session.await_count for c in self.clients),2)
+        self.assertNotEqual(self.clients[0].prompt.await_args.args[0],self.clients[1].prompt.await_args.args[0])
+        with database(self.d.jobs.path) as db:
+            snapshot=json.loads(db.execute("SELECT snapshot FROM jobs WHERE root='b'").fetchone()[0])
+        self.assertEqual(snapshot['request_view']['runtime']['strategy'],'fresh-focused-view-v1')
+        self.assertEqual(snapshot['request_view']['runtime']['previous_session'],self.clients[0].prompt.await_args.args[0])
         self.assertEqual(self.tests.contexts.space(self.trial['id'])['session'],'')
 
     def test_followup_plain_text_merges_before_generation_and_deduplicates(self):
@@ -179,7 +199,9 @@ class ConcurrentTests(Fixture):
             await asyncio.sleep(.06);self.assertEqual(len(calls),1)
             release.set();await self.drain()
         asyncio.run(run());self.assertEqual(len(calls),2)
-        self.assertEqual(self.clients[0].prompt.await_args.args[0],self.clients[1].prompt.await_args.args[0])
+        self.assertNotEqual(self.clients[0].prompt.await_args.args[0],self.clients[1].prompt.await_args.args[0])
+        envelope=json.loads(self.contexts[self.clients[1].prompt.await_args.args[0]])
+        self.assertIn('线程回复1',json.dumps(envelope['history'],ensure_ascii=False))
         from storage import database
         with database(self.d.history.path) as db:
             history=[r['message'] for r in db.execute('SELECT message FROM dialogue_messages WHERE scope=? ORDER BY seq',(self.d.history.key,))]

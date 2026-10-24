@@ -74,27 +74,32 @@ class ReplyModesTests(Fixture):
     def run_owner(self, mode, *, cancelled=False, blocked=False, chat_id=None):
         from qq_agent_loop import QQAgentLoop
         from owner_tests import process
+        from model_gateway import ChatResult
         store=SocialContext(self.root);p=store.save_persona('qq','test','body',owner_reply_mode=mode)
-        space=store.create_space('qq',revision=p['id'],origin='owner-qq');store.bind_runtime(space['id'],'test-'+p['id']);store.select_owner_space(space['id'],self.owner)
+        space=store.create_space('qq',revision=p['id'],origin='owner-qq');store.select_owner_space(space['id'],self.owner)
         loop=QQAgentLoop(self.root);loop.channel=Mock(action=AsyncMock(return_value={'ok':True,'payload':{'message_id':'out-'+p['id']}}))
         conv=loop.store.get_or_create_conversation('test:'+space['id'],'qq');payload={'chat_id':chat_id or 'private:'+self.owner,'segments':[{'type':'text','text':'hello'}]}
         mid=loop.store.record_message(conv['id'],payload['chat_id'],self.owner,'inbound','in-'+p['id'],None,payload['segments'],'hello','queued')
-        async def response(*args,**kwargs):
-            if cancelled:loop.cancel_event.set()
-            return {'ok':True,'text':'actual final','reasoning':'actual provider thought'}
-        client=Mock(auth=AsyncMock(),baseline=AsyncMock(return_value=0),prompt=AsyncMock(),wait_response=AsyncMock(side_effect=response))
+        def response(messages,**kwargs):
+            if cancelled:loop.private_cancel.set()
+            # 她的话由 fish_say 交出去，然后结束这一轮：正文本身不再当消息。
+            if any(isinstance(m,dict) and m.get('role')=='tool' for m in messages):
+                return ChatResult('', {}, 'stop')
+            return ChatResult('', {}, 'tool_calls', ({'id':'call-1','type':'function',
+                'function':{'name':'fish_say','arguments':json.dumps({'texts':['actual final']})}},))
+        client=Mock(base='https://api.deepseek.com',model='test',chat=Mock(side_effect=response))
         if blocked:loop.governance.check_output=Mock(side_effect=PermissionError('blocked'))
-        with patch('owner_tests.DSHRuntimeAdapter.connect',return_value=client),patch('owner_tests.bind_session'),patch('tool_host.request',return_value={'bubbles':[], 'asset':''}):
+        with patch('model_gateway.ModelGateway',return_value=client),patch('web_knowledge.WebKnowledge.resolve',return_value=''),patch('conversation_style.private_context',return_value=''),patch('memory_store.MemoryStore.context',return_value=''):
             asyncio.run(process(loop,{'message_id':mid,'conversation':conv,'payload':payload,'space_id':space['id'],'text':'hello'}))
         return loop,client
 
-    def test_owner_delivery_uses_selected_mode_and_checks_combined_output(self):
-        loop,client=self.run_owner('thinking_excerpt')
-        self.assertTrue(client.wait_response.await_args.kwargs['include_reasoning'])
-        self.assertIn('actual provider thought',loop.channel.action.await_args.args[1]['segments'][0]['text'])
-        loop,client=self.run_owner('final')
-        self.assertFalse(client.wait_response.await_args.kwargs['include_reasoning'])
-        self.assertEqual(loop.channel.action.await_args.args[1]['segments'][0]['text'],'actual final')
+    def test_migrated_owner_uses_final_fish_api_for_each_legacy_display_mode(self):
+        for mode in ('thinking_excerpt', 'final'):
+            loop,client=self.run_owner(mode)
+            # 一次生成：她说了一句（fish_say），然后同一轮结束；没有第二次再判。
+            self.assertEqual(2, client.chat.call_count)
+            self.assertEqual(loop.channel.action.await_args.args[1]['segments'][0]['text'],'actual final')
+            self.assertIsNone(loop.dsh)
 
     def test_reasoning_never_delivers_after_cancel_or_output_block(self):
         for options in ({'cancelled':True},{'blocked':True}):
@@ -102,8 +107,7 @@ class ReplyModesTests(Fixture):
             loop.channel.action.assert_not_awaited()
 
     def test_reasoning_display_rejects_group_destination(self):
-        loop,client=self.run_owner('thinking_excerpt',chat_id=self.chat)
-        client.wait_response.assert_not_awaited();loop.channel.action.assert_not_awaited()
+        with self.assertRaises(PermissionError):self.run_owner('thinking_excerpt',chat_id=self.chat)
 
     def test_editor_mode_drafts_and_saved_revisions_are_independent(self):
         os.environ.setdefault('QT_QPA_PLATFORM','offscreen')

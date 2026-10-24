@@ -317,11 +317,21 @@ class QQAgentLoop:
         await self.channel.stop()
         self.runtime.stop(self.agent_id)
 
+    def _maintenance_seconds(self):
+        """The outer wait is what actually paces the autonomous round."""
+        from storage import read_json
+        settings = dict(read_json(self.root / 'harness/control.json'))
+        settings.update(read_json(self.root / 'harness/context-settings.json', {}) or {})
+        try:
+            value = float(settings.get('maintenance_interval_s', 60))
+        except (TypeError, ValueError):
+            value = 60.0
+        return max(20.0, min(MAINTENANCE_S, value))
+
     async def _maintenance(self):
         from data_retention import DataRetention
         from group_language import GroupLanguage
         from daily_curate import tick as daily_curate_tick
-        from memory_digest import daily as memory_digest_tick
         GroupLanguage(self.root)
         while not self._stop.is_set():
             try:
@@ -329,12 +339,16 @@ class QQAgentLoop:
             except Exception as exc:
                 self.governance.audit('data_maintenance_failed',type(exc).__name__)
             try:
-                # 当天小结：自己判断当天已做就跳过，一天最多真实模型一次
-                await asyncio.to_thread(memory_digest_tick, self.root)
+                # 自主回合：原来没人调用（重构后断了线），这里接回同一个维护循环。
+                # 节拍与退避由 group_proactive 自己按 context-settings.json 判断。
+                from group_proactive import tick as autonomous_round
+                await autonomous_round(self)
             except Exception as exc:
-                self.governance.audit('memory_digest_failed',type(exc).__name__)
+                self.governance.audit('autonomous_round_failed', type(exc).__name__)
             try:
-                # 每日整理：清理记忆 + 当天小结 + 挑表情，凌晨四点后一天只跑一次
+                # 每日整理唯一入口：清理记忆 + 当天小结 + 挑表情；
+                # 小结由它内部调用 memory_digest.daily，这里不再单独调一遍，
+                # 否则同一份小结有两个触发方，各自记账、各自调模型。
                 await asyncio.to_thread(daily_curate_tick, self.root)
             except Exception as exc:
                 self.governance.audit('daily_curate_failed', type(exc).__name__)
@@ -344,7 +358,7 @@ class QQAgentLoop:
                 if fault['consecutive'] > 0:
                     await self._fault_notice(fault)
             try:
-                await asyncio.wait_for(self._stop.wait(), MAINTENANCE_S)
+                await asyncio.wait_for(self._stop.wait(), self._maintenance_seconds())
             except TimeoutError:
                 pass
 
@@ -743,7 +757,7 @@ class QQAgentLoop:
             item = await self.queue.get()
             try:
                 from experience import was_considered
-                if was_considered(self.root, 'qq:' + str(item['message_id'])):
+                if was_considered(self.root, 'qq:' + str(item['message_id']), session='qq-private:' + item['conversation']['id']):
                     self.store.update_message(item['message_id'], status='considered')
                     continue
                 await self._process(item)

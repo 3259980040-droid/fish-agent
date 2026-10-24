@@ -1,0 +1,51 @@
+{
+ "name": "basic_clear_question",
+ "chat": "group:987654321",
+ "persona": {
+  "name": "影子夹具人格",
+  "body": "你是一条住在群里的鱼，说话短一点。"
+ },
+ "policy": {
+  "engine": "shadow",
+  "read": true,
+  "listen": true,
+  "learn": true,
+  "reply": true,
+  "shadow_daily_limit": 60
+ },
+ "paused": false,
+ "members": [
+  {
+   "user_id": "2100000001",
+   "name": "群友甲"
+  }
+ ],
+ "model": {
+  "text": "这个我知道，滑窗就是两个指针一起往前挪，先把右指针走到满足条件，再收左指针。"
+ },
+ "messages": [
+  {
+   "message_id": "fx-q1",
+   "minutes_ago": 6,
+   "sender": {
+    "id": "2100000001",
+    "display_name": "群友甲"
+   },
+   "text": "滑窗到底怎么写比较稳？",
+   "reply_to": ""
+  },
+  {
+   "message_id": "fx-q2",
+   "minutes_ago": 2,
+   "sender": {
+    "id": "2100000001",
+    "display_name": "群友甲"
+   },
+   "text": "那我按你说的先写左右指针试试",
+   "reply_to": "fx-q1"
+  }
+ ],
+ "targets": [
+  "fx-q2"
+ ]
+}

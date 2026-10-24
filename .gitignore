@@ -99,3 +99,10 @@ Thumbs.db
 
 node_modules/
 harness/runtime/fish-workspace/
+
+# Runtime data and personal content (never publish)
+data/
+backups/
+*.before-*
+artifacts/
+*.log

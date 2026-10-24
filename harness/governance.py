@@ -77,11 +77,12 @@ def fault_code(error):
     text = type(error).__name__ + ' ' + _fault_message(error)
     response = getattr(error, 'response', None)
     status = getattr(response, 'status_code', None)
+    status = getattr(error, 'status_code', status)
     if isinstance(status, int): text += ' HTTP ' + str(status)
     if re.search(r'(?<!\d)(401|403)(?!\d)|authentication|autherror|unauthori[sz]ed|forbidden|鉴权|认证|(?:请先|缺少|invalid).*api.?key', text, re.I): return 'auth'
     if isinstance(error, TimeoutError) or re.search(r'timeout|timed out|超时', text, re.I): return 'timeout'
     if re.search(r'connection|connecterror|econnrefused|proxy|network|网络|连接|代理', text, re.I): return 'network'
-    if re.search(r'(?<!\d)429(?!\d)|rate.?limit|quota|配额|用量|上限|额度', text, re.I): return 'limit'
+    if re.search(r'(?<!\d)(402|429)(?!\d)|rate.?limit|quota|insufficient.?balance|余额不足|配额|用量|上限|额度', text, re.I): return 'limit'
     if re.search(r'json|decodeerror|protocol|malformed|格式|协议|输出不合法', text, re.I): return 'protocol'
     return 'unknown'
 
@@ -102,6 +103,12 @@ def classify_fault(error, *, stage='model', uncertain=False):
         code, reason = 'persona_missing', '人格或会话窗口不存在，请修正绑定；不会切换默认人格'
     elif detail.get('validation_failed'):
         code, reason = 'permission', '本轮身份、窗口或权限校验未通过，未继续发送；不会绕过校验'
+    elif re.search(r'\b402\b|insufficient.?balance|余额不足', text, re.I):
+        code, reason = 'balance', 'DeepSeek API 余额不足（HTTP 402），请充值当前 API 账户后再试'
+    elif re.search(r'\b(400|422)\b', text):
+        code, reason = 'protocol', '模型请求格式或参数不符合服务要求（HTTP 400/422），请查看具体请求错误'
+        if 'reasoning_content' in text:
+            reason = '模型工具接续缺少 reasoning_content 思考字段（HTTP 400），需要修正请求协议'
     elif detail.get('provider') and fault_code(error) == 'auth':
         code, reason = 'auth', PROVIDER_FAULT_REASONS['auth']
     elif re.search(r'\b401\b|authenticationerror|autherror|unauthori[sz]ed|认证失败|(?:请先|缺少|invalid).*api.?key|密钥(?:未|无效|错误)', text, re.I):
@@ -362,6 +369,10 @@ class Governance:
             self._fault_outcome(db,source,stage,outcome,reason,time.time() if now is None else float(now))
 
     def claim_fault_notice(self, source, code, *, stage='model', recovered=False, now=None):
+        # Internal upkeep (summaries) is visible on the settings page; paging the owner
+        # for it is noise, and a paused role must never be paged at all.
+        if str(source).startswith(('context-compaction', 'fish-scheduler', 'data-retention')):
+            return ''
         """Atomically reserve one notice; failed/unknown sends also retain the cooldown."""
         at = time.time() if now is None else float(now)
         day = time.strftime('%Y-%m-%d',time.gmtime(at + 8 * 3600))
@@ -379,6 +390,12 @@ class Governance:
                 recent = db.execute('SELECT MAX(created) FROM fault_notices WHERE source=? AND stage IS ? AND code=? AND recovered=0',
                                     (str(source),stage,str(code))).fetchone()[0]
                 if recent is not None and at - recent < 1800: return ''
+                # A long outage would otherwise message the owner for every retry.
+                today = db.execute('SELECT COUNT(*) FROM fault_notices WHERE source=? AND code=? AND day=?',
+                                   (str(source), str(code), day)).fetchone()[0]
+                if int(today or 0) >= 3: return ''
+                overall = db.execute('SELECT COUNT(*) FROM fault_notices WHERE day=?', (day,)).fetchone()[0]
+                if int(overall or 0) >= 6: return ''
             token = uuid.uuid4().hex
             db.execute('INSERT INTO fault_notices(token,source,stage,code,recovered,day,created,sent,uncertain,finished) '
                        'VALUES(?,?,?,?,?,?,?,0,0,0)', (token,str(source),stage,str(code),int(recovered),day,at))
@@ -436,6 +453,11 @@ class Governance:
                     notices = [dict(row) for row in db.execute('SELECT * FROM fault_notices ORDER BY created DESC LIMIT 30')]
                 if 'audit' in tables:
                     latest = [json.loads(row[0]) for row in db.execute("SELECT reason FROM audit WHERE kind='fault_outcome' ORDER BY id DESC LIMIT 30")]
+        # Old failures retained only a generic reason. Explain known HTTP causes
+        # from their existing safe detail without rewriting counters or history.
+        for row in items:
+            if row['code'] in ('execution_failed', 'delivery_failed') and re.search(r'\b(400|402|422)\b', row.get('detail', '')):
+                row['reason'] = classify_fault(row['detail'], stage=row['stage'])['reason']
         return {'items': [{**{k:v for k,v in row.items() if k != 'detail'},
                            'stage_label': row['stage'] or '未分类（历史）',
                            'uncertain':bool(row['uncertain']),'auto_retry':False} for row in items],

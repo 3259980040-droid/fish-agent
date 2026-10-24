@@ -31,14 +31,15 @@ class WorkbenchTests(Fixture):
         self.assertEqual(GroupPolicy(self.root).config(self.chat)['debounce_s'],1)
         self.assertFalse(GroupPolicy(self.root).config(self.chat)['reply_limits'])
 
-    def test_owner_private_gets_native_computer_in_existing_history_session(self):
+    def test_legacy_native_work_requires_explicit_mode_and_permission(self):
         from owner_computer import context
         from governance import Governance
         store=SocialContext(self.root)
         space=store.create_space('qq',origin='owner-qq');store.select_owner_space(space['id'],self.owner)
         host=ToolHost(self.root);host.bind('qq','same-private-history',space['scope'],self.owner)
         identity=host.identity('qq','same-private-history')
-        work=context(self.root,identity)
+        self.assertIsNone(context(self.root,identity, 'chat'))
+        work=context(self.root,identity, 'work')
         self.assertEqual(work['permission'],'danger-full-access')
         self.assertTrue(Path(work['workspace']).is_dir())
         self.assertEqual(store.owner_space(self.owner)['session'],'same-private-history')
