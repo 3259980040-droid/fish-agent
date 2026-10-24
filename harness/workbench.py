@@ -3,11 +3,203 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import json
+import os
+import re
+import sqlite3
 import threading
 import time
 import uuid
 
 from storage import database
+
+# The life page reads her own state; every count below is a SELECT on a
+# connection that may not write, so opening the page never changes a ledger.
+LIFE_KINDS = ('fact', 'preference', 'relationship', 'event', 'promise', 'meme', 'emotion')
+LIFE_SOCIAL = ('topic', 'thought', 'impression')
+LIFE_REMINDER_ON = {'1', 'on', 'true', 'yes'}
+LIFE_EVENT_STATE = {'open': '待办', 'completed': '已完成', 'cancelled': '已取消'}
+
+
+def _query_only(path):
+    conn = sqlite3.connect(str(path), timeout=20)
+    conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA query_only=ON')
+    return conn
+
+
+def _reminder_user_switch():
+    """The User-level FISH_MEMORY_REMINDER, read without touching this process."""
+    if os.name != 'nt':
+        return ''
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, 'Environment') as key:
+            value, _type = winreg.QueryValueEx(key, 'FISH_MEMORY_REMINDER')
+        return str(value or '')
+    except OSError:
+        return ''
+
+
+def _life_reminder(root):
+    process = str(os.environ.get('FISH_MEMORY_REMINDER', '')).strip()
+    on = process.lower() in LIFE_REMINDER_ON
+    user = _reminder_user_switch()
+    if on:
+        source = '进程环境变量 FISH_MEMORY_REMINDER=' + process
+    elif user.lower() in LIFE_REMINDER_ON:
+        source = '用户环境变量已设为 ' + user + '，当前后台进程还没读到，重启后生效'
+    else:
+        source = '未开启（用户环境变量 FISH_MEMORY_REMINDER 未设置）'
+    state = {'on': on, 'source': source, 'ledger_count': 0, 'last_state': '', 'last_receipt': ''}
+    path = root / 'data/qq/memory.db'
+    if not path.is_file():
+        return state
+    conn = _query_only(path)
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_reminders'").fetchone():
+            return state
+        state['ledger_count'] = int(conn.execute('SELECT COUNT(*) FROM memory_reminders').fetchone()[0])
+        row = conn.execute('SELECT state,receipt FROM memory_reminders ORDER BY updated DESC,id DESC LIMIT 1').fetchone()
+        if row:
+            state['last_state'] = str(row['state'] or '')
+            state['last_receipt'] = str(row['receipt'] or '')
+    finally:
+        conn.close()
+    return state
+
+
+def _life_memory(root):
+    state = {'kinds': {kind: 0 for kind in LIFE_KINDS},
+             'social': {kind: 0 for kind in LIFE_SOCIAL},
+             'open_events': 0, 'next_due': 0.0, 'next_due_text': ''}
+    path = root / 'data/qq/memory.db'
+    if not path.is_file():
+        return state
+    now = time.time()
+    conn = _query_only(path)
+    try:
+        for row in conn.execute("SELECT kind,COUNT(*) AS n FROM memories WHERE status='active' GROUP BY kind"):
+            if str(row['kind'] or '') in state['kinds']:
+                state['kinds'][str(row['kind'])] = int(row['n'])
+        for row in conn.execute("SELECT kind,COUNT(*) AS n FROM memories WHERE kind IN ('topic','thought','impression') "
+                                "AND status IN ('active','candidate') AND scope='owner' GROUP BY kind"):
+            state['social'][str(row['kind'])] = int(row['n'])
+        state['open_events'] = int(conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE kind='event' AND status='active' AND action='open'").fetchone()[0])
+        due = conn.execute("SELECT MIN(due) FROM memories WHERE kind='event' AND status='active' "
+                           "AND action='open' AND due>? AND due>0", (now,)).fetchone()[0]
+    finally:
+        conn.close()
+    if due:
+        state['next_due'] = float(due)
+        state['next_due_text'] = time.strftime('%Y-%m-%d %H:%M', time.localtime(float(due)))
+    return state
+
+
+# ---------------------------------------------------------------- chat traces
+# The audit kinds that record what happened to one group message: the
+# pre-screen score, the judge's verdict, or the reason no turn started at all.
+TRACE_KINDS = ('group_prescreen_skip', 'group_prescreen', 'group_fish_silent', 'group_fish_skipped')
+# English keys qq_agent_loop audits, in the owner's words. A key that is not
+# here is dropped rather than printed raw: the panel never shows a reason it
+# cannot read (no "unknown", no bare token).
+TRACE_REASON_TEXT = {
+    'not-woken': '本次未被唤醒', 'cooldown': '冷却中', 'limits': '达到上限', 'dive': '潜水中',
+    'not-worth-speaking': '判断层认为不值得开口', 'cursor-moved': '话头已被别人接走',
+    'paused': 'Fish 已暂停', 'cancelled': '本轮被取消', 'own-or-missing-sender': '没有识别到发言人',
+}
+# The five pre-screen dimensions, in scoring order.
+TRACE_DIMS = ('content', 'will', 'social', 'timing', 'coherence')
+# How far an audit row may sit from the message it decided.
+TRACE_WINDOW_S = 120.0
+
+
+def _epoch(text):
+    """Seconds of a stored 'YYYY-MM-DD HH:MM:SS' row, or None when it is not one."""
+    try:
+        return time.mktime(time.strptime(str(text)[:19], '%Y-%m-%d %H:%M:%S'))
+    except (TypeError, ValueError):
+        return None
+
+
+def _trace_number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _trace_reason(text):
+    """Chinese phrase of one audited reason, or '' when only an unknown key is left."""
+    text = ' '.join(str(text or '').split())
+    if not text:
+        return ''
+    head, _, rest = text.partition(':')
+    key = head.strip()
+    if key in TRACE_REASON_TEXT:
+        detail = rest.strip()
+        return TRACE_REASON_TEXT[key] + ('：' + detail if detail and not detail.isascii() else '')
+    if re.fullmatch(r'[A-Za-z][A-Za-z\- ]*', text):
+        return ''
+    return text
+
+
+def _group_trace(kind, reason):
+    """One group audit row as the panel's trace: score, five dimensions, reason."""
+    text = ' '.join(str(reason or '').split())
+    # The loop appends the chat to every audit reason; the panel shows the decision only.
+    text = re.sub(r'\s+group:[0-9A-Za-z:_\-]+$', '', text)
+    trace = {'kind': 'group', 'event': str(kind)}
+    score = re.search(r'预筛\s*([0-9]+(?:\.[0-9]+)?)', text)
+    threshold = re.search(r'阈值\s*([0-9]+(?:\.[0-9]+)?)', text)
+    dims = {key: float(value) for key, value in re.findall(r'([a-z]+)=([0-9]+(?:\.[0-9]+)?)', text)
+            if key in TRACE_DIMS}
+    if score:
+        trace['score'] = float(score.group(1))
+    if threshold:
+        trace['threshold'] = float(threshold.group(1))
+    if dims:
+        trace['dims'] = dims
+    judgement = text.partition('：')[2].partition('（')[0].strip() if '：' in text else text
+    phrase = _trace_reason(judgement)
+    if phrase:
+        trace['reason'] = phrase[:200]
+    return trace
+
+
+def _segment_kinds(segments):
+    """Distinct segment types of one stored message, in stored order."""
+    try:
+        data = json.loads(segments or '[]')
+    except ValueError:
+        return []
+    kinds = []
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get('type') or '').strip()
+        if kind and kind not in kinds:
+            kinds.append(kind)
+    return kinds
+
+
+def _payload_tools(payload):
+    """Tool names one inspected request carried, in call order."""
+    try:
+        data = json.loads(payload)
+    except ValueError:
+        return ()
+    names = []
+    for message in (data.get('messages') or []) if isinstance(data, dict) else []:
+        if not isinstance(message, dict) or str(message.get('role')) != 'assistant':
+            continue
+        for call in message.get('tool_calls') or []:
+            function = call.get('function') if isinstance(call, dict) else None
+            name = str((function or {}).get('name') or '').strip() if isinstance(function, dict) else ''
+            if name and name not in names:
+                names.append(name)
+    return tuple(names)
 
 
 class Workbench:
@@ -16,12 +208,16 @@ class Workbench:
         self.path = self.root / 'data/social/workbench.db'
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='fish-chat')
         self._chat_instance = None
+        self._delegation_instance = None
         self._selected_conversation = ''
         self._lock = threading.Lock()
+        self._job_cancels = {}
         with database(self.path) as db:
             db.execute('''CREATE TABLE IF NOT EXISTS jobs(
                 id TEXT PRIMARY KEY, conversation TEXT NOT NULL, status TEXT NOT NULL,
                 error TEXT NOT NULL DEFAULT '', created REAL NOT NULL, updated REAL NOT NULL)''')
+            if 'input_message' not in {row[1] for row in db.execute('PRAGMA table_info(jobs)')}:
+                db.execute('ALTER TABLE jobs ADD COLUMN input_message INTEGER')
             db.execute("UPDATE jobs SET status='failed',error='服务已重启，原记录保留，请继续任务',updated=? WHERE status IN ('queued','running')", (time.time(),))
 
     def chat(self):
@@ -32,15 +228,51 @@ class Workbench:
                 self._chat_instance = DesktopChat(self.root, 'qq', RuntimeManager(HarnessConfig(self.root)))
             return self._chat_instance
 
+    def delegation(self):
+        with self._lock:
+            if self._delegation_instance is None:
+                from task_delegation import TaskDelegation
+                self._delegation_instance = TaskDelegation(self.root, on_result=self._task_result)
+            return self._delegation_instance
+
+    def _task_result(self,row):
+        if row['config'].get('notify_target')!='desktop':
+            return
+        chat = self.chat()
+        with database(chat.db) as db:
+            exists = db.execute('SELECT 1 FROM conversations WHERE id=?',(row['source_conversation'],)).fetchone()
+        if not exists:
+            from governance import Governance
+            Governance(self.root).audit('task.result_saved','原客户端记录已删除；结果保留任务页，没有恢复被删对话',row['id'])
+            return
+        from chat_output import local_segments
+        bubbles = row['config'].get('result_bubbles') if row['status']=='completed' else None
+        if not bubbles:
+            bubbles = [{'kind':'text','text':'系统任务结果：'+row['title']+'\n状态：'+row['status']+'\n'+(row['error'] or row['result'])}]
+        from attachment_store import AttachmentStore
+        archive = AttachmentStore(self.root,'qq')
+        for index,bubble in enumerate(bubbles):
+            parts = [{**part,'task_id':row['id'],'origin':'fish-task' if row['status']=='completed' else 'system-task'} for part in local_segments(self.root,bubble)]
+            if index==0:
+                for artifact in row['artifacts']:
+                    file = archive.get(artifact['id'])
+                    if file:
+                        parts.append({'type':'file','id':file['id'],'name':file['name'],'path':file['path'],'resource_id':file['resource_id'],'task_id':row['id']})
+            chat._record(row['source_conversation'],'outbound',str(bubble.get('text') or ''),parts,'done')
+
     def settings(self):
         from governance import Governance
+        from vision_identification import settings as image_settings
         cfg = Governance(self.root).config()
         used = int(Governance(self.root).snapshot()['usage'].get('calls', 0))
         limit = int(cfg['max_daily_calls'])
         return {'paused': cfg['paused'], 'daily_limits': {
                     'limit': limit, 'used': used, 'remaining': max(0, limit - used),
                     'unlimited': not cfg['daily_usage_limits']['qq']},
-                'owner_permissions': cfg['owner_permissions']}
+                'owner_permissions': cfg['owner_permissions'],
+                'max_tool_calls_per_turn': cfg['max_tool_calls_per_turn'],
+                'chat_reasoning_effort': cfg['chat_reasoning_effort'], 'reply_display': cfg['reply_display'],
+                'image_identification_enabled':image_settings(self.root)['enabled']}
 
     def status(self):
         from governance import Governance
@@ -48,8 +280,7 @@ class Workbench:
         from social_context import SocialContext
         policy = Governance(self.root)
         contexts = SocialContext(self.root)
-        space = contexts.owner_space(policy.owner_id())
-        persona = space['persona'] if space else contexts.ensure_default('qq')
+        persona = contexts.active_persona('qq')
         mode = OwnerMode(self.root).get()
         from governance import CAPABILITIES
         from storage import read_json
@@ -61,6 +292,323 @@ class Workbench:
                 'persona': {k: persona[k] for k in ('id', 'name', 'body')},
                 'paths': {'root': str(self.root), 'workspace': mode['workspace']}}
 
+    # ---------------------------------------------------------------- chat view
+    def _role_db(self, name):
+        """One database of the role this workbench answers for."""
+        return self.root / 'data' / self.chat().role / name
+
+    def _group_ids(self):
+        from storage import read_json
+        config = read_json(self.root / 'channels/fish_qq/config.json', {})
+        return [str(value) for value in config.get('allowlist', {}).get('group_ids', [])]
+
+    @staticmethod
+    def _group_conversation_id(group_id):
+        return 'qq:group:%s:qq' % group_id
+
+    def _group_conversations(self):
+        """Whitelisted QQ groups as read-only conversations, newest activity first."""
+        rows = []
+        path = self._role_db('qq.db')
+        if path.is_file():
+            conn = _query_only(path)
+            try:
+                for group_id in self._group_ids():
+                    cid = self._group_conversation_id(group_id)
+                    row = conn.execute('SELECT updated_at FROM conversations WHERE id=?', (cid,)).fetchone()
+                    last = conn.execute('SELECT MAX(ts) FROM messages WHERE conversation_id=?', (cid,)).fetchone()[0]
+                    if row is None and not last:
+                        continue
+                    rows.append({'id': cid, 'title': '', 'kind': 'group', 'group_id': group_id,
+                                 'updated_at': str(last or row['updated_at'] or ''), 'read_only': True})
+            finally:
+                conn.close()
+        rows.sort(key=lambda row: row['updated_at'], reverse=True)
+        return rows
+
+    def _group_messages(self, group):
+        """The stored QQ thread of one group, oldest first, as chat rows."""
+        path = self._role_db('qq.db')
+        if not path.is_file():
+            return []
+        conn = _query_only(path)
+        try:
+            stored = [dict(row) for row in conn.execute(
+                'SELECT id,ts,direction,text,segments FROM messages WHERE conversation_id=? ORDER BY id DESC LIMIT 200',
+                (group['id'],)).fetchall()]
+        finally:
+            conn.close()
+        messages = []
+        for row in reversed(stored):
+            bot = str(row['direction'] or '') == 'outbound'
+            # A picture or a voice note carries no text; its segment types are the
+            # only honest label this page can show.
+            messages.append({'id': 'q%s' % row['id'], 'created_at': str(row['ts'] or ''),
+                             'direction': 'fish' if bot else 'owner', 'text': str(row['text'] or ''),
+                             'kinds': _segment_kinds(row['segments']), 'status': 'complete' if bot else ''})
+        return messages
+
+    def _group_traces(self, group, messages):
+        """The audit row that decided each group message, keyed by message id."""
+        stamps = [(message, _epoch(message['created_at'])) for message in messages]
+        stamps = [(message, stamp) for message, stamp in stamps if stamp is not None]
+        path = self._role_db('governance.db')
+        if not stamps or not path.is_file():
+            return {}
+        low = min(stamp for _, stamp in stamps) - TRACE_WINDOW_S
+        high = max(stamp for _, stamp in stamps) + TRACE_WINDOW_S
+        conn = _query_only(path)
+        try:
+            rows = conn.execute(
+                'SELECT ts,kind,reason FROM audit WHERE kind IN (%s) AND reason LIKE ? AND ts>=? AND ts<=? ORDER BY ts,id'
+                % ','.join('?' * len(TRACE_KINDS)),
+                (*TRACE_KINDS, '%group:' + group['group_id'],
+                 time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(low)),
+                 time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(high)))).fetchall()
+        finally:
+            conn.close()
+        traces = {}
+        for row in rows:
+            stamp = _epoch(row['ts'])
+            if stamp is None:
+                continue
+            decided = None
+            for message, when in stamps:
+                if when > stamp + 1.0:
+                    break
+                decided = (message, when)
+            if decided is None or stamp - decided[1] > TRACE_WINDOW_S:
+                continue
+            trace = _group_trace(row['kind'], row['reason'])
+            if len(trace) <= 2:
+                continue
+            known = traces.get(decided[0]['id'])
+            # A scored pre-screen explains more than the budget check that ran first.
+            if known is None or ('score' not in known and 'score' in trace):
+                traces[decided[0]['id']] = trace
+        return traces
+
+    def _persona_name(self, revision):
+        if not revision:
+            return ''
+        path = self.root / 'data/social/context.db'
+        if not path.is_file():
+            return ''
+        conn = _query_only(path)
+        try:
+            row = conn.execute('SELECT name FROM personas WHERE id=?', (revision,)).fetchone()
+        finally:
+            conn.close()
+        return str(row['name'] or '') if row else ''
+
+    # -------------------------------------------------------------- personas page
+    def _current_persona(self):
+        """The persona the owner's private chat is answering as right now."""
+        from governance import Governance
+        from social_context import SocialContext
+        return SocialContext(self.root).active_persona('qq')
+
+    def _persona_preview(self, text, revision_b=''):
+        """One line answered twice: by the live persona and by a comparison version.
+
+        Both sides are real model calls, and each side reports its own failure so a
+        broken comparison never hides the answer that did come back.
+        """
+        from social_context import SocialContext
+        line = str(text or '').strip()
+        if not line:
+            raise ValueError('请输入要预览的一句话')
+        if len(line) > 500:
+            raise ValueError('预览输入最多 500 字')
+        contexts = SocialContext(self.root)
+        live = self._current_persona()
+        versions = contexts.personas('qq')
+        if revision_b:
+            other = contexts.persona(contexts.resolve(revision_b) if len(revision_b) < 32 else revision_b)
+        else:
+            # "上一版" is the version created just before the live one; a live default
+            # that is missing from the history falls back to any other version.
+            index = next((position for position, row in enumerate(versions) if row['id'] == live['id']), None)
+            other = (versions[index + 1] if index is not None and index + 1 < len(versions)
+                     else next((row for row in versions if row['id'] != live['id']), live))
+        return {'model_calls': 2, 'text': line,
+                'results': [self._persona_reply(live, line), self._persona_reply(other, line)]}
+
+    def _persona_reply(self, persona, line):
+        """One preview answer, or that side's own error and how long it took."""
+        from fish_chat import respond
+        started = time.monotonic()
+        row = {'revision': str(persona['id']), 'name': str(persona['name'])}
+        try:
+            answer = respond(self.root, 'qq', persona=persona, history=[], history_source='persona-preview',
+                             memory='', scope='owner', references='', current=[{'type': 'text', 'text': line}],
+                             session='persona-preview:' + uuid.uuid4().hex, cancelled=threading.Event(),
+                             origin='persona-preview', output='text', tool_context='')
+        except Exception as exc:
+            return {**row, 'error': str(exc)[:400], 'elapsed_ms': int((time.monotonic() - started) * 1000)}
+        return {**row, 'text': str(answer or ''), 'elapsed_ms': int((time.monotonic() - started) * 1000)}
+
+    def _private_events(self, cid, space):
+        """Request starts of one private conversation, each with the tools it carried."""
+        role = self.chat().role
+        events = []
+        usage = self.root / 'data' / role / 'model-usage.db'
+        if usage.is_file():
+            conn = _query_only(usage)
+            try:
+                for row in conn.execute('SELECT created FROM requests WHERE origin=?', ('desktop-chat:' + cid,)):
+                    stamp = _trace_number(row['created'])
+                    if stamp is not None:
+                        events.append((stamp, ()))
+                for row in conn.execute('SELECT created,tool FROM tool_events WHERE origin LIKE ?', ('%' + cid + '%',)):
+                    stamp = _trace_number(row['created'])
+                    if stamp is not None:
+                        events.append((stamp, (str(row['tool'] or ''),)))
+            finally:
+                conn.close()
+        inspector = self.root / 'data/social/request-inspector.db'
+        if inspector.is_file():
+            conn = _query_only(inspector)
+            try:
+                rows = conn.execute(
+                    'SELECT created,payload FROM requests WHERE session=? OR (scope=? AND ?<>\'\')',
+                    ('desktop:' + cid, 'space:' + space, space)).fetchall()
+            finally:
+                conn.close()
+            for row in rows:
+                stamp = _trace_number(row['created'])
+                if stamp is not None:
+                    events.append((stamp, _payload_tools(str(row['payload'] or ''))))
+        events.sort(key=lambda item: item[0])
+        return events
+
+    @staticmethod
+    def _turn_trace(events, start, end, persona):
+        """Tools, elapsed time and persona of one reply, or None when nothing is known."""
+        # This turn's request starts fall after the previous message; only when a
+        # single-request turn began before that message row was stored (the usual
+        # case for a fast reply) does the window reach back a moment for it.
+        window = [(stamp, tools) for stamp, tools in events if start < stamp <= end]
+        if not window:
+            window = [(stamp, tools) for stamp, tools in events if start - 2.0 <= stamp <= end]
+        trace = {'kind': 'private'}
+        tools = []
+        for _, names in window:
+            for name in names:
+                if name and name not in tools:
+                    tools.append(name)
+        if tools:
+            trace['tools'] = tools[:12]
+        if window:
+            elapsed = int(round((end - min(stamp for stamp, _ in window)) * 1000))
+            if 50 <= elapsed <= 600000:
+                trace['elapsed_ms'] = elapsed
+        if persona:
+            trace['persona'] = persona
+        return trace if len(trace) > 1 else None
+
+    def _private_traces(self, cid, messages):
+        """What each private reply cost: tools, elapsed milliseconds, persona name."""
+        persona = ''
+        space = ''
+        path = self._role_db('desktop-chat.db')
+        if path.is_file():
+            conn = _query_only(path)
+            try:
+                row = conn.execute('SELECT revision,space_id FROM conversations WHERE id=?', (cid,)).fetchone()
+            finally:
+                conn.close()
+            if row:
+                persona = self._persona_name(str(row['revision'] or ''))
+                space = str(row['space_id'] or '')
+        events = self._private_events(cid, space)
+        traces = {}
+        previous = None
+        for message in messages:
+            stamp = _epoch(message.get('created_at'))
+            if stamp is None:
+                continue
+            assistant = str(message.get('direction') or '') in ('outbound', 'fish', 'out')
+            if assistant:
+                trace = self._turn_trace(events, stamp if previous is None else previous, stamp, persona)
+                if trace is not None:
+                    traces[str(message['id'])] = trace
+            previous = stamp
+        return traces
+
+    def _chat_view(self, cid):
+        """One conversation plus the why-chain of every message that has one.
+
+        Private conversations live in this role's desktop-chat.db; a group
+        conversation is one whitelisted QQ thread in qq.db, read only.
+        """
+        cid = str(cid or '')
+        groups = self._group_conversations()
+        group = next((row for row in groups if row['id'] == cid), None)
+        result = self.chat().snapshot('' if group is not None else cid)
+        for row in result['conversations']:
+            row['kind'] = 'private'
+        result['conversations'] = list(result['conversations']) + groups
+        if group is None:
+            result['kind'] = 'private'
+            traces = self._private_traces(result['conversation_id'], result['messages'])
+        else:
+            result.update({'conversation_id': group['id'], 'messages': self._group_messages(group),
+                           'settings': {}, 'kind': 'group', 'group_id': group['group_id']})
+            traces = self._group_traces(group, result['messages'])
+        for message in result['messages']:
+            message['trace'] = traces.get(str(message['id']), {})
+        from context_budget import snapshot as context_usage
+        session = ('group-fish:group:' + group['group_id']) if group else ''
+        result['context_usage'] = context_usage(self.root, session)['latest']
+        from turn_trace import latest as latest_thought
+        result['thought'] = latest_thought(self.root)
+        task_path = self.root/'data/delegation/tasks.db'
+        result['active_tasks'] = 0
+        if task_path.is_file():
+            with database(task_path) as db:
+                result['active_tasks'] = db.execute("SELECT COUNT(*) FROM tasks WHERE source_conversation=? AND status IN ('queued','starting','running','cancel_requested')",(result['conversation_id'],)).fetchone()[0]
+        return result
+
+    def delete_conversations(self, params):
+        """Delete private conversations and their messages; memory and QQ threads stay."""
+        raw = params.get('conversation_ids')
+        if raw is None:
+            single = params.get('conversation_id')
+            raw = [] if single in (None, '') else [single]
+        if not isinstance(raw, list) or not raw:
+            raise ValueError('请选择要删除的会话')
+        if len(raw) > 100:
+            raise ValueError('一次最多删除 100 个会话')
+        wanted = []
+        for value in raw:
+            if not isinstance(value, str):
+                raise ValueError('会话编号无效')
+            if value:
+                wanted.append(value)
+        chat = self.chat()
+        removed = {'conversations': 0, 'messages': 0, 'conversation_ids': []}
+        with chat._state_lock:
+            if chat.active_cid and chat.active_cid in wanted:
+                raise ValueError('这个会话正在回复，请先取消再删除')
+            conn = chat.connect()
+            try:
+                for cid in wanted:
+                    if cid.startswith('qq:group:'):
+                        raise ValueError('群聊记录属于 QQ 侧，这里只能删除私人会话')
+                    if conn.execute('SELECT 1 FROM conversations WHERE id=?', (cid,)).fetchone() is None:
+                        continue
+                    removed['messages'] += conn.execute('DELETE FROM messages WHERE conversation_id=?', (cid,)).rowcount
+                    conn.execute('DELETE FROM conversations WHERE id=?', (cid,))
+                    removed['conversations'] += 1
+                    removed['conversation_ids'].append(cid)
+                conn.commit()
+            finally:
+                conn.close()
+        if self._selected_conversation in removed['conversation_ids']:
+            self._selected_conversation = ''
+        return {'ok': True, **removed}
+
     def dispatch(self, action, params):
         from bot_control import BotControl
         from governance import Governance
@@ -71,6 +619,53 @@ class Workbench:
             raise ValueError('操作参数必须是对象')
         if action == 'status':
             return self.status()
+        if action == 'faults.status':
+            return self.fault_status()
+        if action == 'activity.recent':
+            # The same one stream the tool reads: private chat and every authorised
+            # group merged by real time. Read only, and the same bounds, so the folded
+            # panel can never show more than she could have answered from.
+            from group_read import recent_lines
+            bounded = {}
+            for key in ('hours', 'limit'):
+                if params.get(key) in (None, ''):
+                    continue
+                try:
+                    bounded[key] = int(params[key])
+                except (TypeError, ValueError):
+                    raise ValueError(key + ' 需为整数')
+            got = recent_lines(self.root, kind=str(params.get('kind') or 'all'), **bounded)
+            # rows is the array name the folded panel already reads; kind, hours and
+            # truncated ride along so the panel can say when it only shows the newest.
+            return {'kind': got['kind'], 'hours': got['hours'], 'truncated': got['truncated'],
+                    'rows': got['lines']}
+        if action.startswith('delegations.'):
+            service = self.delegation()
+            if action == 'delegations.list':
+                return service.list()
+            if action == 'delegations.submit':
+                cid = str(params.get('conversation_id') or '')
+                source = str(params.get('message_id') or '')
+                if cid:
+                    self.chat()._mode(cid)
+                    if source:
+                        with database(self.chat().db) as db:
+                            if not db.execute('SELECT 1 FROM messages WHERE id=? AND conversation_id=?', (source, cid)).fetchone():
+                                raise ValueError('来源消息不属于当前对话')
+                elif source:
+                    raise ValueError('来源消息需要绑定对话')
+                return service.submit(params.get('request_id'), params.get('title', ''), params.get('prompt', ''), cid, source)
+            if action == 'delegations.get':
+                return service.get(params['id'])
+            if action == 'delegations.cancel':
+                return service.cancel(params['id'])
+            if action == 'delegations.download':
+                return service.download(params['id'], params['artifact_id'], offset=params.get('offset', 0))
+            if action == 'delegations.open':
+                result = service.download(params['id'], params['artifact_id'])
+                os.startfile(result['path'])
+                return {'opened': True, 'path': result['path']}
+            raise ValueError('未知委托操作')
         if action == 'mode.set':
             from owner_mode import OwnerMode
             OwnerMode(self.root).set(params['mode'], params.get('workspace'))
@@ -79,6 +674,12 @@ class Workbench:
             return self.status()
         if action == 'settings.save':
             changes = {}
+            if 'image_identification_enabled' in params:
+                from vision_identification import settings as image_settings
+                from storage import write_json
+                value=params['image_identification_enabled']
+                if type(value) is not bool:raise ValueError('识图资料核对需为开关值')
+                write_json(self.root/'harness/vision-identification.json',{**image_settings(self.root),'enabled':value})
             for option in ('keep_background_on_close', 'qzone_enabled'):
                 if option not in params: continue
                 from storage import read_json, write_json
@@ -89,7 +690,7 @@ class Workbench:
                 if type(params['paused']) is not bool:
                     raise ValueError('暂停开关必须是布尔值')
                 changes['paused'] = params['paused']
-            for key in ('owner_permissions', 'send_policy'):
+            for key in ('owner_permissions', 'send_policy', 'max_tool_calls_per_turn', 'chat_reasoning_effort', 'reply_display'):
                 if key in params:
                     changes[key] = params[key]
             if 'daily_limits' in params:
@@ -108,7 +709,8 @@ class Workbench:
             return BotControl(self.root).execute('send_get')
         if action == 'memory.status':
             from memory_maintenance import MemoryMaintenance
-            return MemoryMaintenance(self.root).status()
+            from memory_engine import MemoryEngine
+            return {**MemoryMaintenance(self.root).status(), **MemoryEngine(self.root, 'qq').semantic_status()}
         if action.startswith('language.'):
             from language_workbench import LanguageWorkbench
             language = LanguageWorkbench(self.root)
@@ -139,8 +741,19 @@ class Workbench:
                 pass
             groups = []
             for group_id in config.get('allowlist', {}).get('group_ids', []):
+                from group_tests import GroupTests
+                from conversation_policy import community
+                # The switches that actually decide whether this group hears and answers live
+                # in the main policy: engine=fish reads it on every message. A group-test
+                # window keeps its own copy and used to be what this page showed, so the
+                # toggles wrote to a policy nobody was reading and appeared to do nothing.
                 value = GroupPolicy(self.root).config('group:' + str(group_id))
-                groups.append({'id': str(group_id), 'listen': bool(value.get('listen')), 'reply': bool(value.get('reply'))})
+                trial = GroupTests(self.root).current(str(group_id))
+                groups.append({'id': str(group_id), 'listen': bool(value.get('listen')), 'reply': bool(value.get('reply')),
+                    'topic': community(self.root, str(group_id)).get('topic',''),
+                    'route': 'normal', 'window': trial['id'] if trial else '',
+                    'engine': str(value.get('engine') or ''), 'learn': bool(value.get('learn')),
+                    'read': bool(value.get('read'))})
             bot = loop.get('bot') or config.get('bot') or {}
             return {'owner': Governance(self.root).owner_id(), 'bot': str(bot.get('id', 'unknown')),
                     'private_route': 'private:' + Governance(self.root).owner_id(), 'groups': groups,
@@ -156,35 +769,84 @@ class Workbench:
             allowed = {str(value) for value in config.get('allowlist', {}).get('group_ids', [])}
             if group_id not in allowed:
                 raise ValueError('只能修改白名单群')
-            changes = {key: params[key] for key in ('listen', 'reply') if key in params}
-            if not changes:
+            changes = {key: params[key] for key in ('listen', 'read', 'reply') if key in params}
+            if not changes and 'topic' not in params:
                 raise ValueError('没有要保存的群设置')
             if any(type(value) is not bool for value in changes.values()):
                 raise ValueError('群设置必须是开关值')
-            return GroupPolicy(self.root).configure('group:' + group_id, changes)
+            from group_tests import GroupTests
+            from conversation_policy import set_community
+            if 'topic' in params: set_community(self.root, group_id, params['topic'])
+            # Always the main policy: writing into a test window changed a copy that the
+            # fish engine never reads, which is why the switch looked broken.
+            policy = GroupPolicy(self.root)
+            return policy.configure('group:' + group_id, changes) if changes else policy.config('group:' + group_id)
         if action == 'personas.list':
             contexts = SocialContext(self.root)
             return [{**row, 'body': contexts.persona(row['id'])['body']} for row in PersonaLibrary(self.root).list()]
+        if action == 'personas.current':
+            persona = self._current_persona()
+            return {'id': persona['id'], 'revision': persona['id'],
+                    'name': persona['name'], 'body': persona['body']}
+        if action == 'personas.preview':
+            return self._persona_preview(params.get('text', ''), str(params.get('revision_b') or ''))
         if action == 'personas.save':
             return PersonaLibrary(self.root).add(params['name'], params['body'], source='DSH Fish 人格编辑')
+        if action == 'personas.create':
+            return PersonaLibrary(self.root).create(params.get('name', ''), params.get('body', ''))
+        if action == 'personas.clear':
+            # Deleting old versions is destructive: clear() writes backups/ first
+            # and keeps every persona a live window still points at.
+            return PersonaLibrary(self.root).clear()
         if action == 'personas.import':
             rows = PersonaLibrary(self.root).import_text(params['text'], name=params.get('name', '导入人格'), source=params.get('source', 'DSH Fish 导入'))
             return [{'id': row['id'], 'name': row['name'], 'body': row['body']} for row in rows]
         if action == 'personas.apply':
-            result = PersonaLibrary(self.root).apply(params['revision'])
-            cid = params.get('conversation_id') or self._selected_conversation
-            if cid:
-                self.chat().reload_persona(cid, params['revision'])
-            return result
+            return PersonaLibrary(self.root).apply(params['revision'])
+        if action == 'memory.overview':
+            from memory_digest import overview
+            from daily_curate import latest
+            # 最近一次每日整理：清了哪几条、收了哪几张图、各自什么理由。
+            return {**overview(self.root), 'daily_curate': latest(self.root)}
+        if action == 'memory.curate.run':
+            from daily_curate import run
+            force = params.get('force', False)
+            if type(force) is not bool:
+                raise ValueError('重做标记需为开关值')
+            return run(self.root, params.get('day'), force=force)
+        if action.startswith('memory.digest.'):
+            from memory_digest import build, list_digests, revise
+            if action == 'memory.digest.list':
+                limit = params.get('limit', 60)
+                if type(limit) is not int or not 1 <= limit <= 365:
+                    raise ValueError('小结条数需为 1 到 365 的整数')
+                return list_digests(self.root, limit, params.get('scope'))
+            if action == 'memory.digest.run':
+                force = params.get('force', False)
+                if type(force) is not bool:
+                    raise ValueError('重写标记需为开关值')
+                # scope picks the level: one day, one ISO week, or one calendar month.
+                period = params.get('period') or params.get('day') or None
+                written = build(self.root, params.get('scope', 'day'), period, force=force)
+                return {'digest': written, 'digests': list_digests(self.root, 60)}
+            if action == 'memory.digest.revise':
+                # The owner says what is wrong with one paragraph; the model rewrites
+                # that paragraph alone and the rewrite replaces the stored text.
+                period = params.get('period') or params.get('day') or ''
+                return revise(self.root, params.get('scope', 'day'), period, params.get('note', ''))
+        if action == 'memory.history':
+            store = MemoryStore(self.root, 'qq')
+            store.get(str(params['id']), scope='owner')
+            return store.history(str(params['id']))
         if action == 'memory.search':
-            return MemoryStore(self.root, 'qq').search(params.get('query', ''), scope='owner', limit=60)
+            return MemoryStore(self.root, 'qq').search(params.get('query', ''), scope='owner', limit=60, include_candidates=True)
         if action == 'memory.save':
             store = MemoryStore(self.root, 'qq')
             memory_id = params.get('id')
-            if memory_id and not any(row['id'] == memory_id for row in store.search(scope='owner', limit=10000)):
-                raise ValueError('记忆不在主人可编辑范围')
+            if memory_id:
+                store.get(memory_id, scope='owner')
             result = store.save(params['text'], category=params.get('category', '约定'), scope='owner', source='manual', source_text='主人在 DSH Fish 记忆页保存', memory_id=memory_id)
-            return next(row for row in store.search(scope='owner', limit=10000) if row['id'] == result['id'])
+            return store.get(result['id'], scope='owner')
         if action.startswith('schedules.'):
             control = BotControl(self.root)
             if action == 'schedules.list':
@@ -198,36 +860,61 @@ class Workbench:
         if action == 'chat.new':
             from owner_mode import OwnerMode
             contexts = SocialContext(self.root)
-            owner_space = contexts.owner_space(contexts.owner())
-            revision = params.get('revision') or (owner_space['revision'] if owner_space else contexts.ensure_default('qq')['id'])
-            mode = params.get('mode', 'chat')
-            workspace = OwnerMode(self.root).get()['workspace'] if mode == 'work' else ''
+            revision = contexts.active_persona('qq')['id']
+            mode = 'chat'
+            workspace = ''
             return {'id': self.chat().new(params.get('title', '新对话'), revision=revision, mode=mode, workspace=workspace)}
+        if action == 'media.preview':
+            from image_views import ImageViews
+            return ImageViews(self.root).preview(params['resource_id'], scope=None, mode=params.get('mode', 'original'), box=params.get('box'), frame=int(params.get('frame', 0)))
+        if action == 'media.open':
+            from doc_store import doc_detail
+            record = doc_detail(self.root, params['resource_id'], scope=None)
+            path = Path(record['original_path'])
+            if not path.is_file():
+                raise ValueError('图片原件已不存在')
+            os.startfile(str(path))
+            return {'ok': True, 'path': str(path)}
         if action.startswith('attachments.'):
-            import base64
             from attachment_store import AttachmentStore
-            cid = str(params['id'])
-            self.chat()._mode(cid)
             store = AttachmentStore(self.root, 'qq')
+            if action == 'attachments.config':
+                return store.limits()
+            cid = str(params['id'])
+            if not cid.strip():
+                raise ValueError('缺少附件所属记录编号')
+            if action == 'attachments.begin':
+                return store.begin(cid, params['name'], params['size'])
+            if action == 'attachments.chunk':
+                return store.append(cid, params['upload_id'], params['offset'], params['data'])
+            if action == 'attachments.finish':
+                return store.finish(cid, params['upload_id'])
+            if action == 'attachments.status':
+                return store.upload_status(cid, params['upload_id'])
             if action == 'attachments.import':
-                value = params.get('data', '')
-                if not isinstance(value, str) or len(value) > 28 * 1024 * 1024:
-                    raise ValueError('附件超过 20 MiB')
-                try:
-                    content = base64.b64decode(value, validate=True)
-                except ValueError:
-                    raise ValueError('附件内容读取失败') from None
-                return store.import_bytes(cid, params['name'], content)
+                raise ValueError('整份base64导入入口已退役，请使用当前客户端分块导入')
             if action == 'attachments.list':
                 return store.list(cid)
             if action == 'attachments.search':
                 return store.search(params.get('query', ''), conversation_id=cid)
+            if action in ('attachments.detail', 'attachments.open'):
+                record = store.detail(params['attachment_id'])
+                if action == 'attachments.detail':
+                    return record
+                path = Path(record['path'])
+                if not path.is_file():
+                    raise ValueError('附件原件已经不在记录的位置')
+                os.startfile(str(path))
+                return {'opened': True, 'path': str(path)}
+            raise ValueError('未知附件操作')
         if action in ('chat.list', 'chat.snapshot'):
-            result = self.chat().snapshot(params.get('id', ''))
+            result = self._chat_view(params.get('id', ''))
             self._selected_conversation = result['conversation_id']
             for row in result['messages']:
                 row['id'] = str(row['id'])
             return result
+        if action == 'chat.delete':
+            return self.delete_conversations(params)
         if action == 'chat.mode':
             return self.chat().set_mode(params['id'], params['mode'], params.get('workspace', ''))
         if action == 'chat.send':
@@ -237,11 +924,33 @@ class Workbench:
                 raise ValueError('请输入消息或添加附件')
             cid = str(params['id'])
             self.chat().snapshot(cid)
-            job = uuid.uuid4().hex
+            # A caller may reuse its submission id after a transport retry.
+            # Identical wording from two distinct submissions remains two requests.
+            job = str(params.get('request_id') or uuid.uuid4().hex)
+            if not __import__('re').fullmatch(r'[a-f0-9]{32}', job):
+                raise ValueError('请求编号无效')
             now = time.time()
             with database(self.path) as db:
+                db.execute('BEGIN IMMEDIATE')
+                old = db.execute('SELECT conversation,status FROM jobs WHERE id=?', (job,)).fetchone()
+                if old:
+                    if old['conversation'] != cid:
+                        raise ValueError('请求编号已用于另一会话')
+                    return {'job_id': job, 'status': old['status']}
                 db.execute('INSERT INTO jobs(id,conversation,status,created,updated) VALUES(?,?,?,?,?)', (job, cid, 'queued', now, now))
-            self._executor.submit(self._send, job, cid, text, attachments)
+            with self._lock:
+                self._job_cancels[job] = threading.Event()
+            try:
+                message_id = self.chat().receive(cid, text, attachments)
+                with database(self.path) as db:
+                    db.execute('UPDATE jobs SET input_message=? WHERE id=?', (message_id, job))
+            except Exception as exc:
+                with database(self.path) as db:
+                    db.execute("UPDATE jobs SET status='failed',error=?,updated=? WHERE id=?", (str(exc)[:500], time.time(), job))
+                with self._lock:
+                    self._job_cancels.pop(job, None)
+                raise
+            self._executor.submit(self._send, job, cid, text, attachments, message_id)
             return {'job_id': job, 'status': 'queued'}
         if action == 'chat.job':
             with database(self.path) as db:
@@ -251,29 +960,260 @@ class Workbench:
             return dict(row)
         if action == 'chat.cancel':
             cid = str(params['id'])
-            with database(self.path) as db:
-                db.execute("UPDATE jobs SET status='cancelled',updated=? WHERE conversation=? AND status='queued'", (time.time(), cid))
             chat = self.chat()
-            return chat.cancel() if chat.active_cid == cid else {'ok': True}
+            with chat._state_lock:
+                with database(self.path) as db:
+                    rows = db.execute("SELECT id FROM jobs WHERE conversation=? AND status IN ('queued','running')", (cid,)).fetchall()
+                    db.execute("UPDATE jobs SET status='cancelled',updated=? WHERE conversation=? AND status='queued'", (time.time(), cid))
+                # A worker may have claimed the job just before DesktopChat.send.
+                # Its event is already registered, so cancellation cannot be lost.
+                with self._lock:
+                    for row in rows:
+                        if row['id'] in self._job_cancels and not (chat.active_cid == cid and chat._committed):
+                            self._job_cancels[row['id']].set()
+                return chat.cancel() if chat.active_cid == cid else {'ok': True}
+        if action.startswith('library.'):
+            from doc_store import delete_doc, doc_detail, ingest, list_docs
+            from doc_store import search as search_documents
+            if action == 'library.status':
+                from doc_store import retrieval_status
+                return retrieval_status(self.root)
+            if action == 'library.open':
+                row = doc_detail(self.root, params['doc_id'])
+                path = Path(row['original_path'])
+                if not row['original_path'] or not path.is_file():
+                    raise ValueError('这份旧资料没有可打开的原件，已存切片仍可查看')
+                os.startfile(str(path))
+                return {'ok': True, 'path': str(path)}
+            if action == 'library.organize':
+                from doc_store import organize
+                return organize(self.root, params['action'], name=params.get('name', ''), doc_id=params.get('doc_id', ''))
+            if action == 'library.upload':
+                return ingest(self.root, params.get('name', ''), params.get('text', ''), kind=params.get('kind', 'txt'))
+            if action == 'library.list':
+                return list_docs(self.root)
+            if action == 'library.detail':
+                return doc_detail(self.root, params.get('doc_id') or params.get('id'))
+            if action == 'library.delete':
+                return delete_doc(self.root, params.get('doc_id') or params.get('id'))
+            if action == 'library.search':
+                limit = params.get('limit', 5)
+                if type(limit) is not int or not 1 <= limit <= 50:
+                    raise ValueError('检索条数需为 1 到 50 的整数')
+                return search_documents(self.root, params.get('query', ''), limit=limit, with_status=True)
+            raise ValueError('未知资料库操作')
+        if action.startswith('life.'):
+            if action == 'life.status':
+                return self.life_status()
+            if action == 'life.group.set':
+                chat = self._life_chat(params)
+                changes = {key: params[key] for key in ('listen', 'reply', 'learn') if key in params}
+                if not changes:
+                    raise ValueError('没有要保存的群开关')
+                if any(type(value) is not bool for value in changes.values()):
+                    raise ValueError('群开关必须是开关值')
+                from group_policy import GroupPolicy
+                GroupPolicy(self.root).configure(chat, changes)
+                return self.life_status()
+            if action == 'life.dive':
+                from group_policy import DIVE_MINUTES_RANGE, GroupPolicy
+                minutes = params.get('minutes')
+                if type(minutes) is not int or not DIVE_MINUTES_RANGE[0] <= minutes <= DIVE_MINUTES_RANGE[1]:
+                    raise ValueError('潜水时长需为 %d 到 %d 分钟的整数' % DIVE_MINUTES_RANGE)
+                chat = self._life_chat(params)
+                GroupPolicy(self.root).configure(chat, {'dive_until': time.time() + minutes * 60})
+                return self.life_status()
+            if action == 'life.wake':
+                from group_policy import GroupPolicy
+                chat = self._life_chat(params)
+                GroupPolicy(self.root).configure(chat, {'dive_until': 0})
+                return self.life_status()
+            if action == 'life.params':
+                from group_policy import GroupPolicy
+                chat = self._life_chat(params)
+                changes = {}
+                for key, low, high, name in (('active_cooldown_s', 0, 86400, '冷却秒数'),
+                                             ('followup_s', 0, 60, '回访秒数'),
+                                             ('max_active_hour', 0, 120, '每小时上限')):
+                    if key not in params:
+                        continue
+                    value = params[key]
+                    if type(value) is not int or not low <= value <= high:
+                        raise ValueError('%s需为 %d 到 %d 的整数' % (name, low, high))
+                    changes[key] = value
+                if 'wake_probability' in params:
+                    value = params['wake_probability']
+                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= float(value) <= 1:
+                        raise ValueError('唤醒概率需为 0 到 1 之间的小数')
+                    changes['wake_probability'] = float(value)
+                if not changes:
+                    raise ValueError('没有要保存的习惯设置')
+                GroupPolicy(self.root).configure(chat, changes)
+                return self.life_status()
+            if action == 'life.events':
+                return self.life_events(params)
+            if action == 'life.event.done':
+                return self._life_event_done(params)
+            if action == 'life.rehearse':
+                return '彩排请用命令行 python tools/rehearse_group.py --limit 6'
         raise ValueError('未知操作：' + str(action))
 
-    def _send(self, job, cid, text, attachments):
-        with database(self.path) as db:
-            row = db.execute('SELECT status FROM jobs WHERE id=?', (job,)).fetchone()
-            if row is None or row['status'] != 'queued':
-                return
-            db.execute("UPDATE jobs SET status='running',updated=? WHERE id=?", (time.time(), job))
+    def fault_status(self):
+        """Read observed failures and current bindings without creating defaults or tables."""
+        from governance import Governance
         try:
-            self.chat().send(cid, text, attachments)
+            value = Governance.read_faults(self.root)
+        except json.JSONDecodeError as exc:
+            raise ValueError('Fish 控制或 QQ 通道配置不是有效 JSON，请检查配置文件；状态尚未读取成功') from exc
+        except sqlite3.Error as exc:
+            raise ValueError('故障记录库无法读取，请检查本地数据库；状态尚未读取成功') from exc
+        configuration = []
+        path = self.root / 'channels/fish_qq/config.json'
+        try:
+            config = json.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError('QQ 通道配置无法读取，请检查配置文件；状态尚未读取成功') from exc
+        owner = str(config.get('allowlist', {}).get('owner_id', ''))
+        if not owner:
+            configuration.append({'source': 'owner_private', 'code': 'owner_missing',
+                                  'reason': '尚未绑定主人 QQ 账号，主人私聊和系统故障通知不能发送'})
+        context = self.root / 'data/social/context.db'
+        if not context.is_file():
+            configuration.append({'source': 'owner_private', 'code': 'persona_missing',
+                                  'reason': 'QQ 人格库尚未建立，请先选择人格；状态读取不会创建默认人格'})
+        else:
+            conn = _query_only(context)
+            try:
+                tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                selected = conn.execute("SELECT revision FROM agent_profiles WHERE role='qq'").fetchone() if 'agent_profiles' in tables else None
+                if selected is None:
+                    # Before first activation, report the existing migration source.
+                    selected = conn.execute("SELECT p.revision FROM owner_routes r JOIN spaces p ON p.id=r.space WHERE r.owner=?", (owner,)).fetchone()
+                if selected is None:
+                    selected = conn.execute("SELECT revision FROM default_personas WHERE role='qq'").fetchone()
+                revision = selected['revision'] if selected else ''
+                if not revision or not conn.execute("SELECT 1 FROM personas WHERE id=? AND role='qq'", (revision,)).fetchone():
+                    configuration.append({'source': 'owner_private', 'code': 'persona_missing',
+                                          'reason': '当前 Fish 活动人格不存在，请重新选择现存预设；没有切换默认人格'})
+            except sqlite3.Error:
+                configuration.append({'source': 'owner_private', 'code': 'context_read_error',
+                                      'reason': 'QQ 人格库无法读取或结构不完整，请检查本地数据；没有创建或替换人格'})
+            finally:
+                conn.close()
+        return {**value, 'configuration': configuration, 'now': time.time()}
+
+    # ---------------------------------------------------------------- life page
+    def _life_allowlist(self):
+        from storage import read_json
+        config = read_json(self.root / 'channels/fish_qq/config.json', {})
+        return [str(value) for value in config.get('allowlist', {}).get('group_ids', [])]
+
+    def _life_chat(self, params):
+        allowed = self._life_allowlist()
+        raw = str(params.get('chat') or '').strip()
+        if not raw:
+            if len(allowed) == 1:
+                return 'group:' + allowed[0]
+            raise ValueError('请选择要设置的群')
+        number = raw.split(':', 1)[1] if raw.startswith('group:') else raw
+        if number not in allowed:
+            raise ValueError('只能操作白名单里的群')
+        return 'group:' + number
+
+    def _life_group(self, chat):
+        from group_policy import DEFAULTS
+        stored = {}
+        path = self.root / 'data/social/group-policy.db'
+        if path.is_file() and chat:
+            conn = _query_only(path)
+            try:
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='groups'").fetchone():
+                    row = conn.execute('SELECT config FROM groups WHERE chat=?', (chat,)).fetchone()
+                    if row:
+                        stored = json.loads(row['config'] or '{}')
+            finally:
+                conn.close()
+        config = {**DEFAULTS, **stored}
+        allowed = self._life_allowlist()
+        return {'chat': chat, 'engine': str(config['engine']), 'listen': bool(config['listen']),
+                'reply': bool(config['reply']), 'learn': bool(config['learn']), 'read': bool(config['read']),
+                'dive_until': float(config['dive_until'] or 0),
+                'wake_probability': float(config['wake_probability']),
+                'active_cooldown_s': int(config['active_cooldown_s']),
+                'followup_s': int(config['followup_s']), 'reply_limits': bool(config['reply_limits']),
+                'max_active_hour': int(config['max_active_hour']),
+                'groups': ['group:' + value for value in allowed]}
+
+    def life_status(self):
+        allowed = self._life_allowlist()
+        chat = 'group:' + allowed[0] if allowed else ''
+        return {'now': time.time(), 'group': self._life_group(chat),
+                'reminder': _life_reminder(self.root), 'memory': _life_memory(self.root), 'estimate': {}}
+
+    def life_events(self, params):
+        from memory_store import MemoryStore
+        limit = params.get('limit', 20)
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('事件条数需为 1 到 100 的整数')
+        path = self.root / 'data/qq/memory.db'
+        if not path.is_file():
+            return []
+        store = MemoryStore(self.root, 'qq')
+        conn = _query_only(path)
+        try:
+            scopes, _owner = store._visible_scopes(conn, 'owner')
+            holes = ','.join('?' * len(scopes))
+            rows = conn.execute(
+                "SELECT id,text,action,due,created FROM memories WHERE scope IN (%s) "
+                "AND kind='event' AND status='active' "
+                "ORDER BY CASE WHEN action=? THEN 0 ELSE 1 END, "
+                "CASE WHEN due=0 THEN 1 ELSE 0 END, due ASC, created DESC LIMIT ?" % holes,
+                (*scopes, 'open', limit)).fetchall()
+        finally:
+            conn.close()
+        return [{'id': str(row['id']), 'text': ' '.join(str(row['text'] or '').split())[:80],
+                 'action': str(row['action'] or 'open'), 'state': LIFE_EVENT_STATE.get(str(row['action'] or 'open'), ''),
+                 'due': float(row['due'] or 0), 'created': float(row['created'] or 0)} for row in rows]
+
+    def _life_event_done(self, params):
+        from memory_store import MemoryStore
+        memory_id = str(params.get('id') or '').strip()
+        if not memory_id:
+            raise ValueError('请指定要处理的事件')
+        cancel = params.get('cancel', False)
+        if type(cancel) is not bool:
+            raise ValueError('取消标记需为开关值')
+        store = MemoryStore(self.root, 'qq')
+        result = store.cancel(memory_id, scope='owner') if cancel else store.complete(memory_id, scope='owner')
+        if not result.get('ok'):
+            raise ValueError(str(result.get('reason') or '事件没有更新成功'))
+        return self.life_events({'limit': params.get('limit', 20)})
+
+    def _send(self, job, cid, text, attachments, message_id=None):
+        with database(self.path) as db:
+            changed = db.execute("UPDATE jobs SET status='running',updated=? WHERE id=? AND status='queued'", (time.time(), job)).rowcount
+            if not changed:
+                with self._lock:
+                    self._job_cancels.pop(job, None)
+                return
+        try:
+            with self._lock:
+                cancelled = self._job_cancels.setdefault(job, threading.Event())
+            self.chat().send(cid, text, attachments, cancelled=cancelled, message_id=message_id)
         except Exception as error:
             from dsh_web import safe_runtime_error
-            state, message = 'failed', safe_runtime_error(str(error) or type(error).__name__)
+            state = 'cancelled' if isinstance(error, InterruptedError) else 'failed'
+            message = safe_runtime_error(str(error) or type(error).__name__)
         else:
             state, message = 'complete', ''
         with database(self.path) as db:
             db.execute('UPDATE jobs SET status=?,error=?,updated=? WHERE id=?', (state, message, time.time(), job))
+        with self._lock:
+            self._job_cancels.pop(job, None)
 
     def close(self):
+        if self._delegation_instance:
+            self._delegation_instance.close()
         if self._chat_instance:
             self._chat_instance.cancel()
         self._executor.shutdown(wait=False, cancel_futures=True)

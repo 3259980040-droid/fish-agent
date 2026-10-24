@@ -1,0 +1,17 @@
+{
+  "enabled": true,
+  "weights": {
+    "hair": 2,
+    "eyes": 2,
+    "head_accessory": 3,
+    "outfit": 2,
+    "ears_tail": 1,
+    "text": 3
+  },
+  "community_weight": 1,
+  "max_queries": 2,
+  "max_pages": 2,
+  "cache_hours": 168,
+  "min_score": 60,
+  "min_gap": 15
+}

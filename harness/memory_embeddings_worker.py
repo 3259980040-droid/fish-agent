@@ -72,11 +72,34 @@ def _unpack(blob):
     return list(struct.unpack('<%df' % count, blob))
 
 
-def _embed_texts(texts):
+def _embed_texts(texts, *, query=False):
     if _embedder is None:
         raise RuntimeError('模型尚未加载')
-    outputs = list(_embedder.passage_embed(list(texts), batch_size=16))
-    return [_pack(vector) for vector in outputs]
+    # The encoder has a real token window. Cover long inputs in token slices
+    # rather than dropping the question's tail at a character boundary.
+    from tokenizers import Tokenizer
+    original = _embedder.model.tokenizer
+    maximum = int((original.truncation or {}).get('max_length') or 0)
+    if maximum <= 8:
+        raise ValueError('嵌入模型没有声明有效的token窗口')
+    tokenizer = Tokenizer.from_str(original.to_str())
+    tokenizer.no_truncation()
+    pieces, ranges = [], []
+    for text in texts:
+        ids = tokenizer.encode(text, add_special_tokens=False).ids
+        start = len(pieces)
+        for offset in range(0, max(1, len(ids)), maximum - 8):
+            pieces.append(tokenizer.decode(ids[offset:offset+maximum-8], skip_special_tokens=True))
+        ranges.append((start, len(pieces)))
+    embed = _embedder.query_embed if query else _embedder.passage_embed
+    vectors = list(embed(pieces, batch_size=16))
+    merged = []
+    for start, end in ranges:
+        values = [[float(value) for value in vector] for vector in vectors[start:end]]
+        average = [sum(column) / len(values) for column in zip(*values)]
+        norm = sum(value*value for value in average) ** .5
+        merged.append(_pack([value / norm if norm else 0. for value in average]))
+    return merged
 
 
 def op_hello(request):
@@ -129,7 +152,7 @@ def op_embed(request):
     texts = request.get('texts') or []
     if not isinstance(texts, list) or not texts or len(texts) > 64 or any(not isinstance(t, str) for t in texts):
         raise ValueError('texts 需为 1–64 条字符串')
-    blobs = _embed_texts([text[:4000] for text in texts])
+    blobs = _embed_texts(texts, query=request.get('kind') == 'query')
     return {'status': 'ok', 'vectors': [blob.hex() for blob in blobs], 'dim': _state['dim']}
 
 

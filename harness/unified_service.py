@@ -56,11 +56,16 @@ def main():
             pass
     finally:
         host.stop.set()
+        state.update(status='stopping')
+        write_json(state_path,state)
         try:
             services.shutdown()
         finally:
             if getattr(host, '_workbench', None):
                 host._workbench.close()
+            if getattr(host,'scheduler_thread',None):
+                host.scheduler_thread.join()
+            host.computer.interaction.close()
             host.server.shutdown()
             host.server.server_close()
             state.update(status='stopped', stopped=time.time())

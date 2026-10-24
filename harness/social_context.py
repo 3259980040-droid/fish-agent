@@ -12,7 +12,7 @@ import time
 import uuid
 from pathlib import Path
 
-from storage import database, read_json, write_json
+from storage import database, read_json, write_json, locked_settings
 
 
 def identifier(value):
@@ -33,6 +33,9 @@ class SocialContext:
                 digest TEXT NOT NULL, parent TEXT NOT NULL, created REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS persona_output_modes(
                 revision TEXT PRIMARY KEY REFERENCES personas(id), mode TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS agent_profiles(role TEXT PRIMARY KEY,revision TEXT NOT NULL,updated REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS default_personas(
+                role TEXT PRIMARY KEY, revision TEXT NOT NULL REFERENCES personas(id));
             CREATE TABLE IF NOT EXISTS approvals(
                 revision TEXT PRIMARY KEY REFERENCES personas(id), owner TEXT NOT NULL,
                 digest TEXT NOT NULL, created REAL NOT NULL);
@@ -108,8 +111,43 @@ class SocialContext:
         path = self.root / name
         return path.read_text(encoding='utf-8') if path.is_file() else ''
 
+    @locked_settings
+    def active_persona(self, role='qq'):
+        """The Agent's active revision is independent of deletable chat windows."""
+        with database(self.path) as db:
+            selected = db.execute('SELECT revision FROM agent_profiles WHERE role=?', (role,)).fetchone()
+            if selected:
+                return self.persona(selected['revision'])
+            # Import the existing selection once; do not create a replacement window.
+            route = db.execute('SELECT space FROM owner_routes WHERE owner=?', (self.owner(),)).fetchone() if role == 'qq' else None
+            if route:
+                space = db.execute('SELECT revision FROM spaces WHERE id=? AND role=?', (route['space'], role)).fetchone()
+                if not space:
+                    raise ValueError('当前人格绑定的历史窗口不存在，尚未迁入Agent活动配置')
+                revision = space['revision']
+            else:
+                default = db.execute('SELECT revision FROM default_personas WHERE role=?', (role,)).fetchone()
+                revision = default['revision'] if default else ''
+        persona = self.persona(revision) if revision else self.ensure_default(role)
+        with database(self.path) as db:
+            db.execute('INSERT OR IGNORE INTO agent_profiles VALUES(?,?,?)', (role, persona['id'], time.time()))
+            selected = db.execute('SELECT revision FROM agent_profiles WHERE role=?', (role,)).fetchone()
+        return self.persona(selected['revision'])
+
+    @locked_settings
+    def apply_active_persona(self, role, revision):
+        persona = self.persona(revision)
+        if persona['role'] != role:
+            raise ValueError('人格不属于当前Agent')
+        with database(self.path) as db:
+            db.execute('INSERT OR REPLACE INTO agent_profiles VALUES(?,?,?)', (role, revision, time.time()))
+        return persona
+
     def ensure_default(self, role):
         with database(self.path) as db:
+            selected = db.execute('SELECT revision FROM default_personas WHERE role=?', (role,)).fetchone()
+            if selected:
+                return self.persona(selected['revision'])
             row = db.execute('SELECT id FROM personas WHERE role=? ORDER BY created,id LIMIT 1', (role,)).fetchone()
         if row:
             return self.persona(row['id'])
@@ -118,6 +156,16 @@ class SocialContext:
         if agent is None:
             raise ValueError('角色未配置')
         return self.save_persona(role, agent.name, self._text(agent.persona) or '请按当前会话的明确请求认真回复。')
+
+    def set_default(self, role, revision):
+        persona = self.persona(revision)
+        if persona['role'] != role:
+            raise ValueError('人格不属于此角色')
+        with database(self.path) as db:
+            db.execute('INSERT OR REPLACE INTO default_personas VALUES(?,?)', (role, revision))
+            db.execute('INSERT INTO audit(kind,subject,actor,created) VALUES(?,?,?,?)',
+                       ('default_persona_selected', revision, 'local-console', time.time()))
+        return persona
 
     def persona(self, revision):
         identifier(revision)
@@ -209,7 +257,16 @@ class SocialContext:
         return result
 
     def directory(self, sid):
-        space = self.space(sid)
+        sid = identifier(sid)
+        try:
+            space = self.space(sid)
+        except ValueError:
+            with database(self.path) as db:
+                if db.execute('SELECT 1 FROM spaces WHERE id=?', (sid,)).fetchone():
+                    raise
+            # A window that was deleted still needs a scratch directory: leftover task
+            # rows point at it, and one stale row must not fail an unrelated reply.
+            return self.root / 'data' / 'qq' / 'spaces' / sid
         return self.root / 'data' / space['role'] / 'spaces' / sid
 
     def bind_runtime(self, sid, session):

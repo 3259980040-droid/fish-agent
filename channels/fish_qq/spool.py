@@ -80,7 +80,7 @@ class Outbox:
         )
         tmp.replace(self.path)
 
-    def add(self, action: str, payload: dict[str, Any], ttl_s: float = 600) -> dict[str, Any]:
+    def add(self, action: str, payload: dict[str, Any], ttl_s: float = 600, *, origin_kind: str = 'unknown') -> dict[str, Any]:
         now = time.time()
         record = {
             "id": f"ob-{uuid.uuid4().hex[:12]}",
@@ -89,23 +89,54 @@ class Outbox:
             "created_at": now,
             "expires_at": now + ttl_s,
             "status": "queued",
+            "origin_kind": origin_kind,
         }
         records = self._read()
         records.append(record)
         self._write(records)
         return record
 
-    def set_status(self, record_id: str, status: str) -> None:
+    def set_status(self, record_id: str, status: str, *, receipt: dict[str, Any] | None = None) -> None:
         records = self._read()
         for record in records:
             if record.get("id") == record_id:
                 record["status"] = status
                 record["updated_at"] = time.time()
+                if receipt is not None:
+                    record['receipt'] = dict(receipt)
                 break
         self._write(records)
 
+    @staticmethod
+    def _public_receipt(record: dict[str, Any], chat_id: str) -> dict[str, Any] | None:
+        payload, receipt = record.get('payload') or {}, record.get('receipt') or {}
+        if (record.get('status') != 'confirmed' or payload.get('chat_id') != chat_id
+                or receipt.get('chat_id') != chat_id or not receipt.get('message_id')):
+            return None
+        return {'chat_id': chat_id, 'message_id': str(receipt['message_id']),
+                'origin_kind': record.get('origin_kind', 'unknown'),
+                'confirmed_at': record.get('updated_at', 0),
+                'text': ''.join(str(s.get('text', '')) for s in payload.get('segments', []) if s.get('type') == 'text')[:800]}
+
+    def find_message(self, chat_id: str, message_id: str) -> dict[str, Any] | None:
+        """Public destination projection; never return execution or private request data."""
+        for record in reversed(self._read()):
+            row = self._public_receipt(record, chat_id)
+            if row and row['message_id'] == str(message_id): return row
+        return None
+
+    def recent_confirmed(self, chat_id: str, *, since: float, until: float, limit: int = 6) -> list[dict[str, Any]]:
+        rows = [row for record in self._read() if (row := self._public_receipt(record, chat_id))
+                and since < row['confirmed_at'] <= until]
+        return sorted(rows, key=lambda row: row['confirmed_at'], reverse=True)[:max(1, min(limit, 8))]
+
     def get(self, record_id: str) -> dict[str, Any] | None:
         return next((r for r in self._read() if r.get("id") == record_id), None)
+
+    def find_request(self, chat_id: str, request_id: str) -> dict[str, Any] | None:
+        return next((r for r in reversed(self._read()) if r.get('action')=='send_message'
+            and (r.get('payload') or {}).get('chat_id')==chat_id
+            and str((r.get('payload') or {}).get('idempotency_key',''))==request_id),None)
 
     def recover(self) -> dict[str, list[dict[str, Any]]]:
         """inflight → unknown；queued 保留，返回给调用方决定是否重试。"""

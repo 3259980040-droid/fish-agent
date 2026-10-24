@@ -1,386 +1,385 @@
-"""Per-role attachment ingestion, on-disk archive and searchable text index.
-
-Layout:  data/<role>/attachments/<conversation>/<content-id>/<safe filename>
-Index:   data/<role>/attachments.db  (SQLite + FTS5)
-
-The content id is a SHA-256 of the stored bytes: the same content imported
-again (same role and conversation) is reported as a duplicate and the existing
-row/file is returned without writing a second copy. Extraction runs locally
-(stdlib only); no model call is made to read documents.
-"""
+"""Stream original attachments; doc_store owns the sole resource/text/vector index."""
 from __future__ import annotations
-
+import base64
+import codecs
 import hashlib
-import html
-import io
 import json
+import os
 import re
 import shutil
 import sqlite3
 import time
 import uuid
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 from xml.etree import ElementTree
 
-MAX_BYTES = 20 * 1024 * 1024          # same limit as workbench/browser uploads
-EXCERPT_BYTES = 256 * 1024            # how much text to extract from the start
-TEXT_EXTENSIONS = {"txt", "md", "markdown", "csv", "tsv", "log", "json", "yaml", "yml", "xml", "ini",
-                   "py", "js", "ts", "html", "htm"}
-IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "webp", "bmp"}
-AUDIO_EXTENSIONS = {"mp3", "wav", "ogg", "silk", "amr", "m4a", "flac", "aac"}
-VIDEO_EXTENSIONS = {"mp4", "mov", "mkv", "webm", "avi", "flv"}
-DOCUMENT_EXTENSIONS = {"docx", "pdf"} | TEXT_EXTENSIONS
-_UNSAFE = re.compile(r"[^0-9A-Za-z\u4e00-\u9fff._\- ()\[\]]+")
+CHUNK_BYTES = 1024 * 1024
+EXCERPT_BYTES = 1024 * 1024
+READ_BYTES = 128 * 1024
+TEXT_EXTENSIONS = {'txt','md','markdown','csv','tsv','log','json','yaml','yml','xml','ini','py','js','ts','html','htm','css','sh','ps1','sql'}
+IMAGE_EXTENSIONS = {'jpg','jpeg','png','gif','webp','bmp'}
+AUDIO_EXTENSIONS = {'mp3','wav','ogg','silk','amr','m4a','flac','aac'}
+VIDEO_EXTENSIONS = {'mp4','mov','mkv','webm','avi','flv'}
+DOCUMENT_EXTENSIONS = {'docx','pdf'} | TEXT_EXTENSIONS
 
 
-def safe_filename(name: str, default: str = "attachment") -> str:
-    """A name that is safe on Windows and cannot escape the conversation tree."""
-    base = Path(str(name or "").replace("\\", "/")).name.strip().strip(".")
-    cleaned = _UNSAFE.sub("_", base)[:120].strip(" .")
-    return cleaned or default
+def safe_filename(name, default='attachment'):
+    base = Path(str(name or '').replace('\\','/')).name.strip().strip('.')
+    return re.sub(r'[^0-9A-Za-z\u4e00-\u9fff._\- ()\[\]]+','_',base)[:120].strip(' .') or default
 
 
-def kind_for(extension: str) -> str:
-    ext = extension.lower().lstrip(".")
-    if ext in IMAGE_EXTENSIONS:
-        return "image"
-    if ext in AUDIO_EXTENSIONS:
-        return "audio"
-    if ext in VIDEO_EXTENSIONS:
-        return "video"
-    return "file"
+def safe_conversation(chat_id):
+    return 'qq-' + re.sub(r'[^0-9A-Za-z_.-]+','_',str(chat_id or ''))[:80]
 
 
-def _extension(name: str) -> str:
-    return Path(str(name or "")).suffix.lower().lstrip(".")
+def kind_for(extension):
+    ext = extension.lower().lstrip('.')
+    return 'image' if ext in IMAGE_EXTENSIONS else 'audio' if ext in AUDIO_EXTENSIONS else 'video' if ext in VIDEO_EXTENSIONS else 'file'
 
 
-def _decode(data: bytes) -> tuple[str, str | None]:
-    """Decode plain text; report a BOM/UTF-16 detection instead of mojibake."""
-    if data.startswith(b"\xef\xbb\xbf"):
-        return data[3:].decode("utf-8", "replace"), None
-    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return data.decode("utf-16", "replace"), "utf-16"
+def _now():
+    return time.strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _encoding(data):
+    if data.startswith(b'\xef\xbb\xbf'): return 'utf-8-sig'
+    if data.startswith((b'\xff\xfe',b'\xfe\xff')): return 'utf-16'
     try:
-        return data.decode("utf-8"), None
+        codecs.getincrementaldecoder('utf-8')().decode(data,final=False)
+        return 'utf-8'
     except UnicodeDecodeError:
-        try:
-            return data.decode("gb18030"), "gb18030"
-        except UnicodeDecodeError:
-            return data.decode("utf-8", "replace"), "utf-8 (替换了无效字节)"
+        return 'gb18030'
 
 
-def _strip_html(text: str) -> str:
-    text = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", text)
-    text = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</li>|</h[1-6]>", "\n", text)
-    return html.unescape(re.sub(r"<[^>]+>", " ", text))
-
-
-def _docx_text(data: bytes) -> tuple[str, list[str]]:
-    notes: list[str] = []
-    with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        names = set(archive.namelist())
-        if "word/document.xml" not in names:
-            raise ValueError("DOCX 中没有 word/document.xml")
-        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-        root = ElementTree.fromstring(archive.read("word/document.xml"))
-        paragraphs = []
-        for para in root.iter("{%s}p" % ns["w"]):
-            pieces = []
-            for node in para.iter():
-                if node.tag == "{%s}t" % ns["w"] and node.text:
-                    pieces.append(node.text)
-                elif node.tag == "{%s}tab" % ns["w"]:
-                    pieces.append("\t")
-                elif node.tag in ("{%s}br" % ns["w"], "{%s}cr" % ns["w"]):
-                    pieces.append("\n")
-            paragraphs.append("".join(pieces))
-        text = "\n".join(paragraphs)
-        images = sum(1 for n in names if n.startswith("word/media/"))
-        if images:
-            notes.append(f"DOCX 含 {images} 个内嵌媒体文件，仅归档未解析")
-    return text, notes
-
-
-def _pdf_text(data: bytes) -> tuple[str, str]:
-    """Extract text only with a real installed extractor; never guess."""
-    if not data.startswith(b"%PDF"):
-        raise ValueError("不是有效的 PDF 文件")
+def parse_path(path, name):
+    ext, size = Path(name).suffix.lower().lstrip('.'), path.stat().st_size
+    result = dict(status='unsupported',text='',format=ext,error='',notes=[],original_bytes=size,indexed_chars=0,complete=False)
     try:
-        from pypdf import PdfReader  # type: ignore
-    except ImportError:
-        try:
-            import pdfminer  # type: ignore  # noqa: F401
-        except ImportError:
-            raise LookupError("未安装 PDF 文本提取器（pypdf/pdfminer），原文件已保存但未读取") from None
-        raise LookupError("仅安装了基础 pdfminer，未提供可用的提取接口，原文件已保存但未读取")
-    reader = PdfReader(io.BytesIO(data))
-    pages = []
-    for page in reader.pages[:200]:
-        pages.append(page.extract_text() or "")
-    return "\n\f\n".join(pages), f"pypdf，读取 {len(reader.pages)} 页"
-
-
-def extract_text(filename: str, data: bytes) -> dict[str, Any]:
-    """Parse a document payload. Returns {status, text, format, error}."""
-    ext = _extension(filename)
-    notes: list[str] = []
-    try:
-        if ext == "docx":
-            text, notes = _docx_text(data)
-            fmt = "docx (OOXML)"
-        elif ext == "pdf":
-            text, fmt = _pdf_text(data)
-        elif ext in TEXT_EXTENSIONS:
-            text, encoding = _decode(data)
-            if encoding:
-                notes.append(f"编码 {encoding}")
-            if ext in ("html", "htm"):
-                text = _strip_html(text)
-            fmt = ext or "text"
+        if ext in TEXT_EXTENSIONS:
+            with path.open('rb') as file: raw = file.read(EXCERPT_BYTES)
+            encoding = _encoding(raw)
+            text = codecs.getincrementaldecoder(encoding)(errors='replace').decode(raw,final=len(raw)==size)
+            result.update(text=text,encoding=encoding,parsed_bytes=len(raw),parsed_start=0,parsed_end=len(raw),complete=len(raw)==size,range_kind='original-bytes')
+        elif ext == 'pdf':
+            from pypdf import PdfReader
+            reader = PdfReader(str(path))
+            texts, chars, count = [], 0, 0
+            for page in reader.pages:
+                text = page.extract_text() or ''
+                texts.append(text[:max(0,EXCERPT_BYTES-chars)])
+                chars += len(text); count += 1
+                if chars >= EXCERPT_BYTES or count >= 200: break
+            result.update(text='\n\f\n'.join(texts),parsed_pages=count,total_pages=len(reader.pages),complete=count==len(reader.pages) and chars<=EXCERPT_BYTES,range_kind='pdf-pages')
+        elif ext == 'docx':
+            with zipfile.ZipFile(path) as archive:
+                info = archive.getinfo('word/document.xml')
+                parser = ElementTree.XMLPullParser(events=('end',))
+                texts, consumed, chars = [], 0, 0
+                with archive.open(info) as stream:
+                    while consumed < 8*EXCERPT_BYTES and chars < EXCERPT_BYTES:
+                        block = stream.read(min(65536,8*EXCERPT_BYTES-consumed))
+                        if not block: break
+                        consumed += len(block); parser.feed(block)
+                        for _,node in parser.read_events():
+                            if node.tag.endswith('}p'):
+                                paragraph = ''.join(n.text or '' for n in node.iter() if n.tag.endswith('}t'))
+                                texts.append(paragraph[:max(0,EXCERPT_BYTES-chars)]); chars += len(paragraph)+1; node.clear()
+                result.update(text='\n'.join(texts),parsed_xml_bytes=consumed,total_xml_bytes=info.file_size,complete=consumed==info.file_size and chars<=EXCERPT_BYTES,range_kind='docx-xml-bytes')
         else:
-            return {"status": "unsupported", "text": "", "format": ext or "unknown",
-                    "error": f"暂不支持解析 .{ext or '?'} 文档（原文件已保存）", "notes": notes}
-    except LookupError as exc:
-        return {"status": "unsupported", "text": "", "format": ext, "error": str(exc), "notes": notes}
-    except (ValueError, KeyError, OSError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
-        return {"status": "failed", "text": "", "format": ext,
-                "error": f"解析失败：{type(exc).__name__}: {str(exc)[:160]}（原文件已保存）", "notes": notes}
-    text = text.replace("\x00", "").strip()
-    if not text:
-        return {"status": "empty", "text": "", "format": fmt,
-                "error": "文件解析成功但未抽取到文字（可能是扫描件或空文档）", "notes": notes}
-    result = {"status": "read", "text": text, "format": fmt, "error": "", "notes": notes}
+            result['error'] = '此格式仅保存原件，尚未解析；图片使用视觉视图，语音和视频保留原件接口'
+            return result
+        result['text'] = result['text'].replace('\x00','')
+        result['indexed_chars'] = len(result['text'])
+        result['status'] = ('read' if result['complete'] else 'partial') if result['text'].strip() else 'empty'
+        if not result['complete']: result['notes'].append('自动索引为部分内容；未索引部分仍在原件，可按范围取用，不代表模型已读全文')
+    except Exception as exc:
+        result.update(status='failed',error='原件已保存，解析失败：'+type(exc).__name__+'：'+str(exc)[:200])
     return result
 
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS attachments(
-  id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
-  name TEXT, stored_name TEXT, path TEXT, type TEXT, format TEXT, size INTEGER,
-  source TEXT, source_ref TEXT, status TEXT, error TEXT, text TEXT,
-  dedup_of TEXT, created_at TEXT);
-CREATE INDEX IF NOT EXISTS attachments_conv ON attachments(conversation_id);
-CREATE TABLE IF NOT EXISTS sources(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, attachment_id TEXT NOT NULL,
-  source TEXT, source_ref TEXT, filename TEXT, created_at TEXT);
-CREATE TABLE IF NOT EXISTS links(
-  attachment_id TEXT NOT NULL, conversation_id TEXT NOT NULL, created_at TEXT,
-  UNIQUE(attachment_id, conversation_id));
-CREATE VIRTUAL TABLE IF NOT EXISTS attachment_fts USING fts5(
-  attachment_id UNINDEXED, conversation_id UNINDEXED, name, text, tokenize='unicode61');
-"""
-
-_FTS_SPECIAL = re.compile(r'["^*:(){}]')
-
-
 class AttachmentStore:
-    def __init__(self, root: Path | str, role: str = "qq"):
-        if role not in ("qq", "research"):
-            raise ValueError("未知的 Agent")
-        self.root, self.role = Path(root), role
-        self.base = self.root / "data" / role / "attachments"
-        self.db_path = self.root / "data" / role / "attachments.db"
-        self.base.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.executescript(SCHEMA)
+    def __init__(self, root, role='qq'):
+        if role not in ('qq','research'): raise ValueError('未知的 Agent')
+        self.root,self.role = Path(root),role
+        self.base = self.root/'data'/role/'attachments'
+        self.db_path = self.root/'data'/role/'attachments.db'
+        self.base.mkdir(parents=True,exist_ok=True)
+        with self._connect() as db:
+            db.executescript('''CREATE TABLE IF NOT EXISTS attachments(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,role TEXT NOT NULL,name TEXT,stored_name TEXT,path TEXT,type TEXT,format TEXT,size INTEGER,source TEXT,source_ref TEXT,status TEXT,error TEXT,text TEXT,dedup_of TEXT,created_at TEXT);
+            CREATE INDEX IF NOT EXISTS attachments_conv ON attachments(conversation_id);
+            CREATE TABLE IF NOT EXISTS sources(id INTEGER PRIMARY KEY AUTOINCREMENT,attachment_id TEXT NOT NULL,source TEXT,source_ref TEXT,filename TEXT,created_at TEXT);
+            CREATE TABLE IF NOT EXISTS links(attachment_id TEXT NOT NULL,conversation_id TEXT NOT NULL,created_at TEXT,UNIQUE(attachment_id,conversation_id));
+            CREATE TABLE IF NOT EXISTS attachment_uploads(id TEXT PRIMARY KEY,conversation TEXT,name TEXT,path TEXT,size INTEGER,received INTEGER,state TEXT,attachment_id TEXT,error TEXT,created REAL,updated REAL);
+            CREATE TABLE IF NOT EXISTS attachment_reads(id TEXT PRIMARY KEY,attachment_id TEXT,session TEXT,mode TEXT,start INTEGER,end INTEGER,query TEXT,created REAL);''')
+            db.execute('CREATE TABLE IF NOT EXISTS attachment_scopes(attachment_id TEXT,scope TEXT,resource_id TEXT,PRIMARY KEY(attachment_id,scope))')
+            db.execute('BEGIN IMMEDIATE')
+            columns = {r['name'] for r in db.execute('PRAGMA table_info(attachments)')}
+            for name,definition in (('resource_id',"TEXT NOT NULL DEFAULT ''"),('processing',"TEXT NOT NULL DEFAULT '{}'"),('scope',"TEXT NOT NULL DEFAULT 'owner'")):
+                if name not in columns: db.execute('ALTER TABLE attachments ADD COLUMN '+name+' '+definition)
 
-    # ---------------------------------------------------------------- storage
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        return conn
+    @contextmanager
+    def _connect(self):
+        db = sqlite3.connect(self.db_path,timeout=30); db.row_factory = sqlite3.Row
+        try:
+            yield db; db.commit()
+        except BaseException:
+            db.rollback(); raise
+        finally: db.close()
 
-    def _row(self, row: sqlite3.Row) -> dict[str, Any]:
-        result = {key: row[key] for key in row.keys()}
+    def limits(self):
+        from tool_host import control_ceiling
+        from image_views import NATIVE_IMAGE_BYTES
+        from multimodal import load_config
+        return dict(chunk_bytes=CHUNK_BYTES,original_max_bytes=None,automatic_text_preview_bytes=EXCERPT_BYTES,range_read_max_bytes=READ_BYTES,
+            max_per_message=int(load_config(self.root)['max_attachments']), native_image_bytes=NATIVE_IMAGE_BYTES,
+            workbench_control_bytes=control_ceiling('/workbench'),tool_control_bytes=control_ceiling('/catalog'),
+            source='AttachmentStore / ToolHost HTTP控制 / 模型视觉协议',
+            note='原件分块保存，不设20MiB原件上限；可保存不代表已解析或模型可一次理解；磁盘与QQ外部通道以实际结果为准')
+
+    @staticmethod
+    def public(row): return {k:v for k,v in row.items() if k!='text'}
+
+    @staticmethod
+    def _row(row):
+        result = dict(row)
+        result['scope'] = result.pop('visible_scope', None) or result['scope']
+        result['resource_id'] = result.pop('visible_resource', None) or result['resource_id']
+        result['processing'] = json.loads(result.get('processing') or '{}')
         return result
 
-    def _conversation_dir(self, conversation_id: str) -> Path:
-        name = safe_filename(str(conversation_id), "conversation").replace(":", "_")
-        return self.base / name
-
-    def get(self, attachment_id: str) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM attachments WHERE id=?", (attachment_id,)).fetchone()
+    def get(self, attachment_id, *, scope=None):
+        with self._connect() as db:
+            sql = 'SELECT a.*,s.scope visible_scope,s.resource_id visible_resource FROM attachments a LEFT JOIN attachment_scopes s ON s.attachment_id=a.id WHERE (a.id=? OR a.resource_id=? OR s.resource_id=?)'
+            args = [attachment_id,attachment_id,attachment_id]
+            if scope is not None:
+                sql += " AND (s.scope IN (?,'public') OR (s.scope IS NULL AND a.scope IN (?,'public')))"
+                args.extend((scope,scope))
+            sql += ' ORDER BY CASE WHEN s.resource_id=? THEN 0 WHEN s.scope=a.scope THEN 1 ELSE 2 END LIMIT 1'
+            args.append(attachment_id)
+            row = db.execute(sql,args).fetchone()
         return self._row(row) if row else None
 
-    def import_bytes(self, conversation_id: str, filename: str, data: bytes, *,
-                     source: str = "upload", source_ref: str = "", type_hint: str = "") -> dict[str, Any]:
-        """Store bytes under the conversation tree and index documents.
+    def _conversation_dir(self,cid): return self.base/safe_filename(str(cid),'conversation').replace(':','_')
 
-        The caller must have authorized access to ``conversation_id``; this
-        store performs no channel/sender authorization itself.
-        """
-        if not isinstance(data, (bytes, bytearray, memoryview)):
-            raise TypeError("data 必须是 bytes")
-        data = bytes(data)
-        if not data:
-            raise ValueError("附件为空")
-        if len(data) > MAX_BYTES:
-            raise ValueError(f"附件超过 {MAX_BYTES // (1024 * 1024)}MB 上限")
-        conversation_id = str(conversation_id or "").strip()
-        if not conversation_id:
-            raise ValueError("缺少会话编号")
-        name = safe_filename(filename)
-        content_id = hashlib.sha256(data).hexdigest()
-        ext = _extension(name)
-        kind = type_hint if type_hint in ("image", "audio", "video", "file") else kind_for(ext)
-        if type_hint in ("image", "audio", "video") and kind_for(ext) in ("image", "audio", "video"):
-            kind = kind_for(ext)
+    def import_bytes(self,cid,filename,data,*,source='upload',source_ref='',type_hint=''):
+        if not isinstance(data,(bytes,bytearray,memoryview)): raise TypeError('附件内容必须是字节')
+        directory = self.base/'.incoming'/uuid.uuid4().hex; directory.mkdir(parents=True)
+        path = directory/safe_filename(filename)
+        with path.open('wb') as file: file.write(data)
+        return self.import_path(cid,path,name=filename,source=source,source_ref=source_ref,type_hint=type_hint,move=True)
 
-        with self._connect() as conn:
-            existing = conn.execute("SELECT * FROM attachments WHERE id=?", (content_id,)).fetchone()
-            if existing is not None:
-                if existing["conversation_id"] != conversation_id:
-                    # Content is unique per role: reuse the stored file, add a link.
-                    conn.execute("INSERT OR IGNORE INTO links(attachment_id,conversation_id,created_at) VALUES(?,?,?)",
-                                 (content_id, conversation_id, _now()))
-                conn.execute("INSERT INTO sources(attachment_id,source,source_ref,filename,created_at) VALUES(?,?,?,?,?)",
-                             (content_id, source, source_ref, name, _now()))
-                conn.commit()
-                result = self._row(existing)
-                result.update(duplicate=True, original_status=existing["status"])
-                return result
+    def import_path(self,cid,path,*,source='local',source_ref='',type_hint='',name='',move=False,scope=''):
+        original = Path(path).expanduser().resolve(); cid = str(cid or '').strip()
+        if not original.is_file(): raise FileNotFoundError('附件文件不存在：'+str(original))
+        if not cid: raise ValueError('缺少会话编号')
+        if move and not original.is_relative_to(self.base.resolve()): raise ValueError('只移动本模块上传暂存；用户原文件始终复制保留')
+        hasher = hashlib.sha256()
+        with original.open('rb') as file:
+            for block in iter(lambda:file.read(CHUNK_BYTES),b''): hasher.update(block)
+        content_id = hasher.hexdigest(); existing = self.get(content_id); filename = safe_filename(name or original.name)
+        group = re.fullmatch(r'(?:group:|qq-group_)([0-9]+)',cid)
+        scope = scope or ('chat:group:'+group[1] if group else 'owner')
+        if existing and Path(existing['path']).is_file():
+            with self._connect() as db:
+                db.execute('INSERT OR IGNORE INTO links VALUES(?,?,?)',(content_id,cid,_now()))
+                db.execute('INSERT INTO sources(attachment_id,source,source_ref,filename,created_at) VALUES(?,?,?,?,?)',(content_id,source,source_ref,filename,_now()))
+            if not existing['resource_id']: existing = self._index(existing)
+            resource_id = self._register(existing,scope,source_ref or str(original))
+            with self._connect() as db:
+                db.execute('INSERT OR REPLACE INTO attachment_scopes VALUES(?,?,?)',(content_id,scope,resource_id))
+            existing.update(scope=scope,resource_id=resource_id)
+            if move and original!=Path(existing['path']).resolve(): self._retire_staging(original,content_id)
+            return {**existing,'duplicate':True}
+        directory = self._conversation_dir(cid)/content_id; directory.mkdir(parents=True,exist_ok=True); target = directory/filename
+        if original!=target.resolve():
+            if move: os.replace(original,target)
+            else:
+                staged = directory/('.'+uuid.uuid4().hex+'.part')
+                with original.open('rb') as incoming,staged.open('xb') as output:
+                    shutil.copyfileobj(incoming,output,CHUNK_BYTES); output.flush(); os.fsync(output.fileno())
+                os.replace(staged,target)
+        ext = target.suffix.lower().lstrip('.'); kind = kind_for(ext)
+        if kind=='file' and type_hint in ('image','audio','video'): kind = type_hint
+        row = dict(id=content_id,conversation_id=cid,role=self.role,name=filename,stored_name=filename,path=str(target),type=kind,
+            format=ext,size=target.stat().st_size,source=source,source_ref=source_ref or str(original),status='archived',error='',text='',
+            dedup_of=content_id,created_at=_now(),resource_id='',processing='{}',scope=scope)
+        with self._connect() as db:
+            db.execute('INSERT OR REPLACE INTO attachments('+','.join(row)+') VALUES('+','.join('?' for _ in row)+')',tuple(row.values()))
+            db.execute('INSERT OR IGNORE INTO links VALUES(?,?,?)',(content_id,cid,_now()))
+            db.execute('INSERT INTO sources(attachment_id,source,source_ref,filename,created_at) VALUES(?,?,?,?,?)',(content_id,source,source_ref,filename,_now()))
+        return {**self._index(self.get(content_id)),'duplicate':False}
 
-        directory = self._conversation_dir(conversation_id) / content_id
-        directory.mkdir(parents=True, exist_ok=True)
-        target = directory / name
-        target.write_bytes(data)
-        if kind in ("image", "audio", "video"):
-            status, text, fmt, error, notes = "archived", "", ext or "binary", "", []
-            if ext in DOCUMENT_EXTENSIONS:
-                notes.append("扩展名与媒体类型冲突，按媒体归档")
-        else:
-            # Container formats need their complete ZIP/PDF structure; truncate
-            # extracted text rather than cutting the binary document in half.
-            parsed = extract_text(name, data[:EXCERPT_BYTES] if ext in TEXT_EXTENSIONS else data)
-            status, text, fmt, error, notes = (parsed["status"], parsed["text"], parsed["format"],
-                                               parsed["error"], parsed["notes"])
-            if len(data) > EXCERPT_BYTES and text:
-                notes.append(f"仅索引前 {EXCERPT_BYTES // 1024}KB，完整内容在磁盘文件")
-        now = _now()
-        row = {"id": content_id, "conversation_id": conversation_id, "role": self.role, "name": name,
-               "stored_name": name, "path": str(target), "type": kind, "format": fmt, "size": len(data),
-               "source": source, "source_ref": source_ref, "status": status, "error": error,
-               "text": text, "dedup_of": content_id, "created_at": now}
+    def _index(self,row):
+        parsed = (parse_path(Path(row['path']),row['name']) if row['type']=='file' else
+                  dict(status='archived',text='',format=row['format'],error='',notes=['原媒体已保存，模型通过对应视图取用'],original_bytes=row['size'],indexed_chars=0,complete=False,range_kind='media-original'))
+        processing = {k:v for k,v in parsed.items() if k!='text'}
         try:
-            with self._connect() as conn:
-                conn.execute(
-                    "INSERT INTO attachments(id,conversation_id,role,name,stored_name,path,type,format,size,"
-                    "source,source_ref,status,error,text,dedup_of,created_at) "
-                    "VALUES(:id,:conversation_id,:role,:name,:stored_name,:path,:type,:format,:size,"
-                    ":source,:source_ref,:status,:error,:text,:dedup_of,:created_at)", row)
-                conn.execute("INSERT INTO sources(attachment_id,source,source_ref,filename,created_at) VALUES(?,?,?,?,?)",
-                             (content_id, source, source_ref, name, now))
-                conn.execute("INSERT INTO attachment_fts(attachment_id,conversation_id,name,text) VALUES(?,?,?,?)",
-                             (content_id, conversation_id, name, text))
-                conn.execute("INSERT INTO links(attachment_id,conversation_id,created_at) VALUES(?,?,?)",
-                             (content_id, conversation_id, now))
-                conn.commit()
-        except BaseException:
-            target.unlink(missing_ok=True)
-            try: directory.rmdir()
-            except OSError: pass
+            resource_id = self._register({**row,'text':parsed['text'],'processing':processing},row['scope'],row['source_ref'])
+        except Exception as exc:
+            resource_id = ''; parsed.update(status='failed',error='原件已保存，统一资源索引失败：'+type(exc).__name__+'：'+str(exc)[:200])
+            processing.update(status=parsed['status'],error=parsed['error'])
+        with self._connect() as db:
+            db.execute('UPDATE attachments SET resource_id=?,processing=?,status=?,error=?,text=?,format=? WHERE id=?',
+                (resource_id,json.dumps(processing,ensure_ascii=False),parsed['status'],parsed['error'],parsed['text'],parsed['format'],row['id']))
+            if resource_id:
+                db.execute('INSERT OR REPLACE INTO attachment_scopes VALUES(?,?,?)',(row['id'],row['scope'],resource_id))
+        return self.get(row['id'])
+
+    def _register(self,row,scope,reference):
+        if row['type']=='image':
+            from image_views import ImageViews
+            return ImageViews(self.root).register(row['path'],scope=scope,source=row['source'],reference=reference)['doc_id']
+        from doc_store import ingest
+        kind = row['format'] if row['format'] in ('md','html','json','pdf') else 'txt' if row['format'] in TEXT_EXTENSIONS else 'file'
+        return ingest(self.root,row['name'],row.get('text') or '',kind=kind,scope=scope,source=row['source'],
+            resource_key='attachment:'+row['id'],original_path=row['path'],
+            metadata={'attachment_id':row['id'],'source_reference':reference,'processing':row['processing']})['doc_id']
+
+    def _retire_staging(self,path,key):
+        path = path.resolve()
+        if not path.is_relative_to(self.base.resolve()): raise ValueError('未移动用户原文件')
+        root = (self.root/'需要清理/附件上传暂存').resolve(); target = (root/(key+'-'+uuid.uuid4().hex)/path.name).resolve()
+        if not target.is_relative_to(root): raise ValueError('暂存归档位置无效')
+        target.parent.mkdir(parents=True,exist_ok=True); shutil.move(str(path),str(target))
+
+    def begin(self,cid,name,size):
+        if type(size) is not int or size<0: raise ValueError('附件实际字节数无效')
+        uid = uuid.uuid4().hex; directory = self.base/'.incoming'/uid; directory.mkdir(parents=True)
+        path = directory/safe_filename(name); path.touch(exist_ok=False)
+        with self._connect() as db:
+            db.execute('INSERT INTO attachment_uploads VALUES(?,?,?,?,?,0,\'receiving\',\'\',\'\',?,?)',(uid,cid,safe_filename(name),str(path),size,time.time(),time.time()))
+        return dict(upload_id=uid,received=0,size=size,chunk_bytes=CHUNK_BYTES,state='receiving')
+
+    def upload_status(self,cid,uid):
+        with self._connect() as db: row = db.execute('SELECT * FROM attachment_uploads WHERE id=? AND conversation=?',(uid,cid)).fetchone()
+        if not row: raise ValueError('附件上传记录不存在或不属于当前对话')
+        return dict(row)
+
+    def append(self,cid,uid,offset,encoded):
+        if type(offset) is not int or offset<0 or not isinstance(encoded,str) or len(encoded)>(CHUNK_BYTES+2)//3*4:
+            raise ValueError('分块位置或大小无效，请按chunk_bytes导入')
+        try: data = base64.b64decode(encoded,validate=True)
+        except ValueError as exc: raise ValueError('附件分块不能解码') from exc
+        with self._connect() as db:
+            db.execute('BEGIN IMMEDIATE'); row = db.execute('SELECT * FROM attachment_uploads WHERE id=? AND conversation=?',(uid,cid)).fetchone()
+            if not row or row['state']!='receiving': raise ValueError('此附件不在接收中，请查看上传状态')
+            if offset+len(data)>row['size'] or offset>row['received']: raise ValueError('分块超出原件大小或中间缺块')
+            path = Path(row['path'])
+            with path.open('r+b') as file:
+                if path.stat().st_size<row['received']: raise ValueError('暂存长度异常，已保留现有文件，未伪装导入成功')
+                file.seek(offset)
+                if offset<row['received']:
+                    if offset+len(data)>row['received'] or file.read(len(data))!=data: raise ValueError('重复分块与已保存内容不同')
+                    return dict(upload_id=uid,received=row['received'],size=row['size'],state='receiving')
+                file.write(data); file.truncate(offset+len(data)); file.flush(); os.fsync(file.fileno())
+            received = offset+len(data); db.execute('UPDATE attachment_uploads SET received=?,updated=? WHERE id=?',(received,time.time(),uid))
+        return dict(upload_id=uid,received=received,size=row['size'],state='receiving')
+
+    def finish(self,cid,uid):
+        with self._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            stored = db.execute('SELECT * FROM attachment_uploads WHERE id=? AND conversation=?',(uid,cid)).fetchone()
+            if not stored:
+                raise ValueError('附件上传记录不存在')
+            row = dict(stored)
+            if row['state']=='completed':
+                return self.public(self.get(row['attachment_id']))
+            if row['state']=='processing':
+                raise ValueError('原件正在登记解析，可查询附件上传状态；没有重复导入')
+            if row['state']!='receiving' or row['received']!=row['size'] or Path(row['path']).stat().st_size!=row['size']:
+                raise ValueError('原件尚未接收完整，已保留暂存，未解析或交给模型')
+            db.execute("UPDATE attachment_uploads SET state='processing',updated=? WHERE id=?",(time.time(),uid))
+        try:
+            result = self.import_path(cid,row['path'],name=row['name'],source='client-chunk-upload',source_ref='upload:'+uid,move=True)
+        except Exception as exc:
+            with self._connect() as db:
+                db.execute("UPDATE attachment_uploads SET state='failed',error=?,updated=? WHERE id=?",(str(exc),time.time(),uid))
             raise
-        result = dict(row)
-        result.update(duplicate=False, notes=notes)
-        return result
+        with self._connect() as db:
+            db.execute("UPDATE attachment_uploads SET state='completed',attachment_id=?,updated=? WHERE id=?",(result['id'],time.time(),uid))
+        return self.public(result)
 
-    def import_path(self, conversation_id: str, path: Path | str, *, source: str = "local",
-                    source_ref: str = "", type_hint: str = "", name: str = "") -> dict[str, Any]:
-        """Copy a local file into the store. The source is never moved or deleted."""
-        source_path = Path(path).expanduser()
-        if not source_path.is_file():
-            raise FileNotFoundError(f"文件不存在：{source_path}")
-        size = source_path.stat().st_size
-        if size > MAX_BYTES:
-            raise ValueError(f"附件超过 {MAX_BYTES // (1024 * 1024)}MB 上限")
-        result = self.import_bytes(conversation_id, name or source_path.name, source_path.read_bytes(),
-                                   source=source, source_ref=source_ref or str(source_path.resolve()),
-                                   type_hint=type_hint)
-        result["original_path"] = str(source_path.resolve())
-        return result
+    def list(self,cid,limit=100):
+        group = re.fullmatch(r'(?:group:|qq-group_)([0-9]+)',str(cid))
+        scope = 'chat:group:'+group[1] if group else 'owner'
+        with self._connect() as db:
+            return [self.public(self._row(r)) for r in db.execute('SELECT a.*,s.scope visible_scope,s.resource_id visible_resource FROM attachments a JOIN links l ON l.attachment_id=a.id LEFT JOIN attachment_scopes s ON s.attachment_id=a.id AND s.scope=? WHERE l.conversation_id=? ORDER BY a.created_at DESC,a.rowid DESC LIMIT ?',(scope,cid,int(limit)))]
 
-    # ---------------------------------------------------------------- queries
-    def list(self, conversation_id: str, limit: int = 100) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT a.* FROM attachments a JOIN links l ON l.attachment_id=a.id "
-                "WHERE l.conversation_id=? ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?",
-                (str(conversation_id), int(limit))).fetchall()
-        return [self._row(row) for row in rows]
+    def detail(self,attachment_id,*,scope=None):
+        row = self.get(attachment_id,scope=scope)
+        if not row: raise ValueError('附件记录不存在或当前范围不可见')
+        with self._connect() as db:
+            reads = [dict(r) for r in db.execute('SELECT session,mode,start,end,query,created FROM attachment_reads WHERE attachment_id=? ORDER BY created DESC LIMIT 30',(row['id'],))]
+        return {**self.public(row),'reads':reads,'original_exists':Path(row['path']).is_file()}
 
-    def search(self, query: str, conversation_id: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
-        """FTS5 word search; a CJK query is also matched as a substring.
+    def search(self,query,conversation_id=None,limit=10):
+        from doc_store import search
+        with self._connect() as db:
+            allowed = {r[0] for r in db.execute("SELECT COALESCE(s.resource_id,a.resource_id) FROM attachments a JOIN links l ON l.attachment_id=a.id LEFT JOIN attachment_scopes s ON s.attachment_id=a.id AND s.scope='owner' WHERE l.conversation_id=?",(conversation_id,))} if conversation_id else None
+        return search(self.root,query,limit=limit,scope='owner',document_ids=allowed)
 
-        unicode61 indexes CJK runs as one token (substrings never match), so an
-        FTS miss falls back to an exact substring lookup on the indexed text.
-        """
-        terms = [t for t in _FTS_SPECIAL.sub(" ", str(query or "")).split() if t][:8]
-        if not terms:
-            return []
-        match = " OR ".join(f'"{t}"' for t in terms)
-        sql = ("SELECT a.*, snippet(attachment_fts,3,'','', ' … ', 24) AS snippet, bm25(attachment_fts) AS rank"
-               " FROM attachment_fts JOIN links l ON l.attachment_id=attachment_fts.attachment_id"
-               " JOIN attachments a ON a.id=attachment_fts.attachment_id WHERE attachment_fts MATCH ?")
-        params: list[Any] = [match]
-        if conversation_id:
-            sql += " AND l.conversation_id=?"
-            params.append(str(conversation_id))
-        sql += " ORDER BY rank LIMIT ?"
-        params.append(int(limit))
-        with self._connect() as conn:
-            rows = conn.execute(sql, params).fetchall()
-            if not rows:
-                rows = self._substring(conn, str(query or "").strip()[:120], conversation_id, int(limit))
-        return [self._row(row) for row in rows][:int(limit)]
+    def _read_row(self,attachment_id,scope):
+        row = self.get(attachment_id,scope=scope)
+        if not row or not Path(row['path']).is_file(): raise ValueError('附件原件不存在或当前范围不可见')
+        if row['format'] not in TEXT_EXTENSIONS: raise ValueError('本工具读取文本原件；二进制格式请用资料切片、视觉视图或对应文件解析工具')
+        return row
 
-    def _substring(self, conn: sqlite3.Connection, phrase: str, conversation_id: str | None, limit: int):
-        if len(phrase) < 2:
-            return []
-        needle = phrase.lower()
-        sql = ("SELECT a.*, '' AS snippet, 0 AS rank FROM attachments a"
-               " JOIN links l ON l.attachment_id=a.id WHERE (instr(lower(a.text), ?) > 0 OR instr(lower(a.name), ?) > 0)")
-        params: list[Any] = [needle, needle]
-        if conversation_id:
-            sql += " AND l.conversation_id=?"
-            params.append(str(conversation_id))
-        sql += " ORDER BY a.created_at DESC LIMIT ?"
-        params.append(limit)
-        rows = [dict(row) for row in conn.execute(sql, params).fetchall()]
-        for row in rows:
-            text = row["text"] or ""
-            at = text.lower().find(needle)
-            if at < 0:
-                continue
-            start, end = max(0, at - 40), min(len(text), at + len(needle) + 60)
-            row["snippet"] = ("…" if start else "") + text[start:end] + ("…" if end < len(text) else "")
-        return rows
+    def _codec(self,row,encoding,offset=0):
+        codec = encoding or row['processing'].get('encoding') or 'utf-8'
+        if codec=='utf-16' and offset>0:
+            with Path(row['path']).open('rb') as file: codec = 'utf-16-le' if file.read(2)==b'\xff\xfe' else 'utf-16-be'
+        return codec
 
-    def context_line(self, attachment_id: str, max_chars: int = 8000) -> str:
-        """Prompt snippet with source name and disk path for later tool reads."""
+    def _record_read(self,row,session,mode,start,end,query=''):
+        with self._connect() as db:
+            db.execute('INSERT INTO attachment_reads VALUES(?,?,?,?,?,?,?,?)',(uuid.uuid4().hex,row['id'],session,mode,start,end,query,time.time()))
+
+    def read_range(self,attachment_id,*,offset=0,length=65536,encoding='',scope=None,session=''):
+        row = self._read_row(attachment_id,scope)
+        if type(offset) is not int or type(length) is not int or not 1<=length<=READ_BYTES:
+            raise ValueError('每次读取1到'+str(READ_BYTES)+'字节，负offset从末尾算')
+        start = max(0,row['size']+offset) if offset<0 else min(offset,row['size'])
+        with Path(row['path']).open('rb') as file: file.seek(start); raw = file.read(length)
+        codec = self._codec(row,encoding,start); end = start+len(raw)
+        self._record_read(row,session,'bytes',start,end)
+        return dict(attachment_id=row['id'],resource_id=row['resource_id'],path=row['path'],size=row['size'],start=start,end=end,
+            next_offset=end if end<row['size'] else None,encoding=codec,text=raw.decode(codec,errors='replace'),
+            coverage='仅本次字节范围；多字节边界可能显示替换符，原件未改')
+
+    def find(self,attachment_id,query,*,offset=0,limit=10,encoding='',scope=None,session=''):
+        row = self._read_row(attachment_id,scope); codec = self._codec(row,encoding,1)
+        if codec=='utf-8-sig': codec = 'utf-8'
+        needle = str(query).encode(codec)
+        if not needle or type(offset) is not int or offset<0 or not 1<=int(limit)<=50: raise ValueError('请给非空查询、非负字节位置及1到50个命中数')
+        hits,carry,position,last = [],b'',min(offset,row['size']),-1
+        with Path(row['path']).open('rb') as file:
+            file.seek(position)
+            while True:
+                block = file.read(CHUNK_BYTES)
+                if not block: break
+                data,base,cursor = carry+block,position-len(carry),0
+                lowered = data.lower(); wanted = needle.lower()
+                while True:
+                    found = lowered.find(wanted,cursor)
+                    if found<0: break
+                    at = base+found; cursor = found+max(1,len(needle))
+                    if at<offset or at<=last: continue
+                    last = at; hits.append(dict(offset=at,text=data[max(0,found-160):found+len(needle)+160].decode(codec,errors='replace')))
+                    if len(hits)>=int(limit): break
+                position += len(block)
+                if len(hits)>=int(limit): break
+                carry = data[-(len(needle)+320):]
+        next_offset = hits[-1]['offset']+len(needle) if len(hits)>=int(limit) else None
+        self._record_read(row,session,'search',offset,position,str(query))
+        return dict(attachment_id=row['id'],resource_id=row['resource_id'],size=row['size'],matches=hits,searched_start=offset,searched_end=position,
+                    next_offset=next_offset,complete=position>=row['size'] and next_offset is None,method='原件流式字节匹配，不是全文语义理解')
+
+    def context_line(self,attachment_id,max_chars=8000):
         row = self.get(attachment_id)
-        if not row:
-            return f"[附件 {attachment_id} 不在索引中]"
-        header = (f"附件：{row['name']}（类型 {row['type']}，状态 {row['status']}，本地路径 {row['path']}）")
-        if row["status"] == "read" and row["text"]:
-            body = row["text"][:max_chars]
-            tail = "\n[以上为摘录；完整文件保留在本地路径，可用文件工具继续读取。]" if len(row["text"]) > max_chars else ""
-            return header + "\n" + body + tail
-        if row["error"]:
-            return header + "\n" + row["error"]
-        return header
-
-
-def _now() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S")
-
-
-def safe_conversation(chat_id: str) -> str:
-    """QQ chat id (private:123 / group:456) → stable store conversation key."""
-    return "qq-" + re.sub(r"[^0-9A-Za-z_.-]+", "_", str(chat_id or ""))[:80]
-
-
-__all__ = ["AttachmentStore", "MAX_BYTES", "extract_text", "safe_filename", "safe_conversation", "kind_for"]
+        if not row: return '[附件不在索引中：'+str(attachment_id)+']'
+        return ('附件：'+row['name']+'\nattachment_id='+row['id']+'\nresource_id='+row['resource_id']+'\n原件路径：'+row['path']+
+                '\n原件字节：'+str(row['size'])+'\n解析范围：'+json.dumps(row['processing'],ensure_ascii=False)+
+                '\n开头摘录（不是全文）：\n'+(row.get('text') or '')[:max_chars]+
+                '\n其余内容用fish_attachment_read分范围读取、fish_attachment_search搜索原件；原件保留。')

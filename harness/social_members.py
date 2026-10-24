@@ -53,7 +53,7 @@ def sync_from_channel(root, group):
     return asyncio.run(run())
 
 
-def participants(payload, snapshot, bot_id=''):
+def participants(payload, snapshot, bot_id='', reference=None):
     ids = []
     def add(value):
         value = str(value or '')
@@ -64,33 +64,53 @@ def participants(payload, snapshot, bot_id=''):
     if reply:
         for item in snapshot.get('messages', []):
             if str(item.get('message_id')) == reply: add((item.get('sender') or {}).get('id'))
+    if reference:
+        add((reference.get('author') or {}).get('id'))
+        add(reference.get('reply_target_id'))
     for item in payload.get('segments', []):
         if item.get('type') == 'at': add(item.get('user_id'))
-    return ids[:4]
+    for item in reversed(snapshot.get('messages', [])[-12:]):
+        add((item.get('sender') or {}).get('id'))
+    return ids[:8]
 
 
-def reply_context(root, payload, snapshot, bot_id=''):
+def reply_context(root, payload, snapshot, bot_id='', reference=None):
     group = str(payload.get('chat_id', '')).removeprefix('group:')
     roster = SocialRoster(root)
-    if roster.settings()['group_id'] != group:
-        return {'profiles': [], 'facts': [], 'reply_target': '', 'min_chars': MIN_CHARS, 'max_chars': MAX_CHARS}, {'active_probability': 1.0, 'cooldown_multiplier': 1.0, 'max_chars': MAX_CHARS}
+    managed = roster.settings()['group_id'] == group
     allowed_group(root, group)
-    ids = participants(payload, snapshot, bot_id)
+    ids = participants(payload, snapshot, bot_id, reference)
     profiles = []
     from memory_store import MemoryStore
     memory = MemoryStore(root, 'qq'); facts = []
     for uid in ids:
-        p = roster.public_profile(group, uid)
+        p = roster.public_profile(group, uid) if managed else {'user_id': uid, 'nickname': '', 'card': '', 'aliases': [], 'preferences': ''}
         p['preferences'] = p['preferences'][:600]; p['aliases'] = p['aliases'][:8]
+        # Real message names override an older roster snapshot. QQ ID remains
+        # the key even when a card changes or another member uses the same name.
+        observed = [reference.get('author') or {}] if reference else []
+        observed.extend(m.get('sender') or {} for m in snapshot.get('messages', []))
+        observed.append(payload.get('sender') or {})
+        live = next((s for s in reversed(observed) if str(s.get('id')) == uid), {})
+        for key in ('nickname', 'card'):
+            if key in live: p[key] = str(live[key])[:80]
+        p['display_name'] = str(live.get('display_name') or live.get('name') or p['card'] or p['nickname'])
+        p['group_id'] = group
         profiles.append(p)
         for row in memory.profile('qq:' + uid, scope='chat:group:' + group)[:3]:
             facts.append({'subject': uid, 'text': row['text'][:350], 'source': row['source'][:100]})
     target = str((payload.get('sender') or {}).get('id', ''))
-    behavior = roster.behavior(group, target) if re.fullmatch(r'[0-9]{5,15}', target) else {'max_chars': 120, 'active_probability': .2, 'cooldown_multiplier': 2.0}
+    behavior = roster.behavior(group, target) if managed and re.fullmatch(r'[0-9]{5,15}', target) else {'max_chars': MAX_CHARS, 'active_probability': 1.0, 'cooldown_multiplier': 1.0}
     # Relationship state still controls proactive participation, never how
     # thoroughly a direct question deserves to be answered.
     behavior = {**behavior, 'max_chars': MAX_CHARS}
-    return {'profiles': profiles, 'facts': facts[:8], 'reply_target': target, 'min_chars': MIN_CHARS, 'max_chars': MAX_CHARS}, behavior
+    names = {}
+    for p in profiles:
+        for name in {p['display_name'], p['nickname'], p['card'], *p['aliases']} - {''}:
+            names.setdefault(name, []).append(p['user_id'])
+    collisions = {name: sorted(set(users)) for name, users in names.items() if len(set(users)) > 1}
+    return {'profiles': profiles, 'facts': facts[:8], 'reply_target': target, 'quoted_message': reference,
+            'ambiguous_names': collisions, 'min_chars': MIN_CHARS, 'max_chars': MAX_CHARS}, behavior
 
 
 def active_admitted(chat, cursor, behavior, last_sent, cooldown, now):

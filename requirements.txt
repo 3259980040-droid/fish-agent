@@ -8,3 +8,7 @@ cryptography==50.0.2
 qrcode==8.2
 regex==2026.9.29
 httpx==0.28.1
+tokenizers==0.23.3
+
+croniter==6.1.0
+playwright==1.58.0

@@ -17,6 +17,7 @@ from .system_settings import SystemSettingsPage
 from .resources import ResourcesPage
 from .social import SocialPage
 from .research import ResearchPage
+from .life import LifePage
 from .services import FishServices
 from .theme import COLORS, QSS
 from .widgets import Avatar, icon
@@ -69,6 +70,7 @@ class MainWindow(QMainWindow):
         self.pages = [
             ("概览", OverviewPage(services), "overview"),
             ("聊天", ChatPage(services), "fish"),
+            ("生活", LifePage(services), "play"),
             ("研究", ResearchPage(services), "research"),
             ("大鱼", QQPage(services), "fish"),
             ('资源管理', ResourcesPage(services), 'agents'),
@@ -95,7 +97,7 @@ class MainWindow(QMainWindow):
 
         self.nav.currentRowChanged.connect(self.switch_page)
         self.pages[0][1].navigate.connect(self.navigate)
-        self.pages[2][1].followup.connect(self._research_followup)
+        self.page("研究").followup.connect(self._research_followup)
         self.page('大鱼').draftRequested.connect(self._qq_followup)
         self.nav.setCurrentRow(0)
         self._timer = QTimer(self)

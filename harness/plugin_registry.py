@@ -37,17 +37,10 @@ def outbound_tool(name):
 
 
 def tool_allowed(plugin, tool):
-    name = tool['name']
+    # Enabled/discovered plugins expose their real tools. An explicitly selected
+    # list remains a user configuration, rather than a name-based write ban.
     selected = plugin.get('allowed_tools')
-    # Tulpa's real send queue is reauthorized against the current private route
-    # for every call. Other plugin writers keep their existing restrictions.
-    tulpa = (plugin.get('id') == 'tulpa_owner' and plugin.get('approved_chat_sender') is True
-             and plugin.get('kind') == 'mcp_http' and plugin.get('owner_only') is True
-             and plugin.get('roles') == ['qq'] and plugin.get('url') == 'http://127.0.0.1:18778/mcp')
-    if outbound_tool(name) and not (tulpa and selected is not None and name in selected): return False
-    if selected is not None: return name in selected
-    hints = tool.get('annotations') or {}
-    return hints.get('readOnlyHint') is True or (not hints.get('destructiveHint') and bool(re.search(r'(^|_)(get|list|read|search|query|fetch|analyze|extract|describe|inspect|echo|calculate|transcribe|recognize)(_|$)', name, re.I)))
+    return selected is None or tool['name'] in selected
 
 
 def failure_reason(exc):
@@ -485,7 +478,7 @@ class PluginRegistry:
     def execute(self, alias, arguments, role, *, owner=False, cancel=None, chat_authorized=False):
         _, pid, tool = alias.split('__', 2)
         if pid == 'tulpa_owner' and not chat_authorized:
-            raise PermissionError('原版 Tulpa 需要已核验的当前主人私聊入口')
+            raise PermissionError('Tulpa MCP 需要已核验的 Fish 主人授权')
         item = next((p for p in self.entries() if p['id'] == pid), None)
         if not item or not item['enabled'] or role not in item['roles']:
             raise PermissionError('插件已禁用或未授权给当前角色')
@@ -495,7 +488,7 @@ class PluginRegistry:
         if schema is None:
             raise PermissionError('工具未注册')
         if not tool_allowed(item, schema):
-            raise PermissionError('此工具未被选中，或属于必须经 Fish 统一发送的外发操作')
+            raise PermissionError('此工具未被插件当前配置选中')
         from jsonschema import validate
         validate(arguments, schema.get('inputSchema', {}))
         from governance import Governance

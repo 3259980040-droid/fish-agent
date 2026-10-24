@@ -33,14 +33,14 @@ from storage import database
 
 KINDS = {'expression': '表达方式', 'term': '群内术语', 'alias': '别称/称谓'}
 SOURCE_TYPES = {
-    'group_language': 'Fish 群语言库',
+    'group_language': 'Fish 会话语言库',
     'tulpa': '原版 Tulpa 语言学习库（只读）',
     'files': '主人记忆 / 群聊记录（只读）',
 }
 STATUSES = {'candidate': '待采用（候选）', 'active': '已启用', 'disabled': '已停用'}
 USAGE_FIELDS = {
     'extracted': '提取：资料库写入次数（候选 + 主人纠正）',
-    'retrieved': '检索：提取后进入 Fish 群回复提示的次数（精确）',
+    'retrieved': '检索：实际进入 Fish 回复上下文的已记录次数',
     'adopted': '实际采用：真实回复中实际使用了该条资料；运行时未记录，显示未知',
     'priority': '纠正优先：主人纠正的内容在提示中排在候选前面',
 }
@@ -52,9 +52,9 @@ LIMITS = {'query': 200, 'trigger': 100, 'content': 500, 'note': 1000}
 ID_PATTERN = re.compile(r'[a-f0-9]{8,64}')
 OWNER_CORRECTION = re.compile(r'应该|不要|别乱|不对|叫.{1,40}|改成|记住|记下来|其实是|指的是|意思是')
 _ENTRY = '''SELECT e.id,e.chat,e.window,e.kind,e.trigger,e.content,e.status,e.source,e.evidence,
-            (SELECT a.created FROM audits a WHERE a.entry=e.id AND a.event!='owner-correction'
+            (SELECT a.created FROM audits a WHERE a.entry=e.id AND a.event IN ('candidate','active')
              ORDER BY a.id LIMIT 1) AS extracted_at,
-            (SELECT a.created FROM audits a WHERE a.entry=e.id AND a.event!='owner-correction'
+            (SELECT a.created FROM audits a WHERE a.entry=e.id AND a.event IN ('candidate','active')
              ORDER BY a.id DESC LIMIT 1) AS changed_at
             FROM entries e'''
 
@@ -280,7 +280,7 @@ class LanguageWorkbench:
                 group = self._group_rows(conn, qq)
                 audits = [dict(r) for r in conn.execute(
                     "SELECT entry,event,created FROM audits WHERE event IN "
-                    "('candidate','active') ORDER BY id")]
+                    "('candidate','active','retrieved') ORDER BY id")]
                 corrections = {r['entry'] for r in conn.execute(
                     "SELECT DISTINCT entry FROM audits WHERE event='owner-correction'")}
             if self.tulpa_path.is_file():
@@ -302,7 +302,8 @@ class LanguageWorkbench:
         group = data['group']
         writers = {}
         for audit in data['audits']:
-            writers.setdefault(audit['entry'], []).append(audit['created'])
+            if audit['event'] in ('candidate','active'):
+                writers.setdefault(audit['entry'], []).append(audit['created'])
         replies = self._reply_texts({r['source']['chat'] for r in group})
         for r in group:
             seen = sorted(set(writers.get(r['id'], [])))
@@ -316,13 +317,14 @@ class LanguageWorkbench:
                 recent = [text for at, text in replies.get(r['source']['chat'], []) if start <= at < end][-10:]
                 possible += sum(1 for text in recent if quote and quote in text
                                 and (r['trigger'] in text or len(r['trigger']) < 2))
-            total_ext, total_ret = len(runs), len(runs)
+            total_ext = len(runs)
+            total_ret = sum(1 for audit in data['audits'] if audit['entry']==r['id'] and audit['event']=='retrieved')
             fixed = 1 if r['id'] in data['corrections'] else 0
             r['usage'] = {
                 'extracted': total_ext + fixed,
                 'extracted_label': f'提取 {total_ext} 次' + (f' · 主人纠正 {fixed} 次' if fixed else ''),
                 'retrieved': total_ret,
-                'retrieved_label': f'检索 {total_ret} 次（写入后的群回复从这里读到）',
+                'retrieved_label': f'已记录检索 {total_ret} 次（实际进入回复上下文）',
                 'adopted': None, 'adopted_label': UNKNOWN,
                 'possible_adoption': possible,
                 'priority': '是：主人纠正优先' if r['evidence'] == 'owner-feedback' else '否：候选排在纠正之后',

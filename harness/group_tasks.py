@@ -75,7 +75,8 @@ class GroupTaskStore:
             return self.decode(db.execute('SELECT * FROM jobs WHERE id=?',(task,)).fetchone()) if changed else None
 
     def update(self, task, **fields):
-        if set(fields)-{'state','session','response','remote','error'}:raise ValueError('未知任务字段')
+        if set(fields)-{'state','session','response','remote','error','snapshot'}:raise ValueError('未知任务字段')
+        if 'snapshot' in fields:fields['snapshot']=json.dumps(fields['snapshot'],ensure_ascii=False)
         with database(self.path) as db:
             db.execute('UPDATE jobs SET '+','.join(k+'=?' for k in fields)+',updated=? WHERE id=?',(*fields.values(),time.time(),task))
 

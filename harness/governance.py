@@ -35,12 +35,100 @@ CAPABILITIES = {"status": "查看状态", "pause": "暂停回复", "resume": "�
                 'computer.work':'主人私聊使用本机文件、编程和终端工具'}
 DEFAULTS = {"version": 3, "owner_permissions": list(CAPABILITIES), "paused": False, "paused_roles": {"qq": False, "research": False},
             "daily_usage_limits": {"qq": True, "research": True},
-            "max_daily_calls": 150, "max_daily_replies": 150, "max_tool_calls_per_turn": 12,
+            "max_daily_calls": 150, "max_daily_replies": 150, "max_tool_calls_per_turn": 0,
+            "chat_reasoning_effort": "high", "reply_display": "persona",
             "max_model_requests_daily": 300, "max_model_tokens_daily": 2000000,
             "blocked_tools": ["bash", "shell", "terminal", "run_code", "write", "edit", "delete", "onebot", "send_message", "plugin_manager"],
             "allowed_tools": ["read", "read_file", "read_image", "list_directory", "ls", "glob", "grep", "web_search", "web_fetch", "search", "fetch"],
             "blocked_text": [], "block_patterns": [], "owner_priority": True,
             "send_policy": normalize_policy({})}
+FAULT_SCHEMA = """CREATE TABLE IF NOT EXISTS faults(source TEXT,code TEXT,stage TEXT,reason TEXT,
+    consecutive INTEGER,total INTEGER,first_failed REAL,last_failed REAL,recovered_at REAL,
+    uncertain INTEGER,detail TEXT NOT NULL DEFAULT '',PRIMARY KEY(source,stage,code));"""
+PROVIDER_FAULT_REASONS = {'auth': '认证失败，需要检查密钥', 'timeout': '服务响应超时，请检查连接与服务状态',
+    'network': '网络连接失败，请检查网络与代理', 'protocol': '服务返回格式异常，请查看内部运行记录',
+    'limit': '服务请求或配额达到限制，请检查用量', 'unknown': '服务调用失败，原因未分类，请查看内部运行记录'}
+
+
+def _fault_message(error):
+    if isinstance(error, dict):
+        value = error.get('error', error)
+        return str(value.get('message') or value.get('code') or '') if isinstance(value, dict) else str(value)
+    return str(error)
+
+
+def sanitize_fault_detail(error):
+    """Remove credentials before shortening; preserve the exception type and 120 safe message characters."""
+    message = _fault_message(error)
+    match = re.match(r'^([A-Za-z_][A-Za-z_0-9]{0,79})\s*[:：]\s*', message)
+    label = type(error).__name__ if isinstance(error, BaseException) else match[1] if match else 'Error'
+    if match: message = message[match.end():]
+    message = re.sub(r'''(?i)\b(?:https?|wss?|ftp|file)://[^\s<>"'，；。)）]+''', '[链接已移除]', message)
+    message = re.sub(r'''\?[A-Za-z0-9_%.-]+=[^\s<>"'，；。)）]+''', '[查询已移除]', message)
+    message = re.sub(r'''(?i)\bBearer\s+[^\s,;，；"']+''', '[凭据已移除]', message)
+    message = re.sub(r'''(?ix)["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|authorization|cookie)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;，；}\]]+)''', '[凭据已移除]', message)
+    message = re.sub(r'\bsk-[A-Za-z0-9_-]{8,}\b', '[凭据已移除]', message)
+    message = re.sub(r'(?<![A-Za-z0-9+/_=-])[A-Za-z0-9+/_-]{64,}={0,2}(?![A-Za-z0-9+/_=-])', '[长数据已移除]', message)
+    return label + ': ' + ' '.join(message.split())[:120]
+
+
+def fault_code(error):
+    """Provider failures have exactly six public categories; never infer missing causes."""
+    text = type(error).__name__ + ' ' + _fault_message(error)
+    response = getattr(error, 'response', None)
+    status = getattr(response, 'status_code', None)
+    if isinstance(status, int): text += ' HTTP ' + str(status)
+    if re.search(r'(?<!\d)(401|403)(?!\d)|authentication|autherror|unauthori[sz]ed|forbidden|鉴权|认证|(?:请先|缺少|invalid).*api.?key', text, re.I): return 'auth'
+    if isinstance(error, TimeoutError) or re.search(r'timeout|timed out|超时', text, re.I): return 'timeout'
+    if re.search(r'connection|connecterror|econnrefused|proxy|network|网络|连接|代理', text, re.I): return 'network'
+    if re.search(r'(?<!\d)429(?!\d)|rate.?limit|quota|配额|用量|上限|额度', text, re.I): return 'limit'
+    if re.search(r'json|decodeerror|protocol|malformed|格式|协议|输出不合法', text, re.I): return 'protocol'
+    return 'unknown'
+
+
+def classify_fault(error, *, stage='model', uncertain=False):
+    """One public error vocabulary; reasons never copy provider text or credentials."""
+    detail = error.get('error', error) if isinstance(error, dict) else {}
+    detail = detail if isinstance(detail, dict) else {}
+    silent = type(error).__name__ == 'TurnSilent'
+    if silent:
+        return {'stage': str(stage), 'code': 'silent', 'reason': '她决定保持沉默',
+                'uncertain': False, 'auto_retry': False, 'silent': True}
+    text = type(error).__name__ + ' ' + str(detail.get('code', '')) + ' ' + str(detail.get('message', '')) + ' ' + str(error)
+    uncertain = bool(uncertain or detail.get('may_have_sent'))
+    if uncertain:
+        code, reason = 'delivery_uncertain', '发送结果未确认，请核对 QQ 回执；不会自动重发'
+    elif any(word in text for word in ('人格版本不存在', '测试窗口不存在', '无效的会话或人格')):
+        code, reason = 'persona_missing', '人格或会话窗口不存在，请修正绑定；不会切换默认人格'
+    elif detail.get('validation_failed'):
+        code, reason = 'permission', '本轮身份、窗口或权限校验未通过，未继续发送；不会绕过校验'
+    elif detail.get('provider') and fault_code(error) == 'auth':
+        code, reason = 'auth', PROVIDER_FAULT_REASONS['auth']
+    elif re.search(r'\b401\b|authenticationerror|autherror|unauthori[sz]ed|认证失败|(?:请先|缺少|invalid).*api.?key|密钥(?:未|无效|错误)', text, re.I):
+        code, reason = 'authentication', '模型认证失败或未配置密钥，请检查对应角色的 API 设置'
+    elif isinstance(error, PermissionError) or re.search(r'\b403\b|permission(?:denied)?error|accessdenied|forbidden|权限', text, re.I):
+        code, reason = 'permission', '当前权限或本地开关不允许此操作，请核对设置；不会绕过权限'
+        if '暂停' in text: code, reason = 'paused', '主人已暂停此角色，任务未继续'
+        elif any(word in text for word in ('上限', '用量', '额度')): code, reason = 'budget', '当前用量限制已达到，请检查设置'
+    elif detail.get('provider'):
+        code = fault_code(error)
+        reason = PROVIDER_FAULT_REASONS[code]
+    elif re.search(r'proxy|代理', text, re.I):
+        code, reason = 'proxy', '代理连接失败，请检查当前网络与代理设置'
+    elif isinstance(error, TimeoutError) or re.search(r'timeout|timed out|超时', type(error).__name__ + text, re.I):
+        code, reason = 'timeout', '本阶段等待超时；未自动重试，请查看对应调用记录'
+    elif isinstance(error, sqlite3.Error) or stage == 'storage':
+        code, reason = 'storage', '本地数据读写失败，请检查文件、磁盘与数据库状态'
+    elif re.search(r'\b429\b|rate.?limit', text, re.I):
+        code, reason = 'rate_limit', '模型服务请求过于频繁，请稍后检查服务状态'
+    elif re.search(r'connection|connecterror|网络|连接|econnrefused', type(error).__name__ + text, re.I):
+        code, reason = 'connection', '连接失败，请检查当前服务与网络状态'
+    elif stage == 'configuration':
+        code, reason = 'configuration', '主人账号或 QQ 通道配置缺失、无法读取，请检查 Fish 设置和对应配置文件'
+    else:
+        code, reason = 'delivery_failed' if stage == 'delivery' else 'execution_failed', '本阶段执行失败，请查看对应运行记录'
+    return {'stage': str(stage), 'code': code, 'reason': reason, 'uncertain': uncertain,
+            'auto_retry': False, 'silent': silent}
 
 
 def daily_limits_enabled(settings: dict, role: str) -> bool:
@@ -65,10 +153,58 @@ class Governance:
         self.db = self.root / "data" / agent_id / "governance.db"
         self.db.parent.mkdir(parents=True, exist_ok=True)
         with closing(self.connect()) as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='faults'").fetchone():
+                self._check_fault_schema(conn)
             conn.executescript("""CREATE TABLE IF NOT EXISTS usage(day TEXT, kind TEXT, count INTEGER,
                 PRIMARY KEY(day,kind)); CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,
-                ts TEXT, kind TEXT, reason TEXT, digest TEXT);""")
+                ts TEXT, kind TEXT, reason TEXT, digest TEXT);""" + FAULT_SCHEMA + """
+                CREATE TABLE IF NOT EXISTS fault_notices(token TEXT PRIMARY KEY,source TEXT,stage TEXT,code TEXT,
+                    recovered INTEGER,day TEXT,created REAL,sent INTEGER,uncertain INTEGER,finished REAL);
+                CREATE TABLE IF NOT EXISTS test_observations(case_name TEXT PRIMARY KEY,runs INTEGER,
+                    failures INTEGER,consecutive INTEGER,last_run REAL,last_failed REAL,last_passed REAL);""")
             conn.commit()
+
+    @staticmethod
+    def _check_fault_schema(conn):
+        info = list(conn.execute('PRAGMA table_info(faults)'))
+        key = [row[1] for row in sorted(info,key=lambda row:row[5]) if row[5]]
+        notice_columns = {row[1] for row in conn.execute('PRAGMA table_info(fault_notices)')}
+        if key != ['source','stage','code'] or 'detail' not in {row[1] for row in info} or 'stage' not in notice_columns:
+            raise ValueError('H1 故障表需要先审批升级并备份；请在明确执行窗口调用 upgrade_fault_schema，后台不会自动升级')
+
+    @classmethod
+    def upgrade_fault_schema(cls, root, agent_id='qq'):
+        """Explicit maintenance entry only; never called by the runtime constructor."""
+        if agent_id not in ('qq','research'): raise ValueError('未知角色')
+        path = Path(root) / 'data' / agent_id / 'governance.db'
+        with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=rw',uri=True,timeout=15)) as conn:
+            return cls._upgrade_fault_schema(conn)
+
+    @staticmethod
+    def _upgrade_fault_schema(conn):
+        """Upgrade only H1's original key, preserving every stored row in one transaction."""
+        with conn:
+            conn.execute('BEGIN IMMEDIATE')
+            before = list(conn.execute('PRAGMA table_info(faults)'))
+            count = conn.execute('SELECT COUNT(*) FROM faults').fetchone()[0]
+            key = [row[1] for row in sorted(before,key=lambda row:row[5]) if row[5]]
+            if key == ['source','code']:
+                conn.execute('ALTER TABLE faults RENAME TO faults_h1_v1')
+                conn.execute(FAULT_SCHEMA)
+                columns = ','.join('"'+row[1].replace('"','""')+'"' for row in before)
+                conn.execute(f'INSERT INTO faults({columns}) SELECT {columns} FROM faults_h1_v1')
+                conn.execute('DROP TABLE faults_h1_v1')
+            elif key != ['source','stage','code']:
+                raise ValueError('故障表结构与 H1 不兼容，已停止初始化，未清除原记录')
+            if 'stage' not in {row[1] for row in conn.execute('PRAGMA table_info(fault_notices)')}:
+                # Original notices did not store a stage; retain unknown rather than infer from a later fault.
+                conn.execute("ALTER TABLE fault_notices ADD COLUMN stage TEXT NOT NULL DEFAULT ''")
+            if 'detail' not in {row[1] for row in conn.execute('PRAGMA table_info(faults)')}:
+                conn.execute("ALTER TABLE faults ADD COLUMN detail TEXT NOT NULL DEFAULT ''")
+            after = list(conn.execute('PRAGMA table_info(faults)'))
+            after_count = conn.execute('SELECT COUNT(*) FROM faults').fetchone()[0]
+            if count != after_count: raise ValueError('故障升级前后行数不符，事务已中止')
+        return {'before_count': count, 'after_count': after_count, 'before_table_info': before, 'after_table_info': after}
 
     def connect(self):
         return sqlite3.connect(self.db, timeout=15)
@@ -121,10 +257,17 @@ class Governance:
         if "paused" in updates:
             cfg["paused_roles"][self.agent_id] = bool(updates["paused"])
         cfg["owner_permissions"] = [v for v in cfg["owner_permissions"] if v in CAPABILITIES]
-        for key in ("max_daily_calls", "max_daily_replies", "max_tool_calls_per_turn"):
+        for key in ("max_daily_calls", "max_daily_replies"):
             cfg[key] = int(cfg[key])
             if not 1 <= cfg[key] <= 10000:
                 raise ValueError("调用及回复上限需在 1–10000 之间")
+        cfg['max_tool_calls_per_turn'] = int(cfg['max_tool_calls_per_turn'])
+        if not 0 <= cfg['max_tool_calls_per_turn'] <= 10000:
+            raise ValueError('每轮工具次数需为0（无上限）至10000')
+        if cfg['chat_reasoning_effort'] not in ('off', 'low', 'high', 'max'):
+            raise ValueError('未知思考强度')
+        if cfg['reply_display'] not in ('persona', 'final', 'thinking_excerpt'):
+            raise ValueError('未知回复展示方式')
         for key, maximum in (('max_model_requests_daily', 10000), ('max_model_tokens_daily', 100000000)):
             cfg[key] = int(cfg[key])
             if not 1 <= cfg[key] <= maximum:
@@ -162,10 +305,141 @@ class Governance:
         return {key: label for key, label in CAPABILITIES.items() if key in enabled}
 
     def audit(self, kind: str, reason: str, text: str = "") -> None:
+        if re.search(r'failed|timeout', kind, re.I): reason = sanitize_fault_detail(reason)
         with closing(self.connect()) as conn:
             conn.execute("INSERT INTO audit(ts,kind,reason,digest) VALUES(?,?,?,?)",
                          (time.strftime("%Y-%m-%d %H:%M:%S"), kind, reason[:300], hashlib.sha256(text.encode()).hexdigest() if text else ""))
             conn.commit()
+
+    def fault(self, source, error, *, stage='model', uncertain=False, now=None):
+        value = classify_fault(error, stage=stage, uncertain=uncertain)
+        at = time.time() if now is None else float(now)
+        if value['silent']:
+            self.fault_outcome(source, 'silent', stage=stage, reason='她决定保持沉默', now=at)
+            return None
+        with closing(self.connect()) as db, db:
+            db.row_factory = sqlite3.Row
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('INSERT INTO faults(source,code,stage,reason,consecutive,total,first_failed,last_failed,recovered_at,uncertain,detail) '
+                       'VALUES(?,?,?,?,1,1,?,?,0,?,?) ON CONFLICT(source,stage,code) DO UPDATE SET '
+                       'stage=excluded.stage,reason=excluded.reason,consecutive=faults.consecutive+1,total=faults.total+1,'
+                       'first_failed=CASE WHEN faults.consecutive=0 THEN excluded.first_failed ELSE faults.first_failed END,'
+                       'last_failed=excluded.last_failed,uncertain=excluded.uncertain,detail=excluded.detail',
+                       (str(source), value['code'], value['stage'], value['reason'], at, at, int(value['uncertain']),sanitize_fault_detail(error)))
+            row = dict(db.execute('SELECT * FROM faults WHERE source=? AND stage=? AND code=?',
+                                  (str(source),value['stage'],value['code'])).fetchone())
+            self._fault_outcome(db, source, stage, 'uncertain' if value['uncertain'] else 'failed', value['reason'], at)
+        return {**row, 'auto_retry': False}
+
+    def fault_recovered(self, source, *, stage=None, now=None):
+        """Only an actual successful event calls this; reading status never recovers faults."""
+        at = time.time() if now is None else float(now)
+        with closing(self.connect()) as db, db:
+            db.row_factory = sqlite3.Row
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute('SELECT * FROM faults WHERE source=? AND consecutive>0' +
+                              (' AND stage=?' if stage is not None else ''),
+                              (str(source), stage) if stage is not None else (str(source),)).fetchall()
+            for row in rows:
+                db.execute('UPDATE faults SET consecutive=0,recovered_at=? WHERE source=? AND stage IS ? AND code=?',
+                           (at, row['source'], row['stage'], row['code']))
+                db.execute('INSERT INTO audit(ts,kind,reason,digest) VALUES(?,?,?,?)',
+                           (time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(at)), 'fault_recovered',
+                            f"{row['source']}（{row['stage']}/{row['code']}）已恢复"[:300], ''))
+            self._fault_outcome(db, source, stage or 'turn', 'success', '本阶段实际执行成功', at)
+        return [{**dict(row), 'consecutive': 0, 'recovered_at': at, 'auto_retry': False} for row in rows]
+
+    @staticmethod
+    def _fault_outcome(db, source, stage, outcome, reason, at):
+        value = {'source': str(source), 'stage': str(stage), 'outcome': outcome, 'reason': str(reason)[:180], 'updated': at}
+        db.execute('INSERT INTO audit(ts,kind,reason,digest) VALUES(?,?,?,?)',
+                   (time.strftime('%Y-%m-%d %H:%M:%S',time.localtime(at)), 'fault_outcome',
+                    json.dumps(value,ensure_ascii=False), ''))
+
+    def fault_outcome(self, source, outcome, *, stage='model', reason='', now=None):
+        if outcome not in ('silent','failed','uncertain','success'): raise ValueError('未知的运行记录结果')
+        with closing(self.connect()) as db, db:
+            self._fault_outcome(db,source,stage,outcome,reason,time.time() if now is None else float(now))
+
+    def claim_fault_notice(self, source, code, *, stage='model', recovered=False, now=None):
+        """Atomically reserve one notice; failed/unknown sends also retain the cooldown."""
+        at = time.time() if now is None else float(now)
+        day = time.strftime('%Y-%m-%d',time.gmtime(at + 8 * 3600))
+        with closing(self.connect()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT consecutive,recovered_at FROM faults WHERE source=? AND stage IS ? AND code=?',
+                             (str(source),stage,str(code))).fetchone()
+            if not row or (not recovered and not row[0]) or (recovered and (row[0] or not row[1])): return ''
+            if recovered:
+                last = db.execute('SELECT MAX(created) FROM fault_notices WHERE source=? AND stage IS ? AND code=? AND recovered=1',
+                                  (str(source),stage,str(code))).fetchone()[0]
+                if last is not None and last >= row[1]: return ''
+                if db.execute('SELECT 1 FROM fault_notices WHERE recovered=1 AND day=? LIMIT 1',(day,)).fetchone(): return ''
+            else:
+                recent = db.execute('SELECT MAX(created) FROM fault_notices WHERE source=? AND stage IS ? AND code=? AND recovered=0',
+                                    (str(source),stage,str(code))).fetchone()[0]
+                if recent is not None and at - recent < 1800: return ''
+            token = uuid.uuid4().hex
+            db.execute('INSERT INTO fault_notices(token,source,stage,code,recovered,day,created,sent,uncertain,finished) '
+                       'VALUES(?,?,?,?,?,?,?,0,0,0)', (token,str(source),stage,str(code),int(recovered),day,at))
+        return token
+
+    def finish_fault_notice(self, token, *, sent=False, uncertain=False, now=None):
+        at = time.time() if now is None else float(now)
+        with closing(self.connect()) as db, db:
+            return db.execute('UPDATE fault_notices SET sent=?,uncertain=?,finished=? WHERE token=? AND finished=0',
+                              (int(bool(sent)),int(bool(uncertain)),at,str(token))).rowcount == 1
+
+    def record_test_observation(self, case, passed, *, now=None):
+        at = time.time() if now is None else float(now)
+        with closing(self.connect()) as db, db:
+            db.execute('INSERT INTO test_observations VALUES(?,1,?,?,?,?,?) ON CONFLICT(case_name) DO UPDATE SET '
+                       'runs=test_observations.runs+1,failures=test_observations.failures+excluded.failures,'
+                       'consecutive=CASE WHEN excluded.failures=0 THEN 0 ELSE test_observations.consecutive+1 END,'
+                       'last_run=excluded.last_run,last_failed=MAX(test_observations.last_failed,excluded.last_failed),'
+                       'last_passed=MAX(test_observations.last_passed,excluded.last_passed)',
+                       (str(case),int(not passed),int(not passed),at,0 if passed else at,at if passed else 0))
+
+    def reminder_status(self):
+        from memory_reminder import enabled as reminder_enabled
+        from agent_scheduler import autonomous_enabled
+        cfg = self.config()
+        gate = (not cfg['paused_roles'].get('qq', False) and bool(self.owner_id()) and
+                cfg['send_policy']['owner_private']['owner_reply'])
+        return {key: {'enabled': enabled, 'effective': bool(enabled and gate), 'source': source,
+                      'reason': ('开关已开启；实际发送仍需满足到期或活跃条件' if gate else '主人账号、暂停或私聊发送设置尚不允许发送')
+                                if enabled else '进程中的现有开关已关闭'}
+                for key, enabled, source in (('memory_reminder',reminder_enabled(),'FISH_MEMORY_REMINDER'),
+                                             ('private_proactive',autonomous_enabled(self.root),'Fish 持久自主计划（任务页）'))}
+
+    @classmethod
+    def read_faults(cls, root, agent_id='qq', limit=40):
+        if agent_id not in ('qq','research'): raise ValueError('未知角色')
+        value = cls.__new__(cls)
+        value.root, value.agent_id = Path(root), agent_id
+        value.path = value.root / 'harness/control.json'
+        value.db = value.root / 'data' / agent_id / 'governance.db'
+        return value.fault_snapshot(limit)
+
+    def fault_snapshot(self, limit=40):
+        items, tests, notices, latest = [], [], [], []
+        if self.db.exists():
+            with closing(sqlite3.connect(self.db.resolve().as_uri()+'?mode=ro',uri=True,timeout=2)) as db:
+                db.row_factory = sqlite3.Row
+                tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if 'faults' in tables:
+                    items = [dict(row) for row in db.execute('SELECT * FROM faults ORDER BY (consecutive>0) DESC,last_failed DESC LIMIT ?',
+                                                             (max(1,min(int(limit),200)),))]
+                if 'test_observations' in tables:
+                    tests = [dict(row) for row in db.execute('SELECT * FROM test_observations ORDER BY (failures>0) DESC,last_failed DESC,last_run DESC LIMIT 100')]
+                if 'fault_notices' in tables:
+                    notices = [dict(row) for row in db.execute('SELECT * FROM fault_notices ORDER BY created DESC LIMIT 30')]
+                if 'audit' in tables:
+                    latest = [json.loads(row[0]) for row in db.execute("SELECT reason FROM audit WHERE kind='fault_outcome' ORDER BY id DESC LIMIT 30")]
+        return {'items': [{**{k:v for k,v in row.items() if k != 'detail'},
+                           'stage_label': row['stage'] or '未分类（历史）',
+                           'uncertain':bool(row['uncertain']),'auto_retry':False} for row in items],
+                'reminders': self.reminder_status(), 'tests': tests, 'notices': notices, 'latest': latest}
 
     def consume(self, kind: str) -> None:
         field = {"calls": "max_daily_calls", "replies": "max_daily_replies"}[kind]

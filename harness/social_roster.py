@@ -486,6 +486,27 @@ class SocialRoster:
         return self._tx(run)
 
     # ----------------------------------------------------- model-safe views
+    def observe_sender(self, group_id, sender):
+        """Refresh transport names by account; preserve owner aliases/preferences."""
+        uid = str(sender.get('id') or '')
+        if not _is_digits(str(group_id), _GROUP_RE) or not _is_digits(uid, _USER_RE):
+            return False
+        def run(conn):
+            selected = conn.execute('SELECT group_id FROM settings WHERE id=1').fetchone()
+            if not selected or selected['group_id'] != str(group_id):
+                return False
+            old = self._load(conn, str(group_id), uid)
+            # An old transport's display_name cannot distinguish card/nickname.
+            nickname = str(sender.get('nickname') if 'nickname' in sender else (old['nickname'] if old else sender.get('display_name') or sender.get('name') or ''))[:80]
+            card = str(sender.get('card') if 'card' in sender else (old['card'] if old else ''))[:80]
+            now = time.time()
+            conn.execute('''INSERT INTO members(group_id,user_id,nickname,card,present,affinity,created,updated)
+                VALUES(?,?,?,?,1,?,?,?) ON CONFLICT(group_id,user_id) DO UPDATE SET
+                nickname=excluded.nickname,card=excluded.card,present=1,updated=excluded.updated''',
+                (str(group_id), uid, nickname, card, _INITIAL_AFFINITY, now, now))
+            return True
+        return self._tx(run)
+
     def public_profile(self, group_id, user_id):
         _require_group(group_id)
         _require_user(user_id)

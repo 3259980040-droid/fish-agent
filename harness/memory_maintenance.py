@@ -288,8 +288,12 @@ def read_qq_messages(root: Path, role: str, start: float, after_id=0) -> list:
                 if role != 'qq' or not _matched_group(root, scope[5:]):
                     continue
             message_id = str(row['channel_message_id'] or row['id'])
+            # Match the live loop and owner evidence tools: qq:<local row id>.
+            # Keep the old platform reference as an alias so previous learning
+            # jobs/exclusions remain effective after this change.
             normal.append({'origin': 'qq.db', 'row_id': int(row['id']), 'ts': _parse_iso(row['ts']), 'scope': scope,
-                           'source': 'qq:' + message_id, 'subject': 'qq:' + sender, 'sender': sender,
+                           'source': 'qq:' + str(row['id']), 'source_aliases': ['qq:' + message_id],
+                           'subject': 'qq:' + sender, 'sender': sender,
                            'text': text, 'channel_message_id': message_id,
                            'conversation': str(row['conversation_id'] or '')})
     return normal
@@ -811,7 +815,8 @@ class MemoryMaintenance:
         fresh = []
         for message in collected['messages']:
             source = message['source']
-            if source in known or source in processed or int(failures.get(source, 0)) > MAX_FAILURES_RETRIED:
+            references = [source, *message.get('source_aliases', [])]
+            if any(ref in known or ref in processed or int(failures.get(ref, 0)) > MAX_FAILURES_RETRIED for ref in references):
                 continue
             fresh.append(message)
         summary = {'window': window_key, 'new_messages': len(fresh), 'scanned': collected['seen'],
@@ -842,7 +847,8 @@ class MemoryMaintenance:
             job = queue.get(message['source'])
             if job and job['scope'] == scope and job['status'] != 'failed':
                 continue              # already queued/learned by the live pipeline
-            store.enqueue(message['source'], message['text'], scope, subject=message['subject'])
+            store.enqueue(message['source'], message['text'], scope, subject=message['subject'],
+                          source_aliases=message.get('source_aliases', []))
             job = self._learning_queue(role).get(message['source'])
             if job and job['scope'] == scope and job['status'] in ('pending', 'running'):
                 mine.add(message['source'])
@@ -910,7 +916,7 @@ class MemoryMaintenance:
         Facts an owner correction conflicted with (``mark_conflict``) are
         excluded; a confirmation turns the row into a manual fact itself.
         """
-        return (row['source'] != 'manual' and row['evidence'] != 'manual'
+        return (row['source'] != 'manual' and row['evidence'] not in ('manual','owner_quote')
                 and not str(row['scope']).startswith('chat:group:') and not row.get('conflict'))
 
     def _weekly(self, role, window, now) -> dict:
@@ -1074,6 +1080,8 @@ def start_background(host, root=None, *, interval: float = 60.0, embed_interval:
             for role in ('qq', 'research'):
                 if (root / 'data' / role / 'memory.db').is_file():
                     MemoryEngine(root, role).maintenance()
+            from doc_store import maintain as maintain_documents
+            maintain_documents(root)
         except Exception:  # noqa: BLE001 - readiness is reported by status()
             pass
 

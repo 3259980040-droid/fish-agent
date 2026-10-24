@@ -56,14 +56,52 @@ _workers_lock = threading.Lock()
 _threads: Dict[Tuple[str, str], threading.Thread] = {}
 _scheduler: Dict[str, float] = {}
 _scheduler_lock = threading.Lock()
+_text_vectors = {}
+_text_vectors_lock = threading.Lock()
+
+
+def text_similarities(root, query, texts, role='qq'):
+    """Reuse a ready local encoder for expression selection; never cold-load it."""
+    worker = _worker(Path(root), role)
+    if not worker or worker.status != 'ready' or not worker.alive():
+        return None
+    values = [str(query), *[str(text) for text in texts[:32]]]
+    prefix = (str(Path(root).resolve()), worker.model)
+    with _text_vectors_lock:
+        missing = list(dict.fromkeys(value for value in values if (*prefix, value) not in _text_vectors))
+    if missing:
+        reply = worker.request({'op': 'embed', 'texts': missing}, 3)
+        if not reply.get('ok') or len(reply.get('vectors', [])) != len(missing):
+            return None
+        with _text_vectors_lock:
+            if len(_text_vectors) > 1024:
+                _text_vectors.clear()
+            for value, vector in zip(missing, reply['vectors']):
+                _text_vectors[(*prefix, value)] = _unpack(bytes.fromhex(vector))
+    with _text_vectors_lock:
+        vectors = [_text_vectors.get((*prefix, value)) for value in values]
+    if any(vector is None for vector in vectors):
+        return None
+    return [_cosine(vectors[0], vector) for vector in vectors[1:]]
 
 
 # --------------------------------------------------------------------------
 # small helpers
 # --------------------------------------------------------------------------
 
+def embed_query(root, query, role='qq'):
+    """The ready shared encoder; utility callers never cold-load a model."""
+    worker = _worker(Path(root), role)
+    if worker is None or worker.status != 'ready' or not worker.alive():
+        return None
+    reply = worker.request({'op': 'embed', 'texts': [str(query)], 'kind': 'query'}, REQUEST_TIMEOUT_S * 3)
+    if not reply.get('ok') or len(reply.get('vectors', [])) != 1:
+        return None
+    return _unpack(bytes.fromhex(reply['vectors'][0]))
+
+
 def text_digest(text: str) -> str:
-    return hashlib.sha256(str(text).encode('utf-8')).hexdigest()
+    return hashlib.sha256(('full-token-window-v2\0' + str(text)).encode('utf-8')).hexdigest()
 
 
 def embedding_text(row) -> str:
@@ -75,7 +113,7 @@ def embedding_text(row) -> str:
         parts.append('类型：' + str(row['kind']))
     if row.get('subject'):
         parts.append('主体：' + str(row['subject']))
-    return '\n'.join(parts)[:4000]
+    return '\n'.join(parts)
 
 
 def _config(root: Path) -> dict:
@@ -404,15 +442,20 @@ class MemoryEngine:
             ready, status, detail = False, 'disabled', '语义检索已关闭'
         else:
             status = worker.status if worker.available else 'model-missing'
-            ready = status == 'ready' and worker.dim > 0
+            ready = status == 'ready' and worker.dim > 0 and worker.alive()
             detail = worker.detail if worker.available else f'未找到模型环境 {_python_for(self.root, self.config)}'
         with database(self.path) as db:
             rows = [dict(row) for row in db.execute(
                 "SELECT * FROM memories WHERE status IN ('active','candidate') AND (expires=0 OR expires>?)", (time.time(),))]
         eligible = len(rows)
-        embedded = sum(1 for row in rows if (stored.get(row['id']) or {}).get('digest') == text_digest(embedding_text(row)))
-        return {'mode': 'hybrid' if ready else 'lexical', 'status': status, 'ready': ready,
-                'model': self.config['model'], 'dim': worker.dim if worker else 0, 'faiss': bool(worker and worker.faiss),
+        embedded = sum(1 for row in rows if (stored.get(row['id']) or {}).get('digest') == text_digest(embedding_text(row)) and
+                       worker is not None and (stored.get(row['id']) or {}).get('dim') == worker.dim)
+        encoder_ready = ready
+        ready = encoder_ready and embedded > 0
+        if encoder_ready and not ready:
+            status, detail = 'index-missing', '本地语义模型可用，记忆尚无匹配的有效向量索引'
+        return {'mode': 'hybrid' if ready else 'lexical', 'status': status, 'ready': ready, 'encoder_ready': encoder_ready,
+                'model': self.config['model'], 'dim': worker.dim if worker else 0, 'faiss': bool(worker and worker.faiss), 'retrieval_backend': 'sqlite-current-vector-cosine',
                 'stored_vectors': len(stored), 'stored_dims': sorted(dims), 'embedded_memories': embedded,
                 'eligible_memories': eligible, 'pending': max(0, eligible - embedded),
                 'detail': detail[:400] if detail else '', 'cache_dir': str(Path(self.root) / str(self.config.get('cache_dir') or CACHE_RELATIVE)),
@@ -420,7 +463,10 @@ class MemoryEngine:
 
     def semantic_status(self) -> dict:
         status = self.embedding_status()
-        return {key: status[key] for key in ('status', 'ready', 'mode', 'model', 'pending', 'detail')}
+        with database(self.path) as db:
+            row = db.execute("SELECT value FROM memory_maintenance_state WHERE key='last_retrieval:owner'").fetchone()
+        return {**{key: status[key] for key in ('status', 'ready', 'mode', 'model', 'pending', 'detail')},
+                'last_query': json.loads(row['value']) if row else None}
 
     # -- warming / backfill -------------------------------------------------
     def warm(self, *, wait: float = 0.0) -> bool:
@@ -444,15 +490,8 @@ class MemoryEngine:
         with database(self.path) as db:
             rows = [dict(row) for row in db.execute(
                 "SELECT * FROM memories WHERE status IN ('active','candidate') AND (expires=0 OR expires>?) "
-                "ORDER BY updated DESC LIMIT 4000", (time.time(),))]
+                "ORDER BY updated DESC", (time.time(),))]
         pending = [row for row in rows if (stored.get(row['id']) or {}).get('digest') != text_digest(embedding_text(row))]
-        if worker.faiss:
-            # The worker's FAISS index may have just started (or restarted):
-            # rebuild it from SQLite so query searches cover every vector.
-            ids = [row['id'] for row in rows if row['id'] in stored]
-            worker.request({'op': 'rebuild', 'dim': self.config['dim'] if self.config.get('dim') else 0,
-                            'ids': ids, 'vectors': [stored[key]['vector'].hex() for key in ids]})
-            worker.index_synced = True
         if not pending:
             return {'ok': True, 'status': 'ready', 'count': 0}
         pending = pending[:max(1, min(MAX_PENDING_BATCH, int(limit)))]
@@ -464,7 +503,6 @@ class MemoryEngine:
 
     def _store_vectors(self, rows: List[dict], blobs: List[bytes], worker: EmbeddingWorker) -> None:
         now = time.time()
-        vectors = []
         with database(self.path) as db:
             db.execute('BEGIN IMMEDIATE')
             for row, blob in zip(rows, blobs):
@@ -478,11 +516,6 @@ class MemoryEngine:
                            (row['id'], self.config['model'], dim, text_digest(embedding_text(row)), _pack(vector),
                             row.get('source', ''), row.get('kind', ''), row.get('evidence', ''), row.get('scope', ''),
                             float(row.get('observed') or 0), now))
-                vectors.append((row['id'], blob))
-        # Keep the worker's FAISS index (when the worker process owns it) in step.
-        if worker is not None and worker.faiss:
-            worker.request({'op': 'emplace', 'ids': [key for key, _ in vectors],
-                            'vectors': [blob.hex() for _, blob in vectors]}, REQUEST_TIMEOUT_S * 3)
 
     def maintenance(self) -> dict:
         """Warm the model and backfill a bounded batch; returns a summary."""
@@ -499,26 +532,10 @@ class MemoryEngine:
         worker = _worker(self.root, self.role)
         if worker is None or worker.status != 'ready':
             return None
-        reply = worker.request({'op': 'embed', 'texts': [query[:1000]]}, REQUEST_TIMEOUT_S * 3)
-        self._faiss_hits = None
-        if not reply.get('ok'):
+        reply = worker.request({'op': 'embed', 'texts': [query], 'kind': 'query'}, REQUEST_TIMEOUT_S * 3)
+        if not reply.get('ok') or len(reply.get('vectors', [])) != 1:
             return None
-        vector = _unpack(bytes.fromhex(reply['vectors'][0]))
-        stored = self._model_vectors()
-        if worker.faiss and not worker.index_synced:
-            # Vectors whose digest does not match the current text are stale
-            # and must not enter the worker's search index.
-            current = [key for key, row in stored.items()
-                       if row['digest'] == text_digest(embedding_text(self._memory_row(key)))]
-            rebuilt = worker.request({'op': 'rebuild', 'dim': len(vector), 'ids': current,
-                                      'vectors': [stored[key]['vector'].hex() for key in current]})
-            worker.index_synced = bool(rebuilt.get('ok'))
-        if worker.faiss:
-            hits = worker.request({'op': 'search', 'vector': bytes(_pack(vector)).hex(), 'limit': 300},
-                                  REQUEST_TIMEOUT_S * 3)
-            if hits.get('ok') and 'hits' in hits:
-                self._faiss_hits = {key: round(float(score), 6) for score, key in hits['hits']}
-        return vector
+        return _unpack(bytes.fromhex(reply['vectors'][0]))
 
     def _memory_row(self, memory_id):
         with database(self.path) as db:
@@ -531,9 +548,6 @@ class MemoryEngine:
         # Python. Vectors from another dimension (model changed) are skipped;
         # only vectors matching this query's dimension are comparable, the
         # rest wait for backfill. Stale digests (edited text) are ignored too.
-        hits = getattr(self, '_faiss_hits', None)
-        if hits:
-            return {row['id']: hits[row['id']] for row in rows if row['id'] in hits}
         stored = self._model_vectors()
         scores = {}
         for row in rows:
@@ -551,9 +565,14 @@ class MemoryEngine:
         if query and status['ready'] and self.warm(wait=RECALL_LOAD_WAIT_S):
             # Only wait briefly on an already-warming worker; never start a
             # (possibly downloading) model from the recall path.
-            query_vector = self.query_vector(query)
+            try:
+                query_vector = self.query_vector(query)
+            except Exception as exc:
+                status = {**status, 'detail': '语义查询失败：' + str(exc)[:200]}
             if query_vector is None:
+                detail = status.get('detail')
                 status = {**status, **self.embedding_status()}
+                status['detail'] = detail or '语义查询未返回有效向量'
         semantic_used = query_vector is not None
         lexical = store.search(query, scope=scope, limit=60, subject=subject)
         lexical_scores = {row['id']: float(row['lexical']) for row in lexical}
@@ -574,8 +593,11 @@ class MemoryEngine:
                     continue
                 row['lexical'] = 0.0
                 by_id[row['id']] = row
-            candidate_rows = list(by_id.values())[:3000]
+            candidate_rows = list(by_id.values())
             semantic_scores = self._cosine_scores(query_vector, candidate_rows)
+            semantic_used = bool(semantic_scores)
+            if not semantic_used:
+                status['detail'] = '当前可见范围没有与文本、模型和维度匹配的有效向量'
         channels = {'lexical': lexical_scores}
         used = {'lexical': VECTOR_WEIGHTS['lexical']}
         if semantic_used:
@@ -614,6 +636,9 @@ class MemoryEngine:
                           'embedding_status': status['status'], 'pending': status['pending'],
                           'vectors': status['stored_vectors'], 'detail': status.get('detail', ''),
                           'fusion': 'weighted_rrf', 'weights': weights, 'upstream': upstream}
+        with database(self.path) as db:
+            db.execute('INSERT OR REPLACE INTO memory_maintenance_state VALUES(?,?)',
+                       ('last_retrieval:' + str(scope), json.dumps(channel_status, ensure_ascii=False)))
         if with_status:
             return {'results': results, 'semantic': channel_status}
         return results

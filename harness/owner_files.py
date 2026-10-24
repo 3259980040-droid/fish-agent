@@ -25,7 +25,7 @@ async def onebot(root, action, params):
             if frame.get('echo') == echo: return frame
 
 
-def send_file(root, target, path, request_id):
+def send_file(root, target, path, request_id, *, session=''):
     root = Path(root)
     from bot_control import BotControl
     target = BotControl(root).validate_target(target)
@@ -41,11 +41,47 @@ def send_file(root, target, path, request_id):
         db.execute('INSERT INTO file_sends VALUES(?,?,?,?,?,?)', (request_id,target,str(source),'sending','{}',time.time()))
     kind, peer = target.split(':',1)
     params = {'user_id' if kind=='private' else 'group_id': int(peer), 'file': str(source), 'name': source.name}
+    from qq_action_record import begin,finish
+    record = begin(root,'upload_private_file' if kind=='private' else 'upload_group_file',params,session)
+    async def upload():
+        history_action = 'get_friend_msg_history' if kind=='private' else 'get_group_msg_history'
+        history_args = {'user_id' if kind=='private' else 'group_id':int(peer),'count':20}
+        def messages(frame):
+            data = frame.get('data') or {}
+            return data.get('messages',[]) if isinstance(data,dict) else []
+        try:
+            before = {str(m.get('message_id')) for m in messages(await onebot(root,history_action,history_args))}
+        except Exception:
+            before = None
+        receipt = await onebot(root,'upload_private_file' if kind=='private' else 'upload_group_file',params)
+        if receipt.get('status')!='ok' or receipt.get('retcode',0)!=0:
+            return 'failed',receipt
+        data = receipt.get('data') or {}
+        if isinstance(data,dict) and data.get('message_id'):
+            return 'sent',receipt
+        # An accepted upload is not a delivered chat message. Read back once;
+        # never repeat the upload when confirmation is unavailable.
+        if before is not None:
+            await asyncio.sleep(1)
+            try:
+                for message in messages(await onebot(root,history_action,history_args)):
+                    if str(message.get('message_id')) in before:
+                        continue
+                    for segment in message.get('message') or []:
+                        file = segment.get('data') or {}
+                        returned_name = str(file.get('name') or file.get('file_name') or file.get('file') or '')
+                        if segment.get('type')=='file' and returned_name==source.name:
+                            receipt['readback'] = {'message_id':message.get('message_id'),'file':file}
+                            return 'sent',receipt
+            except Exception as exc:
+                receipt['readback_error'] = type(exc).__name__
+        receipt['note'] = 'QQ接受上传请求，但未取得消息送达凭据；未自动重发'
+        return 'unknown',receipt
     try:
-        receipt = asyncio.run(onebot(root, 'upload_private_file' if kind=='private' else 'upload_group_file', params))
-        state = 'sent' if receipt.get('status')=='ok' and receipt.get('retcode',0)==0 else 'failed'
+        state,receipt = asyncio.run(upload())
     except Exception as exc:
         state, receipt = 'unknown', {'error': type(exc).__name__, 'note': '未自动重发，请核对QQ结果'}
+    finish(record,receipt,error=receipt.get('note') or receipt.get('error'))
     with database(db_path) as db:
         db.execute('UPDATE file_sends SET state=?,receipt=?,updated=? WHERE id=?',
                    (state,json.dumps(receipt,ensure_ascii=False),time.time(),request_id))

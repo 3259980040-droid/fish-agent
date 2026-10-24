@@ -214,6 +214,7 @@ class DSHWebClient:
                     if include_reasoning:
                         result['reasoning'] = self._final_reasoning(recent)
                     return result
+                return {'ok': True, 'text': '', 'completed_without_text': True}
             last_count = len(texts)
             await asyncio.sleep(1)
         return {"ok": False, "error": f"timeout (assistant_count={last_count})" + ('; ' + last_error if last_error else '')}

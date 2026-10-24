@@ -127,3 +127,55 @@ def database(path: Path):
             yield conn
     finally:
         conn.close()
+
+
+@contextlib.contextmanager
+def thinking_slot(root, role, cancelled=None, *, key=None):
+    """Serialize the same Fish's main turns across desktop and QQ processes."""
+    path = Path(root) / 'data/social' / (str(key or role) + '-thinking.lock')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a+b') as handle:
+        if path.stat().st_size == 0:
+            handle.write(b'0')
+            handle.flush()
+        waited = False
+        started = time.monotonic()
+        while True:
+            if cancelled is not None and cancelled.is_set():
+                raise InterruptedError('主人已取消等待中的回合')
+            try:
+                handle.seek(0)
+                if os.name == 'nt':
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if not waited:
+                    from governance import Governance
+                    Governance(Path(root), role).audit('chat.queued', '主思考正在处理上一轮，当前输入继续等待')
+                    waited = True
+                time.sleep(.05)
+        try:
+            if waited:
+                from governance import Governance
+                Governance(Path(root), role).audit('chat.dequeued', '已进入主思考；实际等待 %.3f 秒' % (time.monotonic() - started))
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == 'nt':
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def serial_thinking(function):
+    @functools.wraps(function)
+    def run(root, role, *args, **kwargs):
+        with thinking_slot(root, role, kwargs.get('cancelled'), key=kwargs.get('execution_key')):
+            return function(root, role, *args, **kwargs)
+    return run

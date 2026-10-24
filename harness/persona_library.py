@@ -4,10 +4,17 @@ Formats follow AstrBot persona exports, MaiBot personality configuration and
 plain character Markdown. Source prompts never grant runtime tool authority.
 """
 import json
+from contextlib import closing
 from pathlib import Path
+import sqlite3
+import time
 import tomllib
+import uuid
 from social_context import SocialContext
-from storage import database
+from storage import database, locked_settings
+
+# Columns a persona backup has to carry to be restorable with one INSERT.
+BACKUP_COLUMNS = ('id', 'role', 'name', 'body', 'global_rules', 'workspace_rules', 'digest', 'parent', 'created')
 
 
 class PersonaLibrary:
@@ -48,6 +55,109 @@ class PersonaLibrary:
         if not result:raise ValueError('未找到人格正文；支持 Markdown、AstrBot JSON 和 MaiBot TOML')
         return result
 
+    def create(self,name,body):
+        """Store one persona the owner wrote here; it is never applied automatically."""
+        title=' '.join(str(name or '').split());text=str(body or '').strip()
+        if not title:raise ValueError('请填写人格名称')
+        if len(title)>80:raise ValueError('人格名称最多 80 字')
+        if not text:raise ValueError('请填写人格正文')
+        if len(text)>40000:raise ValueError('人格正文最多 40000 字')
+        return self.add(title,text,source='DSH Fish 新建人格')
+
+    @locked_settings
+    def clear(self,keep=''):
+        """Back up bindings, then remove only QQ personas with no live references."""
+        contexts=self.contexts;owner=contexts.owner()
+        live=str(keep or contexts.active_persona('qq')['id'])
+        if not live:live=contexts.ensure_default('qq')['id']
+        with database(contexts.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            rows=db.execute("SELECT * FROM personas WHERE role='qq' ORDER BY created DESC,id").fetchall()
+            selected=next((row for row in rows if row['id']==live),None)
+            if selected is None:raise ValueError('要保留的 QQ 人格版本不存在，已停止清理')
+            tables={row['name'] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            spaces={row['id']:dict(row) for row in db.execute('SELECT * FROM spaces')}
+            in_use={}
+
+            def protect(revisions,reason):
+                for revision in set(revisions)-{''}:
+                    counts=in_use.setdefault(revision,{})
+                    counts[reason]=counts.get(reason,0)+1
+
+            for table,reason in (('default_personas','角色默认'),('deployments','群部署'),('agent_profiles','Agent活动人格')):
+                if table not in tables:
+                    continue
+                for row in db.execute(f'SELECT revision FROM {table}'):
+                    protect([row['revision']],reason)
+            for table in ('owner_routes','group_test_routes'):
+                if table not in tables:continue
+                for row in db.execute(f'SELECT space FROM {table}'):
+                    if row['space'] in spaces:
+                        protect([spaces[row['space']]['revision']],'正在使用的窗口')
+            # These references cross database boundaries; never create/migrate a
+            # database just to inspect it, or treat a read error as zero references.
+            for kind,path in (('desktop',self.root/'data/qq/desktop-chat.db'),
+                              ('tools',self.root/'data/tool-host.db')):
+                if not path.exists():continue
+                try:
+                    with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True,timeout=20)) as refs:
+                        refs.row_factory=sqlite3.Row
+                        if kind=='desktop':
+                            for row in refs.execute('SELECT space_id,revision FROM conversations'):
+                                revisions=[row['revision']] if row['revision'] else []
+                                if row['space_id'] in spaces:revisions.append(spaces[row['space_id']]['revision'])
+                                protect(revisions,'桌面对话')
+                        elif refs.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='identities'").fetchone():
+                            from group_tests import parse_scope
+                            sessions={value['session']:value['revision'] for value in spaces.values() if value['session']}
+                            for row in refs.execute('SELECT session,scope FROM identities'):
+                                trial=parse_scope(row['scope'])
+                                sid=row['scope'][6:] if row['scope'].startswith('space:') else trial[1] if trial else ''
+                                revisions=[sessions[row['session']]] if row['session'] in sessions else []
+                                if sid in spaces:revisions.append(spaces[sid]['revision'])
+                                protect(revisions,'工具会话')
+                except sqlite3.Error as exc:
+                    raise ValueError(f'引用检查失败，已停止人格清理（{path.name}）：{exc}') from exc
+            backup=self._backup(db,live,tables)
+            result={'kept':{'id':live,'name':selected['name']},
+                    'deleted':0,'backup':str(backup),'protected':[],'windows':0}
+            for row in rows:
+                revision=row['id']
+                if revision==live:continue
+                if revision in in_use:
+                    counts=in_use[revision]
+                    result['protected'].append({'id':revision,'name':row['name'],'reason':'、'.join(counts),
+                                                'reference_count':sum(counts.values()),'references':counts})
+                    continue
+                for space in [str(value['id']) for value in db.execute('SELECT id FROM spaces WHERE revision=?',(revision,))]:
+                    for table in ('group_test_routes','group_test_spaces','owner_routes'):
+                        if table in tables:db.execute(f'DELETE FROM {table} WHERE space=?',(space,))
+                    db.execute('DELETE FROM spaces WHERE id=?',(space,))
+                    result['windows']+=1
+                for table in ('approvals','persona_output_modes','persona_sources'):
+                    db.execute(f'DELETE FROM {table} WHERE revision=?',(revision,))
+                db.execute('DELETE FROM personas WHERE id=?',(revision,))
+                result['deleted']+=1
+        return result
+
+    def _backup(self,db,keep,tables):
+        """Snapshot personas and bindings from the same transaction as cleanup."""
+        path=self.root/'backups'/('personas-'+time.strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:6]+'.json')
+        sources={row['revision']:{'source':row['source'],'format':row['format']}
+                 for row in db.execute('SELECT * FROM persona_sources')}
+        payload={'format':'fish-personas','version':2,'created':time.time(),'root':str(self.root),
+                 'kept':keep,'columns':list(BACKUP_COLUMNS),'sources':sources,
+                 'personas':[dict(row) for row in db.execute('SELECT * FROM personas')]}
+        for table in ('spaces','owner_routes','group_test_routes','group_test_spaces',
+                      'default_personas','deployments','approvals','persona_output_modes','agent_profiles'):
+            payload[table]=[dict(row) for row in db.execute(f'SELECT * FROM {table}')] if table in tables else []
+        try:
+            path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_text(json.dumps(payload,ensure_ascii=False,indent=2)+chr(10),encoding='utf-8')
+        except OSError as exc:
+            raise ValueError(f'人格备份失败，未执行清理：{exc}') from exc
+        return path
+
     def list(self):
         with database(self.contexts.path) as db:
             sources={r['revision']:r['source'] for r in db.execute('SELECT * FROM persona_sources')}
@@ -67,18 +177,8 @@ class PersonaLibrary:
         from group_tests import GroupTests
         c=self.contexts;p=c.persona(c.resolve(revision) if len(revision)<32 else revision);owner=c.owner()
         if target=='owner':
-            current=c.owner_space(owner)
-            from tulpa_owner import matches
-            tulpa=bool(current and matches(self.root,current))
-            if current and not new:
-                space=c.change_persona(current['id'],p['id'])
-            else:space=c.create_space('qq',p['name']+' · 主人私聊',revision=p['id'],origin='owner-qq')
-            c.select_owner_space(space['id'],owner)
-            if tulpa:
-                try:self.reload_tulpa(space,p)
-                except Exception:
-                    c.change_persona(current['id'],current['revision']);c.select_owner_space(current['id'],owner)
-                    raise
+            c.apply_active_persona('qq', p['id'])
+            return {'ok':True,'space':'','revision':p['id'],'name':p['name'],'history':'keep'}
         elif target.startswith('group:'):
             group=target.split(':',1)[1];tests=GroupTests(self.root);tests.require_controller(group,owner)
             current=tests.current(group)
@@ -86,30 +186,3 @@ class PersonaLibrary:
         else:raise ValueError('请选择主人私聊或白名单群')
         return {'ok':True,'space':space['id'],'revision':p['id'],'name':p['name'],'history':'new' if new else 'keep'}
 
-    def reload_tulpa(self,space,persona):
-        from storage import settings_lock
-        with settings_lock(self.root/'data/integrations/tulpa/call-queue',timeout=120):
-            return self._reload_tulpa(space,persona)
-
-    def _reload_tulpa(self,space,persona):
-        from storage import read_json,write_json
-        from plugin_registry import PluginRegistry
-        path=self.root/'data/integrations/tulpa/owner-route.json';cfg=read_json(path)
-        directory=self.root/'data/integrations/tulpa/app/prompts';directory.mkdir(parents=True,exist_ok=True)
-        preset='fish_'+persona['id'];(directory/(preset+'.md')).write_text(persona['body'],encoding='utf-8')
-        reg=PluginRegistry(self.root);plugin=next(p for p in reg.entries() if p['id']=='tulpa_owner')
-        old=self.contexts.persona(cfg['persona_revision']);old_preset='fish_'+old['id']
-        (directory/(old_preset+'.md')).write_text(old['body'],encoding='utf-8')
-        def start(selected):
-            value=reg._run(plugin,'call','start_chat_session',{'conversation_id':cfg['conversation_id'],
-                'persona_preset':selected,'idempotency_key':'fish-persona-'+__import__('uuid').uuid4().hex})
-            packet=json.loads(next(b['text'] for b in value['content'] if b['type']=='text'))
-            if not packet.get('session',{}).get('active'):raise RuntimeError('原版人格会话尚未开始，请检查 MCP 记录')
-            return packet
-        reg._run(plugin,'call','stop_chat_session',{'session_id':cfg['chat_session_id']})
-        try:packet=start(preset)
-        except Exception:
-            restored=start(old_preset);cfg['chat_session_id']=restored['session']['id'];write_json(path,cfg)
-            raise
-        cfg.update(chat_session_id=packet['session']['id'],space_id=space['id'],persona_revision=persona['id'])
-        write_json(path,cfg)

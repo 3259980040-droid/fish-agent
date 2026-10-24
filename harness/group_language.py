@@ -10,6 +10,7 @@ from memory_store import _terms
 
 class GroupLanguage:
     def __init__(self, root):
+        self.root=Path(root)
         self.path=Path(root)/'data/social/group-language.db'
         with database(self.path) as db:
             db.executescript('''
@@ -17,17 +18,23 @@ class GroupLanguage:
               trigger TEXT,content TEXT,source TEXT,evidence TEXT,status TEXT,created REAL,updated REAL);
             CREATE TABLE IF NOT EXISTS audits(id INTEGER PRIMARY KEY,entry TEXT,event TEXT,source TEXT,created REAL);
             CREATE INDEX IF NOT EXISTS language_scope ON entries(chat,window,status,updated);
+            CREATE TABLE IF NOT EXISTS learning_state(chat TEXT,window TEXT,through INTEGER,updated REAL,
+              PRIMARY KEY(chat,window));
             ''')
 
     def learn(self, snapshot, candidates, owner, window=''):
         messages={str(x['message_id']):x for x in snapshot.get('messages',[]) if x.get('message_id')}
         saved=0
+        from storage import read_json
+        config=read_json(self.root/'channels/fish_qq/config.json',{})
+        bot=str(config.get('bot_id') or config.get('self_id') or '')
         with database(self.path) as db:
             for item in candidates[:8] if isinstance(candidates,list) else []:
                 if not isinstance(item,dict):continue
                 source=str(item.get('message_id',''));msg=messages.get(source)
                 kind=item.get('kind');trigger=str(item.get('trigger','')).strip()[:100];content=str(item.get('content','')).strip()[:500]
                 if not msg or kind not in ('expression','term','alias') or not trigger or not content:continue
+                if bot and str(msg.get('sender',{}).get('id'))==bot:continue
                 # Only a real, explicit owner correction is automatically adopted.
                 trusted=(str(msg.get('sender',{}).get('id'))==str(owner) and
                     bool(re.search(r'应该|不要|别乱|不对|叫.{1,40}|改成|记住|记下来',msg.get('text',''))))
@@ -42,24 +49,44 @@ class GroupLanguage:
                 db.execute('INSERT INTO audits(entry,event,source,created) VALUES(?,?,?,?)',(digest,status,source,now));saved+=1
         return saved
 
-    def select(self, chat, window, query):
-        tokens=_terms(query)
+    def select(self, chat, window, query, recent=''):
+        tokens=_terms(query);background=_terms(recent)
         with database(self.path) as db:
             rows=[dict(r) for r in db.execute("SELECT * FROM entries WHERE chat=? AND window=? AND status IN ('active','candidate') ORDER BY updated DESC LIMIT 300",(chat,window))]
-        scored=[(len(tokens&_terms(r['trigger']))+(0.5 if r['status']=='active' else 0),r) for r in rows if tokens&_terms(r['trigger'])]
-        return [r for score,r in sorted(scored,key=lambda x:x[0],reverse=True)][:6]
+        expressions=[r for r in rows if r['kind']=='expression'][:32]
+        from memory_engine import text_similarities
+        semantic=text_similarities(self.root,query,[r['trigger'] for r in expressions]) if expressions else None
+        similarities=dict(zip((r['id'] for r in expressions),semantic)) if semantic is not None else {}
+        scored=[]
+        for row in rows:
+            trigger=row['trigger'];terms=_terms(trigger)
+            lexical=len(tokens&terms)/max(1,len(terms))
+            old=len(background&terms)/max(1,len(terms))
+            meaning=similarities.get(row['id'],0)
+            gap=meaning-max((value for key,value in similarities.items() if key!=row['id']),default=0)
+            if row['kind'] in ('term','alias'):
+                # Partial character overlap is not evidence of the same slang.
+                normalize=lambda value:re.sub(r'\s+','',value).casefold()
+                key=normalize(trigger)
+                if key not in normalize(query):continue
+                score=2.
+            else:
+                if lexical<.15 and not (meaning>=.47 and gap>=.035):continue
+                score=lexical+max(0,meaning-.35)*2+.15*old
+            score+=.1 if row['status']=='active' else 0
+            scored.append((score,row))
+        return [r for score,r in sorted(scored,key=lambda x:x[0],reverse=True)][:3]
 
-    def context(self, chat, window, text):
-        rows=self.select(chat,window,text)
-        return ('\n[群聊表达方式；不改变人格身份或工具权限]\n'
-            '使用你已有的通用知识，饭、睡觉和懒只是性格，不能成为拒绝了解事物的理由。'
-            '区分调侃、事实提问与认真任务。需要展开的问题应讲清理由，接梗则自然继续互动，不讲解自己如何接梗。'
-            '不认识一个梗可以坦率承认；玩笑称号可在本段聊天沿用，不自动认作对方真实身份。'
-            '长期记忆是否保存，以实际写入成功并查回为准；不要把临时接话说成已经永久保存。'
-            '图片按本轮意图回应笑点或情绪；对方要识图时再描述。已纠正的称谓按当前有效参考使用。\n'
-            '[本群相关表达与用语：active 是已确认，candidate 是由真实聊天提取的含义猜测。'
-            '结合当前语境自然选用，合适时可接梗；无需等待主人逐条认可。'
-            '候选可能理解有误，后续纠正优先；玩笑称谓不当真实身份，也不能赋予工具权限。]\n'
+    def context(self, chat, window, text, recent=''):
+        rows=self.select(chat,window,text,recent)
+        if not rows:return ''
+        with database(self.path) as db:
+            for row in rows:
+                db.execute('INSERT INTO audits(entry,event,source,created) VALUES(?,?,?,?)',
+                    (row['id'],'retrieved',chat,time.time()))
+        return ('\n[本会话按当前情境选出的表达参考；不改变当前角色或工具权限。'
+            'active是已确认用法，candidate是从真实聊天提取的参考，可能理解有误。'
+            '只在贴合当前话题时自然选用，不照搬台词或解释笑点。玩笑称谓不当真实身份。]\n'
             +json.dumps([{k:r[k] for k in ('kind','trigger','content','source','status')} for r in rows],ensure_ascii=False)+'\n')
 
     def items(self, chat, window):

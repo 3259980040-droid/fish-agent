@@ -59,14 +59,20 @@ def application(root: Path, ui_port: int):
         if not hmac.compare_digest(request.headers.get('authorization', ''), 'Bearer ' + token):
             raise HTTPException(403)
         args = await request.json()
-        readable = action.startswith(('get_', 'fetch_', 'can_'))
-        private_send = action == 'send_private_msg' and str(args.get('user_id', '')) == owner
-        if not (readable or private_send or action in ('add_custom_face', 'set_msg_emoji_like')):
-            raise HTTPException(403, '此接入仅用于主人私聊；未开启群发送或空间发布。')
+        # The owner explicitly granted the complete QQ tool environment. The
+        # adapter authenticates the service, then returns the actual API result.
         if not bridge.ready.is_set():
             raise HTTPException(503, 'QQ 连接正在恢复。')
         try:
-            return await bridge.send_action(action, args, timeout=30)
+            from qq_action_record import begin,finish
+            record = begin(root,action,args)
+            try:
+                receipt = await bridge.send_action(action, args, timeout=30)
+            except Exception as exc:
+                finish(record,error=str(exc))
+                raise
+            finish(record,receipt)
+            return receipt
         except Exception as exc:
             # The caller records unknown send states; never retry here.
             raise HTTPException(502, type(exc).__name__) from None

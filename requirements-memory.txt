@@ -1,0 +1,3 @@
+# Dedicated local embedding environment used by memory_engine.py.
+fastembed==0.9.0
+onnxruntime==1.31.0

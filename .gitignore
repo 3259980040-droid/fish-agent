@@ -26,6 +26,8 @@ artifacts/
 backups/
 screenshots/
 vendor/
+workspace/
+需要清理/
 napcat/
 shared/
 qq/

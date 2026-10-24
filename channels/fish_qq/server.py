@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from datetime import datetime
@@ -22,6 +23,18 @@ from harness.governance import Governance
 
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def receipt_message_id(result) -> str | None:
+    """OneBot integer IDs may be signed; null/bool/object/zero are not receipts."""
+    data=result.get('data') if isinstance(result,dict) else None
+    value=data.get('message_id') if isinstance(data,dict) else None
+    if type(value) is int:
+        return str(value) if value else None
+    if isinstance(value,str) and re.fullmatch(r'-?[0-9]+',value):
+        number=int(value)
+        return str(number) if number else None
+    return None
 
 
 class FishQQApp:
@@ -54,7 +67,12 @@ class FishQQApp:
     async def start(self) -> None:
         self.config.validate()
         self.lock.acquire()
+        from harness.emoji_store import EmojiStore
         recovered = self.outbox.recover()
+        confirmed={r['id']+':'+s['asset_id']:r['receipt'] for r in self.outbox.all()
+                   if r.get('status')=='confirmed' and r.get('receipt')
+                   for s in (r.get('payload') or {}).get('segments',[]) if s.get('asset_id')}
+        EmojiStore(self.governance.root).recover_sends(confirmed)
         self.recovered_queued = recovered["queued"]
         self.onebot = OneBotClient(
             self.config.napcat_url,
@@ -302,6 +320,7 @@ class FishQQApp:
             "seq": self.seq,
             "uptime_s": int(time.time() - self.counters.started_at),
             "version": "0.1.0",
+            "emoji_delivery_version": 2,
             "queue": {"outbox": queue},
             "counters": {"received": self.counters.received, "sent": self.counters.sent,
                          "failed": self.counters.failed},
@@ -324,28 +343,35 @@ class FishQQApp:
         if chat_id.startswith('group:'):
             from .policy import unlimited_group
             unlimited = unlimited_group(self.config.root, chat_id)
-        allowed, retry_after = self.limiter.check(chat_id, unlimited=unlimited)
-        if not allowed:
-            return {"ok": False, "error": {
-                "code": "rate_limited", "message": "outbound technical limit",
-                "retry_after_ms": retry_after, "may_have_sent": False,
-            }}
         key = payload.get("idempotency_key")
         if key:
             cached = self.idempotency.get(str(key))
-            if cached and cached[0] > time.time():
+            if cached and cached[0] > time.time() and cached[1].get('chat_id')==chat_id:
                 return {"ok": True, "payload": cached[1]}
+            prior=self.outbox.find_request(chat_id,str(key))
+            if prior:
+                receipt=prior.get('receipt') or {}
+                if prior['status']=='confirmed' and receipt.get('chat_id')==chat_id and receipt.get('message_id'):
+                    return {'ok':True,'payload':receipt}
+                return {'ok':False,'error':{'code':'idempotency_'+prior['status'],
+                    'message':'此请求已有发送记录，未重复发送；请核对原回执',
+                    'may_have_sent':prior['status'] in ('inflight','unknown')}}
+        allowed,retry_after=self.limiter.check(chat_id,unlimited=unlimited)
+        if not allowed:
+            return {'ok':False,'error':{'code':'rate_limited','message':'outbound technical limit',
+                'retry_after_ms':retry_after,'may_have_sent':False}}
         try:
             self._check_delivery(chat_id, segments)
             self.governance.consume("replies")
         except (PermissionError, OSError, ValueError) as exc:
             return {"ok": False, "error": {"code": "policy_blocked", "message": str(exc), "may_have_sent": False}}
         self.limiter.hit(chat_id)
-        record = self.outbox.add("send_message", payload, ttl_s=600)
+        from harness.send_policy import origin_kind
+        record = self.outbox.add("send_message", payload, ttl_s=600, origin_kind=origin_kind(str(key or '')))
         self.outbox.set_status(record["id"], "inflight")
         chat_type, target = chat_id.split(":", 1)
         try:
-            segments = self._resolve_images(segments, chat_id)
+            segments = self._resolve_images(segments, chat_id, request_id=record['id'])
         except (ValueError, PermissionError):
             self.outbox.set_status(record['id'], 'failed')
             return {'ok': False, 'error': {'code': 'emoji_unavailable', 'may_have_sent': False}}
@@ -360,46 +386,55 @@ class FishQQApp:
             params = {"user_id": int(target), "message": message}
         try:
             assert self.onebot is not None
+            self._finish_images(segments,'sending')
             result = await self.onebot.send_action(action, params, timeout=self.config.send_timeout_s)
         except OneBotTimeout as exc:
+            self._finish_images(segments,'unknown',error=str(exc))
             self.outbox.set_status(record["id"], "unknown")
             self.counters.failed += 1
             return {"ok": False, "error": {
                 "code": "timeout", "message": str(exc), "may_have_sent": True,
             }}
         except OneBotUnavailable as exc:
-            self.outbox.set_status(record["id"], "unknown")
+            self._finish_images(segments,'failed',error=str(exc))
+            self.outbox.set_status(record["id"], "failed")
             self.counters.failed += 1
             return {"ok": False, "error": {
                 "code": "channel_unavailable", "message": str(exc), "may_have_sent": False,
             }}
         except OneBotError as exc:
-            self.outbox.set_status(record["id"], "unknown")
+            self._finish_images(segments,'failed',error=str(exc))
+            self.outbox.set_status(record["id"], "failed")
             self.counters.failed += 1
             return {"ok": False, "error": {
                 "code": "send_failed", "message": str(exc), "may_have_sent": False,
             }}
-        data = result.get("data") if isinstance(result, dict) else {}
-        message_id = str((data or {}).get("message_id", ""))
-        self.outbox.set_status(record["id"], "confirmed")
+        message_id = receipt_message_id(result)
+        if not message_id:
+            self.outbox.set_status(record['id'],'unknown')
+            self._finish_images(segments,'unknown',error='缺少有效QQ消息ID')
+            return {'ok':False,'error':{'code':'missing_message_id','may_have_sent':True}}
+        result_payload = {"chat_id": chat_id, "message_id": message_id, "sent_at": now_iso()}
+        self.outbox.set_status(record["id"], "confirmed", receipt=result_payload)
+        self._finish_images(segments,'sent',receipt=result_payload)
         if message_id:
             self.bot_message_ids.add(message_id)
             if len(self.bot_message_ids) > 1000:
                 self.bot_message_ids = set(list(self.bot_message_ids)[-500:])
-        result_payload = {"chat_id": chat_id, "message_id": message_id, "sent_at": now_iso()}
         if key:
             self.idempotency[str(key)] = (time.time() + 600, result_payload)
         self.counters.sent += 1
         return {"ok": True, "payload": result_payload}
 
-    def _resolve_images(self, segments, chat_id):
+    def _resolve_images(self, segments, chat_id, *, request_id=''):
         from harness.emoji_store import EmojiStore
         result = []
         for segment in segments:
             if segment.get('asset_id'):
                 try:
-                    asset = EmojiStore(self.governance.root).reserve_send(segment['asset_id'], chat_id)
-                    result.append({'type': 'image', 'url': asset['file']})
+                    asset = EmojiStore(self.governance.root).reserve_send(segment['asset_id'], chat_id,
+                        request_id=request_id+':'+segment['asset_id'] if request_id else None)
+                    result.append({'type':'image','url':asset['file'],'emoji_request_id':asset['reservation_id']})
                 except (ValueError, PermissionError):
                     self.governance.audit('emoji_skipped', '表情不可用或仍在冷却；保留已通过检查的文字回复')
             else:
@@ -407,6 +442,12 @@ class FishQQApp:
         if not result:
             raise ValueError('没有可发送的内容')
         return result
+
+    def _finish_images(self, segments, state, *, receipt=None, error=''):
+        from harness.emoji_store import EmojiStore
+        for segment in segments:
+            if segment.get('emoji_request_id'):
+                EmojiStore(self.governance.root).finish_send(segment['emoji_request_id'],state,receipt=receipt,error=error)
 
     def _check_delivery(self, chat_id: str, segments: list[dict]) -> None:
         kind, target = chat_id.split(":", 1)
@@ -457,6 +498,7 @@ class FishQQApp:
         await self.ready_event.wait()
         for record in self.recovered_queued:
             payload = record.get("payload") or {}
+            segments=[]
             try:
                 chat_id = str(payload.get("chat_id", ""))
                 segments = normalize_outbound(payload.get("segments"), self.config.max_text_chars,
@@ -464,7 +506,8 @@ class FishQQApp:
                 self._check_delivery(chat_id, segments)
                 self.governance.consume("replies")
                 chat_type, target = chat_id.split(":", 1)
-                message = to_onebot_segments(self._resolve_images(segments, chat_id))
+                segments=self._resolve_images(segments,chat_id,request_id=record['id'])
+                message = to_onebot_segments(segments)
                 if payload.get("reply_to"):
                     message = [{"type": "reply", "data": {"id": str(payload["reply_to"])}}] + message
                 if chat_type == "group":
@@ -472,7 +515,16 @@ class FishQQApp:
                 else:
                     action, params = "send_private_msg", {"user_id": int(target), "message": message}
                 self.outbox.set_status(record["id"], "inflight")
-                await self.onebot.send_action(action, params, timeout=self.config.send_timeout_s)
-                self.outbox.set_status(record["id"], "confirmed")
-            except Exception:
+                self._finish_images(segments,'sending')
+                result = await self.onebot.send_action(action, params, timeout=self.config.send_timeout_s)
+                message_id=receipt_message_id(result)
+                if not message_id:
+                    self.outbox.set_status(record['id'],'unknown')
+                    self._finish_images(segments,'unknown',error='缺少有效QQ消息ID')
+                    continue
+                receipt={'chat_id':chat_id,'message_id':message_id,'sent_at':now_iso()}
+                self.outbox.set_status(record['id'],'confirmed',receipt=receipt)
+                self._finish_images(segments,'sent',receipt=receipt)
+            except Exception as exc:
+                self._finish_images(segments,'unknown',error=str(exc))
                 self.outbox.set_status(record["id"], "unknown")

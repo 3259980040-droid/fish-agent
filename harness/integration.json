@@ -3,5 +3,6 @@
   "native_ui_package": "E:/Program Files/DSH/source/dsh/packages/client/ui-fish",
   "desktop_home": "E:/Program Files/DSH/source/dsh/apps/desktop/.desktop-build/development/home",
   "keep_background_on_close": true,
-  "python_executable": "E:/Program Files/DSH/runtime/python313/pythonw.exe"
+  "python_executable": "E:/Program Files/DSH/runtime/python313/pythonw.exe",
+  "qzone_enabled": true
 }

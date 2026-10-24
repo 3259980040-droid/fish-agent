@@ -130,6 +130,17 @@ def policy_check(root, chat_id: str, *, action: str, scheduled: bool = False, co
         return False, '主人已暂停'
     policy = cfg['send_policy']
     owner = owner_private_chat(root)
+    if action == 'fish_autonomous':
+        if chat_id == owner:
+            return (True, '') if policy['owner_private']['owner_reply'] else (False, '主人关闭了私聊发送')
+        if str(chat_id).startswith('group:'):
+            from group_policy import GroupPolicy
+            group = GroupPolicy(root).config(chat_id)
+            if not group['listen'] or not group['reply']:
+                return False, '此群的旁听或回复已关闭'
+            if float(group.get('dive_until') or 0) > time.time():
+                return False, 'Fish 当前选择在此群潜水'
+            return True, ''
     if chat_id == owner:
         if action == 'owner_reply':
             ok = policy['owner_private']['owner_reply']
@@ -159,6 +170,98 @@ def decide(root, chat_id: str, *, action: str, scheduled: bool = False, context:
 
 def _slot(chat_id: str) -> str:
     return 'owner_private' if chat_id.startswith('private:') else 'group' if chat_id.startswith('group:') else 'other'
+
+
+def origin_kind(request_id: str) -> str:
+    """Classify program-owned request IDs; these labels confer no authority."""
+    key = str(request_id).removeprefix('scheduled:')
+    if key.startswith('group-job-'): return 'group_agent'
+    if key.startswith('owner-send:'): return 'owner_delegated'
+    if key.startswith(('sched:', 'schedule:')): return 'scheduled'
+    if key.startswith(('owner-delivery:', 'owner-task:')): return 'owner_delegated'
+    return 'unknown'
+
+
+def public_origin(row: dict) -> dict:
+    """Human-readable receipt facts, shared by every group-model projection."""
+    labels = {'group_agent': '由本群聊天任务生成并发送',
+        'owner_delegated': '主人在其他入口提出请求后，由工具受托发送到本群；发起方是主人，不是本群聊天任务自行决定发送',
+        'scheduled': '由已安排的定时任务触发发送', 'unknown': '没有可核实的发起路径，不能认定为自主或受托发送'}
+    kind = row.get('origin_kind', 'unknown')
+    if kind not in labels: kind = 'unknown'
+    return {**row, 'origin_kind': kind, 'origin_description': labels[kind]}
+
+
+def _outbound_box(root):
+    from storage import read_json
+    from channels.fish_qq.spool import Outbox
+    config = read_json(root / 'channels/fish_qq/config.json')
+    state = Path(config.get('spool_dir', 'channel-state'))
+    if not state.is_absolute(): state = root / state
+    return Outbox(state) if (state / 'outbox.jsonl').is_file() else None
+
+
+def _owner_receipts(root, chat_id, *, limit=None):
+    """Read existing successful sends; private request IDs never leave this iterator."""
+    import json
+    import sqlite3
+    from contextlib import closing
+    path = root / 'data/social/owner-control.db'
+    if not path.is_file(): return
+    try:
+        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=1)) as db:
+            db.row_factory = sqlite3.Row
+            sql = "SELECT id,text,receipt FROM sends WHERE target=? AND state='SUCCEEDED' ORDER BY created DESC"
+            rows = db.execute(sql + (' LIMIT ?' if limit else ''), (chat_id, limit) if limit else (chat_id,))
+            for row in rows:
+                try: receipt = json.loads(row['receipt'] or '{}')
+                except (ValueError, TypeError): continue
+                payload = receipt.get('payload') or {}
+                ids = [str(payload.get('message_id', '')), *map(str, payload.get('message_ids') or [])]
+                if not receipt.get('ok') or payload.get('chat_id') != chat_id: continue
+                stamp = payload.get('sent_at')
+                try:
+                    if isinstance(stamp, (int, float)): confirmed = float(stamp)
+                    else:
+                        moment = datetime.fromisoformat(str(stamp).replace('Z', '+00:00'))
+                        confirmed = moment.replace(tzinfo=ZoneInfo('UTC')).timestamp() if moment.tzinfo is None else moment.timestamp()
+                except (TypeError, ValueError): confirmed = 0
+                for mid in dict.fromkeys(mid for mid in ids if mid):
+                    yield {'chat_id': chat_id, 'message_id': mid, 'confirmed_at': confirmed,
+                           'origin_kind': origin_kind(row['id']), 'text': str(row['text'])[:800]}
+    except sqlite3.OperationalError:
+        return  # Older/unavailable stores have no verifiable attribution.
+
+
+def outbound_source(root, chat_id: str, message_id: str) -> dict | None:
+    """Look up real receipts in existing owners, exposing only destination-visible data."""
+    root = Path(root)
+    if not message_id or not chat_id.startswith('group:'): return None
+    box = _outbound_box(root)
+    if box and (row := box.find_message(chat_id, message_id)): return public_origin(row)
+    for row in _owner_receipts(root, chat_id):
+        if row['message_id'] == str(message_id): return public_origin(row)
+    return None
+
+
+def recent_outbound_sources(root, chat_id: str, *, since: float, until: float, limit: int = 6) -> list[dict]:
+    """Bounded candidates from confirmed receipts, never a guess about the current referent."""
+    root = Path(root)
+    if not chat_id.startswith('group:') or until <= since: return []
+    limit = max(1, min(limit, 8))
+    box = _outbound_box(root)
+    rows = box.recent_confirmed(chat_id, since=since, until=until, limit=limit) if box else []
+    rows += [row for row in _owner_receipts(root, chat_id, limit=100) if since < row['confirmed_at'] <= until]
+    by_id = {}
+    for row in rows:
+        previous = by_id.get(row['message_id'])
+        if not previous:
+            by_id[row['message_id']] = row
+        elif previous['origin_kind'] == 'unknown':
+            previous['origin_kind'] = row['origin_kind']
+        elif row['origin_kind'] not in ('unknown', previous['origin_kind']):
+            previous['origin_kind'] = 'unknown'
+    return [public_origin(row) for row in sorted(by_id.values(), key=lambda row: row['confirmed_at'], reverse=True)[:limit]]
 
 
 def record_send(root, *, request_id: str, chat_id: str, text: str, action: str, state: str, receipt: dict | None = None,

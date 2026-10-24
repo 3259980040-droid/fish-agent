@@ -35,7 +35,7 @@ class OwnerPage(BasePage):
         form.addRow('QQ 每日用量模式', self.daily_limits)
         self.calls = QSpinBox(); self.calls.setRange(1, 10000)
         self.replies = QSpinBox(); self.replies.setRange(1, 10000)
-        self.tools = QSpinBox(); self.tools.setRange(1, 10000)
+        self.tools = QSpinBox(); self.tools.setRange(0, 10000); self.tools.setSpecialValueText('无上限')
         self.model_calls = QSpinBox(); self.model_calls.setRange(1, 10000)
         self.tokens = QSpinBox(); self.tokens.setRange(1000, 100000000)
         for widget in (self.calls, self.replies, self.tools, self.model_calls, self.tokens): widget.setMaximumWidth(220)
