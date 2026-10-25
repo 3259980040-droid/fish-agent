@@ -72,4 +72,3 @@ class InitialInstanceTests(unittest.TestCase):
             reset_runtime(root)
 
 if __name__ == '__main__': unittest.main()
-
