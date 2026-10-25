@@ -1403,9 +1403,9 @@ class Workbench:
             from doc_store import search as search_documents
             if action == 'library.status':
                 from doc_store import retrieval_status
-                return retrieval_status(self.root)
+                return retrieval_status(self.root, scope=None)
             if action == 'library.open':
-                row = doc_detail(self.root, params['doc_id'])
+                row = doc_detail(self.root, params['doc_id'], scope=None)
                 path = Path(row['original_path'])
                 if not row['original_path'] or not path.is_file():
                     raise ValueError('这份旧资料没有可打开的原件，已存切片仍可查看')
@@ -1419,14 +1419,14 @@ class Workbench:
             if action == 'library.list':
                 return list_docs(self.root)
             if action == 'library.detail':
-                return doc_detail(self.root, params.get('doc_id') or params.get('id'))
+                return doc_detail(self.root, params.get('doc_id') or params.get('id'), scope=None)
             if action == 'library.delete':
                 return delete_doc(self.root, params.get('doc_id') or params.get('id'))
             if action == 'library.search':
                 limit = params.get('limit', 5)
                 if type(limit) is not int or not 1 <= limit <= 50:
                     raise ValueError('检索条数需为 1 到 50 的整数')
-                return search_documents(self.root, params.get('query', ''), limit=limit, with_status=True)
+                return search_documents(self.root, params.get('query', ''), scope=None, limit=limit, with_status=True)
             raise ValueError('未知资料库操作')
         if action.startswith('life.'):
             if action == 'life.status':
