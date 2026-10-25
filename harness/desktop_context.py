@@ -1,5 +1,6 @@
 """Local conversation history and incremental compaction; raw messages stay intact."""
 from locations import project_path
+from contextlib import closing
 import json
 from functools import lru_cache
 from pathlib import Path
@@ -261,7 +262,7 @@ class DesktopContext:
         if not path.exists():
             return []
         result = []
-        with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as db:
+        with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
             db.row_factory = sqlite3.Row
             tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             queries = []

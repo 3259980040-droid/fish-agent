@@ -212,6 +212,7 @@ class Workbench:
         self._chat_instance = None
         self._delegation_instance = None
         self._selected_conversation = ''
+        self._instances = {}
         self._lock = threading.Lock()
         with database(self.path) as db:
             db.execute('''CREATE TABLE IF NOT EXISTS jobs(
@@ -224,7 +225,7 @@ class Workbench:
                 # The client's request map only keeps the reference; the real status is
                 # always read back from the one main execution's own turn ledger.
                 db.execute("ALTER TABLE jobs ADD COLUMN execution TEXT NOT NULL DEFAULT ''")
-            db.execute("UPDATE jobs SET status='failed',error='服务已重启，原记录保留，请继续任务',updated=? WHERE status IN ('queued','running')", (time.time(),))
+            db.execute("UPDATE jobs SET status='failed',error='服务已重启，原记录保留，请继续任务',updated=? WHERE execution='' AND status IN ('queued','running')", (time.time(),))
 
     def runtime(self):
         from fish_agent import get_runtime
@@ -290,7 +291,9 @@ class Workbench:
         from social_context import SocialContext
         policy = Governance(self.root)
         contexts = SocialContext(self.root)
-        persona = contexts.active_persona('qq')
+        from social_context import PersonaNotConfigured
+        try:persona = contexts.active_persona('qq')
+        except PersonaNotConfigured:persona={'id':'','name':'未配置人格','body':''}
         mode = OwnerMode(self.root).get()
         from governance import CAPABILITIES
         from storage import read_json
@@ -637,11 +640,19 @@ class Workbench:
         from locations import InstanceCatalog
         if not isinstance(params, dict):
             raise ValueError('操作参数必须是对象')
-        if action == 'instances.list':
-            return InstanceCatalog(self.context.host_root).list()
+        catalog=InstanceCatalog(self.context.host_root)
+        if action=='instances.list':return catalog.list()
+        if action=='instances.presets':return catalog.presets()
+        if action=='instances.create':return catalog.create(params.get('name'),params.get('persona'),params.get('running'))
+        if action=='instances.rename':return catalog.rename(str(params.get('id') or ''),params.get('name'))
+        if action=='instances.set_running':return catalog.set_running(str(params.get('id') or ''),params.get('running'))
         selected = str(params.get('instance_id') or self.instance_id)
-        if selected != self.instance_id:
-            raise ValueError('工作台不属于所选Fish窗口：' + selected)
+        if selected!=self.instance_id:
+            context=catalog.resolve(selected)
+            with self._lock:
+                if selected not in self._instances:self._instances[selected]=Workbench(context.root)
+                workbench=self._instances[selected]
+            return workbench.dispatch(action,params)
         params = {key: value for key, value in params.items() if key != 'instance_id'}
         return self._dispatch(action, params)
 
@@ -854,7 +865,9 @@ class Workbench:
             contexts = SocialContext(self.root)
             return [{**row, 'body': contexts.persona(row['id'])['body']} for row in PersonaLibrary(self.root).list()]
         if action == 'personas.current':
-            persona = self._current_persona()
+            from social_context import PersonaNotConfigured
+            try:persona = self._current_persona()
+            except PersonaNotConfigured:persona={'id':'','name':'未配置人格','body':''}
             return {'id': persona['id'], 'revision': persona['id'],
                     'name': persona['name'], 'body': persona['body']}
         if action == 'personas.preview':
@@ -1603,6 +1616,7 @@ class Workbench:
         return self.life_events({'limit': params.get('limit', 20)})
 
     def close(self):
+        for child in self._instances.values():child.close()
         if self._delegation_instance:
             self._delegation_instance.close()
         if self._chat_instance:

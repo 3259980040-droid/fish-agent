@@ -757,20 +757,19 @@ class MemoryMaintenance:
         return {'ok': True, 'conflicts': len(conflicts)}
 
 
-def start_background(host, root=None, *, interval: float = 60.0, embed_interval: float = 300.0):
-    """Host hook: one daemon thread running ``tick`` and embedding top-ups.
+def start_background(host, root=None, *, interval: float = 60.0, embed_interval: float = 300.0, stop=None):
+    """Run the existing daily tick and local embedding maintenance for one root.
 
-    ``host`` is the ToolHost (its ``stop`` event ends the loop). ``tick``
-    checks the schedule every minute but only acts on a due window; the
-    embedding warm-up only talks to the local model worker and never calls a
-    model API. Returns the thread.
+    The runtime passes its own lifecycle event. Both this schedule reader and the
+    curation executor use that same event; neither stops the host account/server.
+    Embedding readiness still uses the local worker, not another model API.
     """
     root = Path(root or host.root)
     started = _shared_memory('thread:' + str(root.resolve()), dict)
     existing = started.get('thread')
     if existing is not None and existing.is_alive():
         return existing                      # exactly one warm thread per root
-    stop = getattr(host, 'stop', None)
+    stop = stop if stop is not None else getattr(host, 'stop', None)
     if stop is None:
         stop = threading.Event()
     from memory_curation import ensure_worker

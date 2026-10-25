@@ -439,19 +439,21 @@ def builtins(role):
 
 
 class ToolHost:
-    def __init__(self, root):
+    def __init__(self, root, *, shared=None):
         from locations import instance_context
         self.context = instance_context(root)
         self.instance_id = self.context.instance_id
         self.host_root = self.context.host_root
         self.root = self.context.root
-        self.registry = PluginRegistry(self.host_root)
+        self.shared = shared.shared if shared is not None else self
+        self.registry = shared.registry if shared is not None else PluginRegistry(self.host_root)
+        if shared is None:self._instances = {self.instance_id:self}
         from agent_tools import AgentTools
         self.computer = AgentTools(self.root)
         self.path = project_path(self.root, 'data/tool-host.db')
         self.cancelled = {}
         self.lock = threading.RLock()
-        self.stop = threading.Event()
+        self.stop = shared.stop if shared is not None else threading.Event()
         with database(self.path) as db:
             db.executescript('''CREATE TABLE IF NOT EXISTS identities(role TEXT,session TEXT,scope TEXT,owner INTEGER,desktop INTEGER,sender TEXT,updated REAL,PRIMARY KEY(role,session));
             CREATE TABLE IF NOT EXISTS emoji_choices(session TEXT PRIMARY KEY,asset TEXT,created REAL);''')
@@ -465,9 +467,27 @@ class ToolHost:
             # 一张图描述一次：同一张图再问就直接给这一行，不产生第二次模型调用。
             db.execute('CREATE TABLE IF NOT EXISTS image_looks(chat TEXT,message_id TEXT,image_index INTEGER,'
                        'description TEXT,created REAL,PRIMARY KEY(chat,message_id,image_index))')
-        self.registry.publish()
+        if shared is None:self.registry.publish()
         from research_autonomy import ResearchWorker
-        self.research = ResearchWorker(self.host_root)
+        self.research = shared.research if shared is not None else ResearchWorker(self.host_root)
+        from fish_agent import get_runtime
+        self.runtime=get_runtime(self.root)
+
+    def for_instance(self,instance_id):
+        from locations import InstanceCatalog
+        context=InstanceCatalog(self.host_root).resolve(instance_id)
+        owner=self.shared
+        with owner.lock:
+            if context.instance_id not in owner._instances:
+                owner._instances[context.instance_id]=ToolHost(context.root,shared=owner)
+            return owner._instances[context.instance_id]
+
+    def close_instances(self):
+        from fish_agent.bootstrap import stop_host_runtimes
+        stop_host_runtimes(self.host_root)
+        for child in list(self.shared._instances.values()):
+            if getattr(child,'_workbench',None):child._workbench.close()
+            child.computer.interaction.close()
 
     def identity(self, role, session):
         with database(self.path) as db:
@@ -1711,9 +1731,9 @@ class ToolHost:
 
     def dispatch(self, route, body, role, admin):
         # The HTTP envelope identifies the originating instance, never the active UI.
-        requested = str(body.get('instance_id') or self.instance_id)
+        requested = str((body.get('params') or {}).get('instance_id') or body.get('instance_id') or self.instance_id) if route=='/workbench' else str(body.get('instance_id') or self.instance_id)
         if requested != self.instance_id:
-            raise ValueError('工具请求不属于此Fish窗口：' + requested)
+            return self.for_instance(requested).dispatch(route,{**body,'instance_id':requested},role,admin)
         if route=='/tasks/stop-processes':
             if not admin: raise PermissionError('停止本机任务进程需主人控制端身份')
             return self.computer.cancel_session(str(body['session']))
@@ -1772,7 +1792,7 @@ class ToolHost:
                     'group_history_execution': 'fresh-focused-view-v1'}
         if route == '/system/stop':
             if not admin: raise PermissionError('请从本地客户端停止后台')
-            self.stop.set()
+            self.shared.stop.set()
             return {'ok': True}
         if route == '/chat/take':
             if not admin:
@@ -1898,17 +1918,18 @@ class ToolHost:
 
     def worker(self):
         while not self.stop.wait(2):
+            from fish_agent.bootstrap import start_enabled
+            start_enabled(self.host_root)
             if not (project_path(self.root, 'harness/agents.json')).is_file():
                 return
-            for role in ('qq', 'research'):
+            from locations import InstanceCatalog
+            for row in InstanceCatalog(self.host_root).records():
                 try:
-                    if Governance(self.root, role).config()['paused']:
-                        continue
-                    if role == 'qq':
-                        # 自动压缩只有一条触发路径：请求预算测到压力后由共同经历入队，
-                        # 这里只负责把队列里那一段用一个成功提交整理完。
-                        from fish_agent.experience.compaction import drain as compact_context
-                        compact_context(self.root)
+                    context=InstanceCatalog(self.host_root).resolve(row['id'])
+                    if Governance(context.root,'qq').config()['paused']:continue
+                    # Drain the original compression algorithm in its owning instance.
+                    from fish_agent.experience.compaction import drain as compact_context
+                    compact_context(context.root)
                 except Exception:
                     # Each job retains its own failure; never silently retry paid calls.
                     continue
@@ -1964,17 +1985,11 @@ class ToolHost:
         self.research_thread = threading.Thread(target=self.research.loop, daemon=True, name='fish-research')
         if background_workers:
             self.learning_thread.start(); self.research_thread.start()
-            from agent_scheduler import AgentScheduler
-            self.scheduler = AgentScheduler(self.root, self.stop)
-            self.scheduler_thread = threading.Thread(target=self.scheduler.loop, daemon=True, name='fish-scheduler')
-            self.scheduler_thread.start()
-            from memory_maintenance import start_background
-            self.memory_thread = start_background(self)
             # The one assembly and its one main execution belong to the real
             # background host: entries only submit into it.
             from fish_agent import get_runtime
-            self.runtime = get_runtime(self.root)
-            self.runtime.start()
+            from fish_agent.bootstrap import start_enabled
+            start_enabled(self.host_root)
         threading.Thread(target=self.server.serve_forever, daemon=True, name='fish-tool-host').start()
 
 
@@ -2041,10 +2056,7 @@ def shutdown_host(root):
     if host:
         host.stop.set(); host.research.stop.set(); host.research.cancel_event.set()
         for plugin in host.registry.entries(): host.registry.cancel(plugin['id'], notify=False)
-        if getattr(host,'_workbench',None): host._workbench.close()
-        if getattr(host,'runtime',None):
-            host.runtime.stop()
-        if getattr(host,'scheduler_thread',None): host.scheduler_thread.join()
+        host.close_instances()
         host.computer.interaction.close()
         # The research driver owns its subprocess. Let it kill and reap that
         # process before the GUI exits; otherwise a blocked download can outlive it.

@@ -64,12 +64,14 @@ class ExecutionModule:
 
     def stop(self, timeout=10):
         self._stop.set()
+        with self._cancels_lock:
+            for event in self._cancels.values():event.set()
         with self._cv:
             self._cv.notify_all()
         thread = self._thread
-        if thread is not None and thread.is_alive():
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout)
-        self._thread = None
+        if thread is None or not thread.is_alive():self._thread = None
 
     # -------------------------------------------------------- public Interface
     def submit(self, *, source, conversation='', message='', text='', request='', kind='message',
@@ -92,7 +94,7 @@ class ExecutionModule:
         run_id = self.state.create_run(kind=kind, source=source, conversation=conversation,
                                        request=request, input_reference=event['reference'],
                                        place=place or source, reason=reason)
-        self.start()
+        self.runtime.start(resume=False)
         with self._cv:
             self._cv.notify_all()
         return {'execution': run_id, 'input': event['reference'], 'status': 'queued'}
@@ -395,6 +397,7 @@ class ExecutionModule:
                         self._cv.wait(0.5)
             except Exception:  # noqa: BLE001 - a broken clock must not stop the consumer
                 time.sleep(1)
+            if self._paused() or self._stop.is_set():continue
             try:
                 claimed = self.state.claim_next()
             except Exception:

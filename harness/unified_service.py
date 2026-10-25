@@ -62,12 +62,7 @@ def main():
         try:
             services.shutdown()
         finally:
-            if getattr(host, '_workbench', None):
-                host._workbench.close()
-            if getattr(host, 'runtime', None):
-                host.runtime.stop()
-            if getattr(host,'scheduler_thread',None):
-                host.scheduler_thread.join()
+            host.close_instances()
             host.computer.interaction.close()
             host.server.shutdown()
             host.server.server_close()

@@ -247,13 +247,13 @@ class AgentState:
             db.execute('UPDATE agent_runs SET status=?,finished=?,error=?,error_kind=?,result=? WHERE id=?',
                        (status, now, str(error)[:500], error_kind, body, str(run_id)))
 
-    def fail_stale(self):
+    def fail_stale(self,*,before=None):
         """A stopped host leaves no turn pretending to run; records and inputs stay readable."""
         now = time.time()
         with database(self.path) as db:
             return int(db.execute(
-                "UPDATE agent_runs SET status=?,finished=?,error=?,error_kind=? WHERE status IN ('queued','running')",
-                (FAILED, now, '服务已重启，这次提交没有完成；原记录保留', 'InterruptedError')).rowcount)
+                "UPDATE agent_runs SET status=?,finished=?,error=?,error_kind=? WHERE status IN ('queued','running') AND created<?",
+                (FAILED, now, '服务已重启，这次提交没有完成；原记录保留', 'InterruptedError',float(before) if before is not None else now)).rowcount)
 
 
 def receive_reference(source, message):

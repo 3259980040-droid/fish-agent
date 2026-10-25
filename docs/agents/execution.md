@@ -30,3 +30,9 @@
 `QQAgentLoop.watch_turn(execution, source=..., chat=..., instance=runtime.context)`在QQ事件循环调用，返回已创建的Task；也接受实例root。监听固定该实例的状态请求和管理员日志，完成后自动移出生命周期集合，QQ停机由原stop取消并等待。阻塞提交在线程结束后回到事件循环再调监听；私聊沿watch_private使用同一入口。
 
 W03逐实例保存原消息、提交后，用对应runtime.context和execution调用此入口。监听只读取原执行记录并写所属实例管理员日志，不改QQStore消息；原消息的runtime_turn_id等写回由提交方使用所属实例QQStore负责，不使用共享连接的默认Store覆写另一实例记录。开始/结束、工具与投递事实仍由原turn_view/trace读取。
+
+## W02窗口操作与实际生命周期
+
+instances.list/create/rename/set_running/presets为宿主管理动作。create的persona可以是明确{name,body}或{instance_id,revision}；不填创建暂停且未配置的窗口。其余窗口动作由固定instance_id交给同一宿主的对应Workbench/ToolHost上下文，不能改self.root临时执行，也不能从前端选中对象推断QQ等外部入口。
+
+set_running与旧settings.save.paused共用本实例Governance值；每实例有一个主消费者、自己的停止Event和原计划检测调度、每日整理/索引维护，后台启动和关闭遍历真实实例。ToolHost只建一个server/ResearchWorker；按实例代理共用实现并持有各自工具身份/队列。窗口停止不改宿主连接，未配置人格不能启动，状态照实返回。

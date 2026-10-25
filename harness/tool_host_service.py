@@ -27,6 +27,7 @@ def main():
             pass
     finally:
         host.stop.set()
+        host.close_instances()
         host.server.shutdown()
         host.server.server_close()
         if handle:

@@ -254,7 +254,7 @@ class InstanceCatalog:
                 (directory / name).mkdir(exist_ok=True)
             raw = {'version': 1, 'initial_instance_id': INITIAL_INSTANCE_ID,
                    'instances': [{'id': INITIAL_INSTANCE_ID, 'name': 'Fish', 'initial': True,
-                                  'running': True, 'created': time.time()}]}
+                                  'created': time.time()}]}
             _write(self.path, raw)
             return InstanceContext(host, INITIAL_INSTANCE_ID, directory)
 
@@ -271,20 +271,113 @@ class InstanceCatalog:
             raise ValueError('Fish窗口不存在：' + value)
         return InstanceContext(self.host_root, value, self.host_root / 'data/instances' / value)
 
-    def list(self):
+    def records(self):
         self.initial()
-        raw = _json(self.path, {})
-        rows = []
-        for record in raw['instances']:
-            context = self.resolve(record['id'])
+        return _json(self.path,{})['instances']
+
+    def item(self,instance_id):
+        context=self.resolve(instance_id)
+        record=next(row for row in self.records() if row['id']==context.instance_id)
+        from social_context import SocialContext, PersonaNotConfigured
+        from governance import Governance
+        from fish_agent.bootstrap import get_runtime
+        reason=''
+        try:
+            persona=SocialContext(context.root).active_persona('qq')
+        except PersonaNotConfigured:
+            persona=None;reason='尚未配置人格，请填写或选择人格后启动'
+        enabled=not Governance(context.root,'qq').config()['paused']
+        runtime=get_runtime(context)
+        if not reason and not enabled:reason='本窗口已暂停'
+        if not reason and not runtime.started:reason='本窗口等待后台启动'
+        return {**{k:v for k,v in record.items() if k!='running'},'enabled':enabled,
+                'running':runtime.started,'persona_configured':persona is not None,
+                'persona_name':persona['name'] if persona else '',
+                'persona_id':persona['id'] if persona else '', 'status_reason':reason}
+
+    def list(self):
+        return {'initial_instance_id':self.initial().instance_id,
+                'instances':[self.item(row['id']) for row in self.records()]}
+
+    def presets(self):
+        from social_context import SocialContext
+        return {'presets':[{'instance_id':row['id'],'revision':p['id'],'name':p['name'],'body':p['body']}
+                for row in self.records() for p in SocialContext(self.resolve(row['id']).root).personas('qq')]}
+
+    def create(self,name,persona=None,running=None):
+        import uuid
+        title=' '.join(str(name or '').split())
+        if not title or len(title)>80:raise ValueError('请填写窗口名称，最多80字')
+        if running is not None and type(running) is not bool:raise ValueError('窗口运行状态必须为布尔值')
+        from social_context import SocialContext
+        if persona is not None:
+            if not isinstance(persona,dict):raise ValueError('人格应为手写正文或明确预设')
+            if 'revision' in persona:
+                if not persona.get('instance_id'):raise ValueError('请选择明确的人格预设来源窗口')
+                source=self.resolve(persona['instance_id'])
+                original=SocialContext(source.root).persona(str(persona['revision']))
+                if original['role']!='qq':raise ValueError('请选择Fish的人格预设')
+                persona={'name':original['name'],'body':original['body']}
+            if not str(persona.get('name') or '').strip() or not str(persona.get('body') or '').strip():
+                raise ValueError('请填写人格名称和正文')
+            if len(str(persona['name']).strip())>80 or len(str(persona['body']).strip())>40000:
+                raise ValueError('人格名称最多80字，正文最多40000字')
+        if running and persona is None:raise ValueError('尚未配置人格，不能启动这个窗口')
+        initial=self.initial()
+        instance_id='fish-'+uuid.uuid4().hex
+        directory=self.host_root/'data/instances'/instance_id
+        with _catalog_lock(self.host_root):
+            directory.mkdir()
+            _write(directory/'instance.json',{'id':instance_id,'host_root':str(self.host_root)})
+            for part in ('config','social','qq','resources','workspace'):(directory/part).mkdir()
+            raw=_json(self.path,{})
+            raw['instances'].append({'id':instance_id,'name':title,'initial':False,'created':time.time()})
+            _write(self.path,raw)
+        from governance import Governance
+        from storage import write_json
+        from fish_agent.settings.tools import ToolSettings
+        # Owner authorization is a host identity. A new persona does not revoke it.
+        template=Governance(initial.root,'qq').config()
+        template.pop('send_policy',None);template['paused_roles']={'qq':True,'research':True}
+        template['paused']=False
+        write_json(directory/'config/control.json',template)
+        source_tools=ToolSettings(initial.root)
+        from plugin_registry import PluginRegistry
+        ToolSettings(directory).save({'plugins':{p['id']:source_tools.plugin_enabled(p) for p in PluginRegistry(self.host_root).entries()}})
+        if persona is not None:
+            from persona_library import PersonaLibrary
+            saved=PersonaLibrary(directory).create(persona['name'],persona['body'])
+            SocialContext(directory).apply_active_persona('qq',saved['id'])
+        # Initialize real stores/index schemas through the existing modules.
+        from fish_agent.bootstrap import get_runtime
+        get_runtime(directory)
+        from memory_store import MemoryStore
+        MemoryStore(directory,'qq')
+        if running is True or running is None and persona is not None:self.set_running(instance_id,True)
+        return self.item(instance_id)
+
+    def rename(self,instance_id,name):
+        self.resolve(instance_id)
+        title=' '.join(str(name or '').split())
+        if not title or len(title)>80:raise ValueError('请填写窗口名称，最多80字')
+        with _catalog_lock(self.host_root):
+            raw=_json(self.path,{})
+            next(row for row in raw['instances'] if row['id']==instance_id)['name']=title
+            _write(self.path,raw)
+        return self.item(instance_id)
+
+    def set_running(self,instance_id,running):
+        if type(running) is not bool:raise ValueError('窗口运行状态必须为布尔值')
+        context=self.resolve(instance_id)
+        if running:
             from social_context import SocialContext
-            persona = SocialContext(context.root).active_persona('qq')
-            from fish_agent.bootstrap import get_runtime
-            runtime = get_runtime(context)
-            rows.append({**record, 'enabled': bool(record.get('running', True)),
-                         'running': runtime.started, 'persona_configured': bool(persona.get('body')),
-                         'persona_name': str(persona.get('name') or '')})
-        return {'initial_instance_id': raw['initial_instance_id'], 'instances': rows}
+            SocialContext(context.root).active_persona('qq')
+        from governance import Governance
+        Governance(context.root,'qq').save({'paused':not running})
+        from fish_agent.bootstrap import get_runtime
+        runtime=get_runtime(context)
+        runtime.start() if running else runtime.stop()
+        return self.item(instance_id)
 
 
 def instance_context(root, instance_id=None):
