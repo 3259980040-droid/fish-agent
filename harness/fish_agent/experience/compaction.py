@@ -550,10 +550,16 @@ def drain(root, *, role='qq', gateway=None, cancelled=None, automatic=True, only
     if job is None:
         return {'skipped': True, 'reason': '没有待整理的完整范围'}
     try:
-        from model_gateway import ModelGateway, chat_options
+        from model_gateway import ChatOptions, ModelGateway, chat_options
         from context_budget import ContextBudget
         gateway = gateway or ModelGateway(root, role)
-        options = chat_options(root)
+        configured = chat_options(root)
+        # A summary is a bounded extraction, not the owner's chat turn. With reasoning
+        # on, the provider's reasoning output consumed the whole completion budget and
+        # a long range could never be compressed; keep the configured cap and turn the
+        # separate reasoning budget off for this one request.
+        options = ChatOptions('off', max(4096, min(8192, int(configured.max_tokens or 8192))),
+                              float(configured.timeout_seconds))
         budget = ContextBudget(root, gateway)
         messages, included, shadowed = _build(root, job, budget, options)
         report = budget.fit(messages, [], options.max_tokens)

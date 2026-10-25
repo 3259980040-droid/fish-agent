@@ -463,6 +463,10 @@ class QQAgentLoop:
             return
         self.store.update_message(message, status='submitted',
                                   runtime_turn_id=submission.get('execution', ''))
+        # A successful hand-off is the real recovery of a binding fault: the host
+        # accepted this group's input, so the old permission refusal is no longer the
+        # current state. Without this the stale binding record stayed "active" forever.
+        await self._recovered('group-fish:' + chat, stage='binding')
         self._watch_turn(submission.get('execution', ''), source='group-fish:' + chat, chat=chat)
 
     def _group_conversation(self, chat: str) -> str:
