@@ -193,6 +193,8 @@ class PlanExecutionTests(unittest.TestCase):
         occurrence = self.wait_occurrence(plan, slot)
         self.assertEqual(occurrence['state'], 'sent', occurrence)
         self.assertTrue(occurrence['receipt_id'].startswith('sched:' + plan['id']))
+        # The page can follow the instance to the one execution that served it.
+        self.assertEqual(occurrence['execution'], execution)
         self.assertEqual([item['text'] for item in FakeTransport.sent], ['该喝水了'])
         self.assertEqual(FakeTransport.sent[0]['target'], 'private:' + OWNER)
         # The turn is recorded as a plan turn with the delivery receipt it produced.

@@ -95,7 +95,10 @@ class BotControl:
                 CREATE TABLE IF NOT EXISTS scheduled(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE,target TEXT,session TEXT,
                     title TEXT,prompt TEXT,original TEXT,timing TEXT,timing_key TEXT,request TEXT,state TEXT,created REAL,updated REAL);
                 CREATE TABLE IF NOT EXISTS occurrences(schedule_id TEXT,slot TEXT,state TEXT,attempts INTEGER DEFAULT 0,
-                    receipt_id TEXT,note TEXT,created REAL,updated REAL,PRIMARY KEY(schedule_id,slot));''')
+                    receipt_id TEXT,note TEXT,created REAL,updated REAL,execution TEXT DEFAULT '',PRIMARY KEY(schedule_id,slot));''')
+            existing = {row['name'] for row in db.execute('PRAGMA table_info(occurrences)')}
+            if 'execution' not in existing:
+                db.execute("ALTER TABLE occurrences ADD COLUMN execution TEXT DEFAULT ''")
 
     @property
     def plans(self):
