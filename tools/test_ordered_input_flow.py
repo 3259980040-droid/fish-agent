@@ -116,6 +116,10 @@ class OrderedInputFlowTests(unittest.TestCase):
         slots = [control.plans.run_now(plan['id'])['slot'] for plan in plans]
         submitted = runtime.plans.dispatch()
         self.assertEqual(len(submitted), 2)
+        repeated=runtime.plans.dispatch()
+        self.assertEqual([row['execution'] for row in repeated],[row['execution'] for row in submitted])
+        for plan,slot,original in zip(plans,slots,submitted):
+            self.assertEqual(control.plans.occurrence(plan['id'],slot)['execution'],original['execution'])
         fake.gate.set()
         self.assertEqual(self.job(bench, blocker['job_id'])['status'], 'complete')
         deadline = time.time() + 20

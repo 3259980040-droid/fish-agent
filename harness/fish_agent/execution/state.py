@@ -119,6 +119,13 @@ class AgentState:
         run_id = uuid.uuid4().hex
         now = time.time()
         with database(self.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            if input_reference:
+                claimed=db.execute('SELECT run FROM agent_inputs WHERE reference=?',(str(input_reference),)).fetchone()
+                if claimed and claimed['run']:return str(claimed['run'])
+                waiting=db.execute('SELECT r.id FROM agent_runs AS r,json_each(r.inputs) AS i '
+                                   'WHERE i.value=? ORDER BY r.created,r.rowid LIMIT 1',(str(input_reference),)).fetchone()
+                if waiting:return str(waiting['id'])
             db.execute('INSERT INTO agent_runs(id,kind,source,conversation,request,status,created,inputs,reason,place)'
                        ' VALUES(?,?,?,?,?,?,?,?,?,?)',
                        (run_id, kind, source, str(conversation), str(request), QUEUED, now,
