@@ -62,7 +62,7 @@ class InstanceLifecycle(Fixture):
                 return ChatResult('',{},'tool_calls',({'id':'send','type':'function','function':{'name':'fish_say','arguments':json.dumps({'texts':[text]},ensure_ascii=False)}},))
         from context_budget import _tokenizer
         tokenizer=_tokenizer('E:/Program Files/DSH/source/fish/vendor/tokenizers/deepseek-v4/tokenizer.json')
-        with patch('model_gateway.ModelGateway',Gateway),patch('context_budget.ContextBudget',FakeBudget),patch('desktop_context._tokens',lambda root,text:len(tokenizer.encode(str(text or '')).ids)):
+        with patch('model_gateway.ModelGateway',Gateway),patch('context_budget.ContextBudget',FakeBudget),patch('desktop_context._tokens',lambda root,text:len(tokenizer.encode(str(text or '')).ids)),patch('bot_control.BotControl._channel_transport',return_value={'ok':True,'payload':{'message_id':'offline-plan-receipt'}}):
             for iid in ids:
                 result=wb.dispatch('instances.set_running',{'id':iid,'running':True})
                 self.assertTrue(result['enabled']);self.assertTrue(result['running'])
@@ -85,6 +85,21 @@ class InstanceLifecycle(Fixture):
                 if job['status'] not in ('queued','running'):break
                 time.sleep(.02)
             self.assertEqual(job['status'],'complete',job)
+            plan=wb.dispatch('schedules.create',{'instance_id':ids[1],'title':'窗口乙到期任务','prompt':'窗口乙定时提醒','after_seconds':1,'purpose':'reminder'})
+            wb.dispatch('instances.set_running',{'id':ids[1],'running':False})
+            time.sleep(1.1)
+            before=next(p for p in wb.dispatch('schedules.list',{'instance_id':ids[1]}) if p['id']==plan['id'])
+            self.assertEqual(before['occurrences'],[],'暂停时不能提交到期回合')
+            wb.dispatch('instances.set_running',{'id':ids[1],'running':True})
+            deadline=time.monotonic()+6
+            while time.monotonic()<deadline:
+                settled=next(p for p in wb.dispatch('schedules.list',{'instance_id':ids[1]}) if p['id']==plan['id'])
+                if settled.get('occurrenceState')=='sent':break
+                time.sleep(.03)
+            self.assertEqual(settled.get('occurrenceState'),'sent',settled)
+            self.assertTrue(settled['occurrences'][0]['execution'])
+            self.assertEqual(settled['sendReceipts'][0]['messageId'],'offline-plan-receipt')
+            self.assertFalse(any(p['id']==plan['id'] for p in wb.dispatch('schedules.list',{'instance_id':ids[0]})))
         from tool_host import request
         for iid in ids:
             context=catalog.resolve(iid)

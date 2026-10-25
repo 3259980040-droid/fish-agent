@@ -35,4 +35,4 @@ W03逐实例保存原消息、提交后，用对应runtime.context和execution�
 
 instances.list/create/rename/set_running/presets为宿主管理动作。create的persona可以是明确{name,body}或{instance_id,revision}；不填创建暂停且未配置的窗口。其余窗口动作由固定instance_id交给同一宿主的对应Workbench/ToolHost上下文，不能改self.root临时执行，也不能从前端选中对象推断QQ等外部入口。
 
-set_running与旧settings.save.paused共用本实例Governance值；每实例有一个主消费者、自己的停止Event和原每日整理/索引维护，后台启动和关闭遍历真实实例。ToolHost只建一个server/ResearchWorker；按实例代理共用实现并持有各自工具身份/队列。窗口停止不改宿主连接，未配置人格不能启动，状态照实返回。
+set_running与旧settings.save.paused共用本实例Governance值；每实例有一个主消费者、自己的停止Event和原计划检测调度、每日整理/索引维护，后台启动和关闭遍历真实实例。ToolHost只建一个server/ResearchWorker；按实例代理共用实现并持有各自工具身份/队列。窗口停止不改宿主连接，未配置人格不能启动，状态照实返回。

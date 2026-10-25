@@ -63,8 +63,6 @@ def main():
             services.shutdown()
         finally:
             host.close_instances()
-            if getattr(host,'scheduler_thread',None):
-                host.scheduler_thread.join()
             host.computer.interaction.close()
             host.server.shutdown()
             host.server.server_close()

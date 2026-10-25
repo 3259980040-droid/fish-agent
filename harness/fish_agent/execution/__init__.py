@@ -94,7 +94,7 @@ class ExecutionModule:
         run_id = self.state.create_run(kind=kind, source=source, conversation=conversation,
                                        request=request, input_reference=event['reference'],
                                        place=place or source, reason=reason)
-        self.runtime.start()
+        self.runtime.start(resume=False)
         with self._cv:
             self._cv.notify_all()
         return {'execution': run_id, 'input': event['reference'], 'status': 'queued'}

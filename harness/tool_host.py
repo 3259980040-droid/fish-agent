@@ -453,7 +453,7 @@ class ToolHost:
         self.path = project_path(self.root, 'data/tool-host.db')
         self.cancelled = {}
         self.lock = threading.RLock()
-        self.stop = threading.Event()
+        self.stop = shared.stop if shared is not None else threading.Event()
         with database(self.path) as db:
             db.executescript('''CREATE TABLE IF NOT EXISTS identities(role TEXT,session TEXT,scope TEXT,owner INTEGER,desktop INTEGER,sender TEXT,updated REAL,PRIMARY KEY(role,session));
             CREATE TABLE IF NOT EXISTS emoji_choices(session TEXT PRIMARY KEY,asset TEXT,created REAL);''')
@@ -1985,10 +1985,6 @@ class ToolHost:
         self.research_thread = threading.Thread(target=self.research.loop, daemon=True, name='fish-research')
         if background_workers:
             self.learning_thread.start(); self.research_thread.start()
-            from agent_scheduler import AgentScheduler
-            self.scheduler = AgentScheduler(self.root, self.stop)
-            self.scheduler_thread = threading.Thread(target=self.scheduler.loop, daemon=True, name='fish-scheduler')
-            self.scheduler_thread.start()
             # The one assembly and its one main execution belong to the real
             # background host: entries only submit into it.
             from fish_agent import get_runtime
@@ -2061,7 +2057,6 @@ def shutdown_host(root):
         host.stop.set(); host.research.stop.set(); host.research.cancel_event.set()
         for plugin in host.registry.entries(): host.registry.cancel(plugin['id'], notify=False)
         host.close_instances()
-        if getattr(host,'scheduler_thread',None): host.scheduler_thread.join()
         host.computer.interaction.close()
         # The research driver owns its subprocess. Let it kill and reap that
         # process before the GUI exits; otherwise a blocked download can outlive it.
