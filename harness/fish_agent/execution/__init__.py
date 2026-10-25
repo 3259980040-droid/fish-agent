@@ -162,12 +162,16 @@ class ExecutionModule:
         except (TypeError, ValueError):
             inputs = []
         reference = str(inputs[0]) if inputs else ('self:' + str(row['id']))
+        kind = str(row.get('kind') or '')
         plan_payload = self.runtime.plans._payload(row) if str(row.get('source')) == 'plan' else {}
         schedule_id, slot = str(plan_payload.get('schedule_id') or ''), str(plan_payload.get('slot') or '')
-        if schedule_id and slot:
-            # The plan turn's common-experience record is written under wake:<plan>:<slot>
-            # (the virtual event), while its input reference is plan:<plan>:<slot>; the
-            # view must read the record that actually exists.
+        if kind in ('timer', 'followup'):
+            # A self-wake writes its common-experience record under self:<run>, not under
+            # the message that happened to be first in its input list.
+            reference = 'self:' + str(row['id'])
+        elif schedule_id and slot:
+            # The plan turn's record is written under wake:<plan>:<slot> (the virtual
+            # event), while its input reference is plan:<plan>:<slot>.
             reference = 'wake:%s:%s' % (schedule_id, slot)
         view = {'execution': row['id'], 'status': _JOB_STATUS.get(row['status'], 'failed'),
                 'raw_status': row['status'], 'error': row['error'], 'error_kind': row['error_kind'],

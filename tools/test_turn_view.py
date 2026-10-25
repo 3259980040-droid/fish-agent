@@ -194,6 +194,10 @@ class TurnViewTests(unittest.TestCase):
         self.assertEqual(view['trigger']['kind'], 'timer')
         self.assertEqual(view['trigger']['reason'], '45分钟到了')
         self.assertTrue(view['delivery']['sent'])
+        # A self-wake's own record lives under self:<run>, not under its first input.
+        self.assertTrue(view['reference'].startswith('self:' + timer), view['reference'])
+        self.assertNotEqual(view['trace']['events'], [])
+        self.assertIsNotNone(view['delivery_times']['receipt'])
 
     def test_a_plan_turn_view_shows_the_occurrence_it_served(self):
         from test_plan_execution import FakeTransport
