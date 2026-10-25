@@ -1801,6 +1801,7 @@ class ToolHost:
                 source=source, conversation=str(body.get('conversation') or ''),
                 message=str(body.get('message') or ''), text=str(body.get('text') or ''),
                 reference=str(body.get('reference') or ''), kind=str(body.get('kind') or 'message'),
+                place=str(body.get('place') or ''),
                 payload=body.get('payload') if isinstance(body.get('payload'), dict) else {})
         if route == '/turn/status':
             if not admin:

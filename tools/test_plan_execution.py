@@ -259,7 +259,10 @@ class PlanExecutionTests(unittest.TestCase):
         first = self.runtime.plans.dispatch()
         second = self.runtime.plans.dispatch()
         self.assertEqual(len(first), 1)
-        self.assertEqual(first[0]['execution'], second[0]['execution'])
+        # The second scan either sees the same still-pending instance (same execution)
+        # or the instance already running/closed (nothing); both mean no second submit.
+        for item in second:
+            self.assertEqual(first[0]['execution'], item['execution'])
         self.wait_run(first[0]['execution'])
         self.wait_occurrence(plan, slot)
         with database(self.root / 'data/social/experience.db') as db:

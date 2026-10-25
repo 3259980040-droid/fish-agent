@@ -62,6 +62,8 @@ BATCH_ITEMS = """CREATE TABLE IF NOT EXISTS agent_batch_items(
     reference TEXT NOT NULL,
     resource TEXT NOT NULL DEFAULT '',
     received REAL NOT NULL,
+    state TEXT NOT NULL DEFAULT 'registered',
+    run TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(batch, reference, resource))"""
 
 BATCH_PLACES = """CREATE TABLE IF NOT EXISTS agent_batch_places(
@@ -93,4 +95,8 @@ def ensure(root) -> Path:
         for name, decl in (('reason', "TEXT NOT NULL DEFAULT ''"), ('place', "TEXT NOT NULL DEFAULT ''")):
             if name not in columns:
                 db.execute('ALTER TABLE agent_runs ADD COLUMN ' + name + ' ' + decl)
+        item_columns = {row[1] for row in db.execute('PRAGMA table_info(agent_batch_items)')}
+        for name, decl in (('state', "TEXT NOT NULL DEFAULT 'registered'"), ('run', "TEXT NOT NULL DEFAULT ''")):
+            if name not in item_columns:
+                db.execute('ALTER TABLE agent_batch_items ADD COLUMN ' + name + ' ' + decl)
     return target

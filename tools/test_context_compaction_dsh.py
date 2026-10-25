@@ -502,5 +502,15 @@ class CompressionTests(unittest.TestCase):
                          status['compaction']['latest']['processed'])
 
 
+    def test_the_workbench_exposes_the_immediate_compression_entry(self):
+        from workbench import Workbench
+        with patch("fish_agent.experience.compaction.compact_now",
+                   return_value={"committed": True, "checkpoint_id": 9, "through": 12}) as called:
+            result = Workbench(self.root).dispatch(
+                "context.compact", {"source": "desktop-chat.db", "conversation": "conv-1"})
+        self.assertTrue(result["committed"])
+        self.assertEqual(called.call_args.kwargs["source"], "desktop-chat.db")
+        self.assertEqual(called.call_args.kwargs["conversation"], "conv-1")
+
 if __name__ == '__main__':
     unittest.main()

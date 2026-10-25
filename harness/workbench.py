@@ -857,6 +857,15 @@ class Workbench:
             return [{'id': row['id'], 'name': row['name'], 'body': row['body']} for row in rows]
         if action == 'personas.apply':
             return PersonaLibrary(self.root).apply(params['revision'])
+        if action == 'context.compact':
+            # The owner's immediate compression uses the same selection/commit chain as
+            # the automatic one; it is the only entry that ignores the automatic switch.
+            from fish_agent.experience.compaction import compact_now
+            source = str(params.get('source') or 'desktop-chat.db')
+            conversation = str(params.get('conversation') or '')
+            if not conversation:
+                raise ValueError('缺少要整理的会话编号')
+            return compact_now(self.root, source=source, conversation=conversation)
         if action == 'context.status':
             # 上下文管理的只读接口：有效预算、触发/保留比例，最近一次整理的完整范围和结果。
             # 09-06 接页面动作时读这里，不再自己解析 harness 配置或猜窗口容量。

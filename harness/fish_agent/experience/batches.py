@@ -56,8 +56,8 @@ class BatchLog:
                        "VALUES(?,?,?,?,?,?,'open','')", (batch_id, place, anchor, index, opens, closes))
             seq = int(db.execute('SELECT COALESCE(MAX(seq),0)+1 FROM agent_batch_items WHERE batch=?',
                                  (batch_id,)).fetchone()[0])
-            db.execute('INSERT OR IGNORE INTO agent_batch_items(batch,seq,reference,resource,received) '
-                       'VALUES(?,?,?,?,?)', (batch_id, seq, str(reference), str(resource), now))
+            db.execute('INSERT OR IGNORE INTO agent_batch_items(batch,seq,reference,resource,received,state) '
+                       "VALUES(?,?,?,?,?,'registered')", (batch_id, seq, str(reference), str(resource), now))
             db.execute('INSERT INTO agent_batch_places(place,anchor,last_index) VALUES(?,?,?) '
                        'ON CONFLICT(place) DO UPDATE SET anchor=excluded.anchor,last_index=excluded.last_index',
                        (place, anchor, index))
@@ -112,6 +112,12 @@ class BatchLog:
             for batch_id in batch_ids:
                 db.execute("UPDATE agent_batches SET state=? WHERE id=? AND state='handed'",
                            ('consumed' if ok else 'sealed', str(batch_id)))
+                if ok:
+                    # The turn that received the batch really read these files; each item
+                    # keeps that fact instead of only the batch's aggregate state.
+                    db.execute("UPDATE agent_batch_items SET state='read' WHERE batch=?", (str(batch_id),))
+                else:
+                    db.execute("UPDATE agent_batch_items SET state='registered' WHERE batch=?", (str(batch_id),))
 
     def _latest_open(self, place):
         with database(self.path) as db:

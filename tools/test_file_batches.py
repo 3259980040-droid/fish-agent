@@ -132,8 +132,15 @@ class BatchWindowTests(unittest.TestCase):
         self.assertEqual(self.log.take(place, wait_for_close=False), [])
         self.log.register(place=place, reference='qq:2', resource='y', received=time.time())
         self.assertEqual(self.log.take(place, wait_for_close=False), [])
-        self.log.finish([taken[0]['id']], ok=True)
-        self.assertEqual(self.log.state(place)[0]['state'], 'open')
+        self.log.finish([taken[0]['id']], ok=False)
+        self.assertEqual(self.log.state(place)[0]['items'][0]['state'], 'registered')
+        self.assertFalse(self.log.covered(['qq:1']))
+        again = self.log.take(place)
+        self.assertEqual(len(again), 1)
+        self.log.finish([again[0]['id']], ok=True)
+        batch = next(item for item in self.log.state(place) if item['id'] == taken[0]['id'])
+        self.assertEqual(batch['state'], 'consumed')
+        self.assertEqual(batch['items'][0]['state'], 'read')
         self.assertTrue(self.log.covered(['qq:1']))
 
     def test_a_large_original_is_registered_and_read_by_range(self):
@@ -279,6 +286,8 @@ class BatchTurnTests(unittest.TestCase):
                             for segment in json.loads(row['segments'] or '[]'))]
         self.assertEqual([item['reference'] for item in batches[0]['items']], file_refs)
         self.assertEqual(batches[0]['state'], 'consumed')
+        # Each item says the turn really read it, not only that the batch was consumed.
+        self.assertEqual([item['state'] for item in batches[0]['items']], ['read', 'read'])
         rows = wb.dispatch('chat.snapshot', {'id': cid})['messages']
         self.assertEqual(len([row for row in rows if row['direction'] == 'outbound']), 1)
 

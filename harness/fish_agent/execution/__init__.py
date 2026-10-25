@@ -157,12 +157,18 @@ class ExecutionModule:
         row = self.state.run(run_id)
         if row is None:
             return None
-        reference = ''
         try:
             inputs = json.loads(row.get('inputs') or '[]')
         except (TypeError, ValueError):
             inputs = []
         reference = str(inputs[0]) if inputs else ('self:' + str(row['id']))
+        plan_payload = self.runtime.plans._payload(row) if str(row.get('source')) == 'plan' else {}
+        schedule_id, slot = str(plan_payload.get('schedule_id') or ''), str(plan_payload.get('slot') or '')
+        if schedule_id and slot:
+            # The plan turn's common-experience record is written under wake:<plan>:<slot>
+            # (the virtual event), while its input reference is plan:<plan>:<slot>; the
+            # view must read the record that actually exists.
+            reference = 'wake:%s:%s' % (schedule_id, slot)
         view = {'execution': row['id'], 'status': _JOB_STATUS.get(row['status'], 'failed'),
                 'raw_status': row['status'], 'error': row['error'], 'error_kind': row['error_kind'],
                 'trigger': {'kind': row.get('kind', ''), 'reason': row.get('reason', ''),
@@ -180,7 +186,7 @@ class ExecutionModule:
         view['trace'] = self._turn_trace(reference)
         view['batches'] = self._turn_batches(row['id'])
         view['delivery_times'] = self._delivery_times(reference)
-        view['plan'] = self._plan_occurrence(row)
+        view['plan'] = self._plan_occurrence(row, plan_payload)
         return view
 
     def _turn_trace(self, reference):
@@ -212,7 +218,7 @@ class ExecutionModule:
                 'SELECT id,place,opens,closes,state FROM agent_batches WHERE run=? ORDER BY opens', (str(run_id),))]
             for batch in rows:
                 batch['items'] = [dict(item) for item in db.execute(
-                    'SELECT seq,reference,resource,received FROM agent_batch_items WHERE batch=? ORDER BY seq',
+                    'SELECT seq,reference,resource,received,state,run FROM agent_batch_items WHERE batch=? ORDER BY seq',
                     (batch['id'],))]
         return rows
 
@@ -231,10 +237,10 @@ class ExecutionModule:
                              (reference,)).fetchone()
         return dict(row) if row else None
 
-    def _plan_occurrence(self, row):
+    def _plan_occurrence(self, row, payload=None):
         if str(row.get('source')) != 'plan':
             return None
-        payload = self.runtime.plans._payload(row)
+        payload = payload if payload is not None else self.runtime.plans._payload(row)
         schedule_id, slot = str(payload.get('schedule_id') or ''), str(payload.get('slot') or '')
         if not schedule_id or not slot:
             return None

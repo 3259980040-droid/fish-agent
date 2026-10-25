@@ -230,6 +230,10 @@ class TurnViewTests(unittest.TestCase):
         self.assertEqual(view['plan']['schedule_id'], plan['id'])
         self.assertEqual(view['plan']['occurrence']['state'], 'sent')
         self.assertTrue(view['delivery']['sent'])
+        # The view reads the record the plan turn actually wrote (wake:<plan>:<slot>).
+        self.assertTrue(view['reference'].startswith('wake:' + plan['id'] + ':'), view['reference'])
+        self.assertNotEqual(view['trace']['events'], [])
+        self.assertIsNotNone(view['delivery_times']['receipt'])
 
 
 if __name__ == '__main__':

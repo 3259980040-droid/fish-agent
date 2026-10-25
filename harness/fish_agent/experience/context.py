@@ -356,27 +356,20 @@ def self_wake_materials(runtime, run, inputs, cancelled=None):
               '或者什么都不做；没有新消息也可以继续想。想开口就调用这个场所的发送工具，不开口就不要调用。')
     event = {'reference': 'self:' + str(run['id']), 'created_at': stamp, 'text': note, 'reply_to': ''}
     if source == 'qq-group':
-        from group_decide import _dialogue, _group_memory, _names
+        from group_decide import _group_memory
         chat = place
         if not chat.startswith('group:'):
             raise ValueError('自主回合缺少群场所，未生成内容')
         path = root / 'data/qq/qq.db'
-        names = _names(root, chat)
-        history = []
-        for item in _dialogue(root, chat, names)[-12:]:
-            try:
-                message = json.loads(item.get('message') or '{}')
-            except (TypeError, ValueError):
-                continue
-            if isinstance(message, dict) and message.get('role') in ('user', 'assistant'):
-                history.append({'role': message['role'], 'content': message.get('content') or '',
-                                '_fish_layer': 1})
         session = 'group-fish:' + chat
         bind_session(root, role, session, 'chat:' + chat, '')
         experience_turn = ExperienceTurn(root, path, conversation, None, channel=chat, event=event)
         experience_turn.session = session
         experience_turn.persona_revision = persona['id']
-        _, source_info = experience_turn.prepare(cancelled)
+        # The self-wake uses the same prepared common experience as every other turn
+        # (layered budget, compression checkpoints, references) instead of a fixed
+        # 12-message slice that bypassed both.
+        history, source_info = experience_turn.prepare(cancelled)
         return {'persona': persona, 'history': history, 'history_source': source_info,
                 'memory': _group_memory(root, chat, note), 'scope': 'chat:' + chat,
                 'references': '', 'current': [{'type': 'text', 'text': note}], 'session': session,

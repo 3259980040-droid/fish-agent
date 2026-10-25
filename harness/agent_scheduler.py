@@ -35,6 +35,12 @@ class AgentScheduler:
             if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='active_occurrences'").fetchone():
                 db.execute('DELETE FROM active_occurrences')
             db.execute('CREATE TABLE IF NOT EXISTS automation_bootstrap(name TEXT PRIMARY KEY,created REAL)')
+            # The old two-hour patrol is retired by the 45-minute wake. This migration
+            # must run on existing installs too: the bootstrap flag already exists there,
+            # so gating it behind that flag left the patrol submitting its own turns.
+            db.execute("UPDATE scheduled SET state='paused',updated=? WHERE state!='deleted' "
+                       "AND (configuration_key='autonomy-patrol' OR title='两小时活动巡查')",
+                       (time.time(),))
             seeded = db.execute("SELECT 1 FROM automation_bootstrap WHERE name='unified-wakes-v1'").fetchone()
         if seeded:
             return
