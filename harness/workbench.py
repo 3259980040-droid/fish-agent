@@ -1255,6 +1255,11 @@ class Workbench:
                 result['execution'] = live.get('execution') or execution
                 result['elapsed_ms'] = live.get('elapsed_ms', 0)
             return result
+        if action == 'turn.view':
+            view = self.runtime().execution.turn_view(str(params.get('execution') or ''))
+            if view is None:
+                raise ValueError('执行记录不存在')
+            return view
         if action == 'chat.cancel':
             cid = str(params['id'])
             info = self.runtime().execution.cancel(cid)
