@@ -24,3 +24,9 @@
 原`memory.curate.run/status`、`fish_memory_curate`与每日tick共用原整理记录。request.source_limits固定原库和学习队列的高水位；运行时progress的learn步骤保存completed/remaining/batch_count，终态result保存相同计数。completed含已完成或明确排除的来源，saved_count和model_calls是本次实际接续数；旧记录没有的逐批字段由前端保持缺失，不推算为零。
 
 普通重新提交先接续原未完成run及其截止；明确force重做才重新处理已有来源。原learning_jobs与原文引用决定跳过或提炼，失败后不再请求下一来源；小结在整个范围学习完成后更新。`ensure_worker(instance_root, stop=生命周期Event)`使用所属实例原停止事件；W02由各Runtime绑定生命周期，不能用共享host.stop替换实例的Event。`execute/run_pending`的cancelled参数沿同一事件检查，未传时保持原同步调用行为。
+
+## QQ执行结果监听
+
+`QQAgentLoop.watch_turn(execution, source=..., chat=..., instance=runtime.context)`在QQ事件循环调用，返回已创建的Task；也接受实例root。监听固定该实例的状态请求和管理员日志，完成后自动移出生命周期集合，QQ停机由原stop取消并等待。阻塞提交在线程结束后回到事件循环再调监听；私聊沿watch_private使用同一入口。
+
+W03逐实例保存原消息、提交后，用对应runtime.context和execution调用此入口。监听只读取原执行记录并写所属实例管理员日志，不改QQStore消息；原消息的runtime_turn_id等写回由提交方使用所属实例QQStore负责，不使用共享连接的默认Store覆写另一实例记录。开始/结束、工具与投递事实仍由原turn_view/trace读取。

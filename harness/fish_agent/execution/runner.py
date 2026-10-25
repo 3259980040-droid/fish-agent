@@ -48,7 +48,7 @@ def run_model_loop(root, role, *, persona, history, history_source, memory, scop
     budget = ContextBudget(root, gateway)
     output_source = 'text'
     library = None
-    tool_list = tool_api.definitions(root, role) if tool_context else []
+    tool_list = tool_api.definitions(root, role,session=session) if tool_context else []
     offered = tuple(definition['function']['name'] for definition in tool_list)
     # 这一轮的话由谁送出去：只有真的绑成了发送面的会话（群、主人私聊、主人客户端），
     # 正文才是思考、说话必须调用工具；其它窗口照旧把正文当回复。
@@ -89,26 +89,18 @@ def run_model_loop(root, role, *, persona, history, history_source, memory, scop
     tools_used = 0
     deadline = time.monotonic() + options.timeout_seconds
     while time.monotonic() < deadline:
+        current_tools=tool_api.catalog(root,role,all_tools=True,session=session) if tool_context else []
+        enabled={item['name']:item for item in current_tools}
+        tool_list=[{'type':'function','function':{key:enabled[item['function']['name']][key] for key in ('name','description','parameters')}}
+                   for item in tool_list if item['function']['name'] in enabled]
+        for item in tool_api.definitions(root,role,session=session) if tool_context else []:
+            if not any(old['function']['name']==item['function']['name'] for old in tool_list):tool_list.append(item)
         if cancelled is not None and cancelled.is_set():
             raise InterruptedError('本轮聊天已取消，未继续生成或调用工具')
         budget_report = budget.fit(messages, tool_list, options.max_tokens)
-        preview = []
-        for message in messages:
-            body = message.get('content') or ''
-            if isinstance(body, list):
-                body = [({'type': 'image_url', 'omitted': '附件数据'} if block['type'] == 'image_url'
-                         else {'type': 'text', 'text': block['text'][:1000]}) for block in body]
-            else:
-                body = body[:2000]
-            preview.append({**{k: v for k, v in message.items() if k in ('role', 'tool_calls', 'tool_call_id')},
-                            'content': body})
-        from request_inspector import RequestInspector
-        RequestInspector(root).capture(role, {'session': session, 'scope': scope},
-            {'provider': gateway.base, 'model': gateway.model, 'purpose': origin, 'messages': preview[-30:],
-             'system': request['sources'], 'tools': tool_list or [], 'maxTokens': options.max_tokens,
-             'effort': options.effort, 'context_budget': budget_report,
-             'omitted': {'preview': '快照只截取文字，完整组装结果与工具结果见 messages',
-                         'tools': '工具目录取自 tool_host.builtins；本轮实际公布的工具见 tools，执行结果见 messages'}})
+        # RequestInspector is an optional administrator diagnostic. The real input
+        # boundaries, trace and usage below own this turn's records; a debug copy
+        # must never be a prerequisite for either a request or its tool continuation.
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
@@ -147,19 +139,19 @@ def run_model_loop(root, role, *, persona, history, history_source, memory, scop
         messages.append(assistant)
         previews = []
         for call in result.tool_calls:
-            if tool_limit > 0 and tools_used >= tool_limit:
-                raise ValueError('本轮工具调用达到当前设置的上限，结果未冒充已发送')
-            tools_used += 1
             function = call['function']
             name = str(function.get('name') or '')
             params = {}
             try:
+                if tool_limit > 0 and tools_used >= tool_limit:
+                    raise ValueError('本轮工具调用达到当前设置的上限；本次没有执行，可据已有结果结束本轮')
+                tools_used += 1
                 params = json.loads(function.get('arguments') or '{}')
-                trace.event('tool_start', {'name': name, 'arguments': params})
+                trace.event('tool_start', {'call_id':call['id'],'name': name, 'arguments': params})
                 if not isinstance(params, dict):
                     raise ValueError('工具参数必须为对象')
-                if name not in offered:
-                    raise ValueError('本轮未提供该工具：' + (name or '(空)') + '；只能用本轮公布的工具')
+                from fish_agent.settings.tools import ToolSettings
+                ToolSettings(root).require(name,params)
                 if name == 'fish_emoji_search':
                     if not stickers:
                         raise ValueError('这一轮是纯文本回复，没有能接住表情气泡的契约，不能挑表情；直接用文字说')
@@ -185,11 +177,15 @@ def run_model_loop(root, role, *, persona, history, history_source, memory, scop
                     value = tool_api.execute(root, role, session, name, params, call['id'],
                                              min(tool_api.TOOL_TIMEOUTS.get(name, 30),
                                                  max(1.0, deadline - time.monotonic())))
-            except (ValueError, KeyError, OSError, PermissionError, InterruptedError, requests.RequestException) as exc:
+            except Exception as exc:  # the model receives the actual same-call failure, including plugin/schema failures
                 value = {'error': str(exc)}
+            if name == 'fish_tool_list' and isinstance(value,dict) and not value.get('error'):
+                for discovered in value.get('tools',[]):
+                    if not any(item['function']['name']==discovered['name'] for item in tool_list):
+                        tool_list.append({'type':'function','function':discovered})
             if isinstance(value, dict) and value.get('_fish_images'):
                 previews.extend(value.pop('_fish_images'))
-            trace.event('tool_result', {'name': name, 'result': value})
+            trace.event('tool_result', {'call_id':call['id'],'name': name, 'result': value})
             observed_call = {'name': name, 'arguments': params,
                              'ok': not isinstance(value, dict) or 'error' not in value}
             actual_delivery = (value.get('delivery') if isinstance(value.get('delivery'), dict) else value) if isinstance(value, dict) else {}

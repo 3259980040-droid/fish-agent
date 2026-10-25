@@ -54,6 +54,8 @@ def send_file(root, target, path, request_id, *, session=''):
             before = {str(m.get('message_id')) for m in messages(await onebot(root,history_action,history_args))}
         except Exception:
             before = None
+        from fish_agent.settings.tools import ToolSettings
+        ToolSettings(root).require(target=target)
         receipt = await onebot(root,'upload_private_file' if kind=='private' else 'upload_group_file',params)
         if receipt.get('status')!='ok' or receipt.get('retcode',0)!=0:
             return 'failed',receipt

@@ -66,13 +66,16 @@ class QQAdapter:
         self.store().finish_turn(str(turn), status, error=str(error)[:1000])
 
     def deliver(self, *, target, bubbles, key, turn, message_id, reply_to='', reference='',
-                direct=False, timeout=180):
+                direct=False, timeout=180, source_tools=()):
         """Ask the QQ process to send already-decided bubbles; return its real receipt.
 
         The request itself being accepted is not a delivery: ``state`` says what the
         channel actually confirmed, and ``sent`` is that same fact in one field.
         """
-        body = json.dumps({'target': target, 'bubbles': bubbles, 'key': key, 'turn': turn,
+        from locations import instance_context
+        from fish_agent.settings.tools import ToolSettings
+        ToolSettings(self.root).require_delivery(target,source_tools)
+        body = json.dumps({'instance_id':instance_context(self.root).instance_id,'source_tools':list(source_tools),'target': target, 'bubbles': bubbles, 'key': key, 'turn': turn,
                            'message_id': message_id, 'reply_to': reply_to,
                            'reference': reference, 'direct': bool(direct)},
                           ensure_ascii=False).encode()

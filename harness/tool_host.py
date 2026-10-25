@@ -673,13 +673,38 @@ class ToolHost:
         from research_autonomy import ResearchControl
         return ResearchControl(self.root).config()
 
+    def catalog(self, role, *, session='', all_tools=False):
+        from fish_agent.settings.tools import ToolSettings
+        settings=ToolSettings(self.root)
+        identity=self.identity(role,session) if session else None
+        plugins={item['id']:item for item in self.registry.entries()}
+        own=builtins(role)+[skill_tool(self.root)]
+        extensions=self.registry.catalog(role,include_disabled=True)
+        tools=[]
+        shortlist=visible_tool_names(self.root)
+        for item in own+extensions:
+            name=item['name'];pid=name.split('__',2)[1] if name.startswith('fishp__') else ''
+            if not settings.effective_capability(name,identity=identity,plugin=plugins.get(pid))['enabled']:continue
+            if not all_tools:
+                if pid and not plugin_tools_visible(self.root):continue
+                if not pid and shortlist and name not in shortlist:continue
+            tools.append(item)
+        native=[item for item in self.registry.native_catalog(role,include_disabled=True)
+                if settings.effective_capability(item['name'],identity=identity,plugin=plugins.get(item['plugin']))['enabled']]
+        return {'tools':tools,'native_tools':native}
+
     def execute(self, role, session, name, arguments, call_id):
+        from fish_agent.settings.tools import ToolSettings
+        settings=ToolSettings(self.root)
+        settings.require(name)
         try:
             identity = self.identity(role, session)
         except PermissionError:
             if name not in self.OPEN_READ_TOOLS:
                 raise
             return self.unbound(role, session, name)
+        plugin=next((p for p in self.registry.entries() if name.startswith('fishp__'+p['id']+'__')),None)
+        settings.require(name,arguments,identity,plugin=plugin)
         if name == 'fish_think_again':
             # The one main execution owns the agent's clock: this is a request to it,
             # not a second scheduler. The program checks the fixed 0.7 interest floor.
@@ -698,15 +723,14 @@ class ToolHost:
             # The shortlist trims what is advertised, never what can be executed; this
             # is how she finds the rest without paying for every schema every turn.
             query = str(arguments.get('query', '') or '').strip().casefold()
-            shown = visible_tool_names(self.root)
-            everything = builtins(role) + [skill_tool(self.root)]
-            found = [item for item in everything
-                     if item['name'] not in shown
-                     and (not query or query in (item['name'] + ' ' + str(item.get('description', ''))).casefold())]
-            return {'tools': [{'name': item['name'], 'description': item.get('description', ''),
-                               'parameters': item.get('parameters', {})} for item in found[:12]],
-                    'hidden_total': max(0, len(everything) - len(shown)),
-                    'note': '这些工具按名字直接调用即可；清单为空表示没有匹配的剩余工具'}
+            shown={item['name'] for item in self.catalog(role,session=session)['tools']}
+            everything=self.catalog(role,session=session,all_tools=True)['tools']
+            found=[item for item in everything if item['name'] not in shown
+                   and (not query or query in (item['name']+' '+str(item.get('description',''))).casefold())]
+            return {'tools':[{'name':item['name'],'description':item.get('description',''),
+                              'parameters':item.get('parameters',{})} for item in found],
+                    'hidden_total':len(found),
+                    'note':'这些是本窗口当前可用的工具定义，可按名称直接调用'}
         if name == 'fish_capabilities':
             from current_capabilities import capabilities_brief, current_capabilities
             # The live text leads; the snapshot behind it is evidence, not the answer.
@@ -1084,7 +1108,7 @@ class ToolHost:
             with database(self.path) as db:
                 db.execute('INSERT OR REPLACE INTO emoji_choices VALUES(?,?,?)', (session, arguments['id'], time.time()))
             return {'ok': True, 'message': '已选择，是否发送仍由频率和安全规则决定'}
-        if not name.startswith('fishp__'):
+        if not name.startswith('fishp__') or plugin is None:
             raise PermissionError('未知工具')
         cancel = threading.Event()
         key = role + ':' + call_id
@@ -1097,7 +1121,9 @@ class ToolHost:
             sending_plugin = tulpa_chat and name.removeprefix(PREFIX).startswith(('send_','forward_'))
             effect = external_begin(self.root,session,'mcp:'+call_id,'mcp:'+name,json.dumps(arguments,ensure_ascii=False)) if sending_plugin else None
             try:
-                result = self.registry.execute(name, arguments, role, owner=bool(identity['owner']), cancel=cancel,chat_authorized=tulpa_chat)
+                result = self.registry.execute(name, arguments, role, owner=bool(identity['owner']), cancel=cancel,chat_authorized=tulpa_chat,
+                    policy_root=self.root,effective_enabled=settings.plugin_enabled(plugin),
+                    before_call=lambda:settings.require(name,arguments,identity,plugin=plugin))
             except Exception as exc:
                 plugin_finish(effect,error=str(exc))
                 raise
@@ -1786,15 +1812,7 @@ class ToolHost:
             text = contexts.persona(space['revision'])['body']
             return {'revision': space['revision'], 'text': text,'reload':True}
         if route == '/catalog':
-            # The MCP server duplicates most of Fish's own abilities and costs ~26k tokens
-            # per request. It stays installed and callable; it is only not advertised
-            # unless the owner turns it on in settings.
-            shown = self.registry.catalog(role) if plugin_tools_visible(self.root) else []
-            shortlist = visible_tool_names(self.root)
-            own = [item for item in builtins(role) if not shortlist or item['name'] in shortlist]
-            if not shortlist or 'fish_skill_use' in shortlist:
-                own = own + [skill_tool(self.root)]
-            return {'tools': own + shown, 'native_tools': self.registry.native_catalog(role)}
+            return self.catalog(role,session=str(body.get('session') or ''),all_tools=body.get('all_tools') is True)
         if route == '/bind':
             if not admin:
                 raise PermissionError('只有本地控制台能绑定身份')
