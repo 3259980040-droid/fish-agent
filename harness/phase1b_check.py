@@ -1,6 +1,7 @@
 """Phase 1B 验收：pinned CLI、profile、overlay、key、effective、cancel。"""
 
 from __future__ import annotations
+from locations import project_path
 
 import json
 import os
@@ -40,17 +41,17 @@ def make_root() -> Path:
     base.mkdir(parents=True, exist_ok=True)
     root = base / "run"
     root.mkdir(parents=True, exist_ok=True)
-    (root / "harness").mkdir(parents=True, exist_ok=True)
-    (root / "harness" / "global").mkdir(parents=True, exist_ok=True)
-    (root / "harness" / "agents").mkdir(parents=True, exist_ok=True)
+    (project_path(root, "harness")).mkdir(parents=True, exist_ok=True)
+    (project_path(root, "harness", "global")).mkdir(parents=True, exist_ok=True)
+    (project_path(root, "harness", "agents")).mkdir(parents=True, exist_ok=True)
     (root / "homes" / "research").mkdir(parents=True, exist_ok=True)
     (root / "knowledge").mkdir(parents=True, exist_ok=True)
-    (root / "qq-work").mkdir(parents=True, exist_ok=True)
-    (root / "harness" / "global" / "AGENTS.md").write_text("GLOBAL RULES\n", encoding="utf-8")
-    (root / "harness" / "agents" / "research.persona.md").write_text("RESEARCH PERSONA\n", encoding="utf-8")
-    (root / "harness" / "agents" / "qq.persona.md").write_text("QQ PERSONA\n", encoding="utf-8")
+    (project_path(root, "qq-work")).mkdir(parents=True, exist_ok=True)
+    (project_path(root, "harness", "global", "AGENTS.md")).write_text("GLOBAL RULES\n", encoding="utf-8")
+    (project_path(root, "harness", "agents", "research.persona.md")).write_text("RESEARCH PERSONA\n", encoding="utf-8")
+    (project_path(root, "harness", "agents", "qq.persona.md")).write_text("QQ PERSONA\n", encoding="utf-8")
     (root / "knowledge" / "AGENTS.md").write_text("RESEARCH WORKSPACE\n", encoding="utf-8")
-    (root / "qq-work" / "AGENTS.md").write_text("QQ WORKSPACE\n", encoding="utf-8")
+    (project_path(root, "qq-work", "AGENTS.md")).write_text("QQ WORKSPACE\n", encoding="utf-8")
 
     (root / "fake_dsh.py").write_text(
         "\n".join([
@@ -154,11 +155,11 @@ def main() -> int:
         ],
         "channels": [],
     }
-    (root / "harness" / "agents.json").write_text(
+    (project_path(root, "harness", "agents.json")).write_text(
         json.dumps(config_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     # control plugin path is under the project, but this temp root has none; create a dummy
-    (root / "harness" / "runtime" / "fish-control").mkdir(parents=True, exist_ok=True)
+    (project_path(root, "harness", "runtime", "fish-control")).mkdir(parents=True, exist_ok=True)
 
     os.environ["FISH_RESEARCH_DEEPSEEK_API_KEY"] = "test-key"
     os.environ["FISH_CONTROL_TOKEN"] = "test-token"

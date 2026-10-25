@@ -7,6 +7,7 @@ model: only :meth:`SocialRoster.public_profile` and
 """
 
 from __future__ import annotations
+from locations import project_path
 
 import json
 import math
@@ -117,7 +118,7 @@ class SocialRoster:
 
     def __init__(self, root):
         self.root = Path(root)
-        self.db_path = self.root / "data" / "social" / "people.db"
+        self.db_path = project_path(self.root, "data", "social", "people.db")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._setup()
 

@@ -8,6 +8,7 @@ reservation this store owns: one live reservation per chat and one per cursor, s
 a second inbound, a redelivered message or a competing worker cannot generate or
 send beside the holder.
 """
+from locations import project_path
 from pathlib import Path
 import json
 import random
@@ -120,7 +121,7 @@ RELAY_BYPASS_LIMIT = 2
 class GroupPolicy:
     def __init__(self, root, *, path=None, audit=None):
         self.root = Path(root)
-        self.path = Path(path) if path else self.root / 'data/social/group-policy.db'
+        self.path = Path(path) if path else project_path(self.root, 'data/social/group-policy.db')
         # 放行要留痕，而审计账本属于调用方（群循环的 governance）：这里只存一个可选的
         # 记账口，没有它照常判断，绝不因为记账而拒绝或改变任何一次放行。
         self.audit = audit
@@ -296,7 +297,7 @@ class GroupPolicy:
         只读地看那一份账，不往里面写、也不用我们自己再记一份"谁说了什么"。时间戳是
         ts 文本（%Y-%m-%d %H:%M:%S），解析不了的行直接跳过：一行读不懂只损失一行。
         """
-        store = self.root / 'data/qq/qq.db'
+        store = project_path(self.root, 'data/qq/qq.db')
         if not store.is_file():
             return []
         try:
@@ -555,7 +556,7 @@ class GroupPolicy:
         store answers 0, because a window that cannot be read must not invent silence.
         """
         now = time.time() if now is None else float(now)
-        store = self.root / 'data/qq/qq.db'
+        store = project_path(self.root, 'data/qq/qq.db')
         if not store.is_file(): return 0
         since = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now - 3600))
         try:

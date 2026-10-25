@@ -1,4 +1,5 @@
 """Application network choices. Loopback connections always remain local."""
+from locations import project_path
 import ipaddress
 import os
 from urllib.parse import urlparse
@@ -21,7 +22,7 @@ def validate(value):
 
 
 def settings(root):
-    return validate(read_json(root / 'harness/network.json', {'mode': 'system'}))
+    return validate(read_json(project_path(root, 'harness/network.json'), {'mode': 'system'}))
 
 
 class NetworkConfig:
@@ -30,7 +31,7 @@ class NetworkConfig:
     @locked_settings
     def save(self, value):
         result = validate(value)
-        write_json(self.root / 'harness/network.json', result)
+        write_json(project_path(self.root, 'harness/network.json'), result)
         return result
 
 

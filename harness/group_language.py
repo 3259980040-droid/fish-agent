@@ -1,4 +1,5 @@
 """Group/window-scoped expression references; never grants capabilities."""
+from locations import project_path
 import hashlib
 import json
 import re
@@ -11,7 +12,7 @@ from memory_store import _terms
 class GroupLanguage:
     def __init__(self, root):
         self.root=Path(root)
-        self.path=Path(root)/'data/social/group-language.db'
+        self.path=project_path(Path(root), 'data/social/group-language.db')
         with database(self.path) as db:
             db.executescript('''
             CREATE TABLE IF NOT EXISTS entries(id TEXT PRIMARY KEY,chat TEXT,window TEXT,kind TEXT,
@@ -26,7 +27,7 @@ class GroupLanguage:
         messages={str(x['message_id']):x for x in snapshot.get('messages',[]) if x.get('message_id')}
         saved=0
         from storage import read_json
-        config=read_json(self.root/'channels/fish_qq/config.json',{})
+        config=read_json(project_path(self.root, 'channels/fish_qq/config.json'),{})
         bot=str(config.get('bot_id') or config.get('self_id') or '')
         with database(self.path) as db:
             for item in candidates[:8] if isinstance(candidates,list) else []:

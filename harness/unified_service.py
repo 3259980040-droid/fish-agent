@@ -1,4 +1,5 @@
 """Background owner services for the native DSH Fish workspace; no Qt UI."""
+from locations import project_path
 from pathlib import Path
 import argparse
 import json
@@ -7,16 +8,16 @@ import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT), str(ROOT / 'harness'), str(ROOT / 'vendor/python')]
+sys.path[:0] = [str(ROOT), str(project_path(ROOT, 'harness')), str(project_path(ROOT, 'vendor/python'))]
 
 
 def _stop():
     """Ask the running loopback service to stop without importing its runtime deps."""
     import urllib.request
     try:
-        config = json.loads((ROOT / 'harness/agents.json').read_text(encoding='utf-8'))
+        config = json.loads((project_path(ROOT, 'harness/agents.json')).read_text(encoding='utf-8'))
         port = int(config.get('runtime', {}).get('tool_host_port', 3103))
-        token = (ROOT / 'harness/runtime/control.token').read_text(encoding='utf-8').strip()
+        token = (project_path(ROOT, 'harness/runtime/control.token')).read_text(encoding='utf-8').strip()
         request = urllib.request.Request(
             f'http://127.0.0.1:{port}/system/stop', data=b'{}', method='POST',
             headers={'x-fish-token': token, 'x-fish-role': 'qq'})
@@ -45,7 +46,7 @@ def main():
     services = FishServices(ROOT)
     host = ToolHost(ROOT)
     host.serve()
-    state_path = ROOT / 'data/system/unified-service.json'
+    state_path = project_path(ROOT, 'data/system/unified-service.json')
     state = {'pid': os.getpid(), 'started': time.time(), 'status': 'starting', 'version': 1}
     write_json(state_path, state)
     try:
@@ -77,7 +78,7 @@ def main():
 
 if __name__ == '__main__':
     if sys.stdout is None or sys.stderr is None:
-        log_path = ROOT / 'data/system/logs/backend.log'
+        log_path = project_path(ROOT, 'data/system/logs/backend.log')
         log_path.parent.mkdir(parents=True, exist_ok=True)
         stream = log_path.open('a', encoding='utf-8', buffering=1)
         sys.stdout = sys.stderr = stream

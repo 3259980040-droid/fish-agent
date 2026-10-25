@@ -21,6 +21,7 @@ Pinned source: MaiBot @ ff0fe42500f5f7581e9655d1e78379407233207a,
 Attribution: vendor/sources/MaiBot/MEMORY-INTEGRATION-NOTICE.md.
 """
 from __future__ import annotations
+from locations import project_path
 
 import hashlib
 import importlib.util
@@ -54,7 +55,7 @@ def maibot_root(root: Path) -> Path:
         candidate = base / 'vendor' / 'sources' / 'MaiBot' / 'src' / 'A_memorix'
         if candidate.is_dir():
             return candidate
-    return root / 'vendor' / 'sources' / 'MaiBot' / 'src' / 'A_memorix'
+    return project_path(root, 'vendor', 'sources', 'MaiBot', 'src', 'A_memorix')
 
 
 def _load(root: Path, key: str) -> Optional[ModuleType]:

@@ -6,6 +6,7 @@ goes to the one main execution, and the runtime's delivery writes the answer her
 through the same atomic commit the old path used.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import sqlite3
@@ -24,7 +25,7 @@ class DesktopChat:
         if role not in ("qq", "research"):
             raise ValueError("未知角色")
         self.root, self.role, self.runtime = root, role, runtime
-        self.db = root / "data" / role / "desktop-chat.db"
+        self.db = project_path(root, "data", role, "desktop-chat.db")
         self.db.parent.mkdir(parents=True, exist_ok=True)
         self.cancel_event = threading.Event()
         self.lock = threading.Lock()

@@ -7,6 +7,7 @@ added, edited rows are replaced, and rows whose original was deleted are
 removed, so the index never depends on "append after MAX(rowid)" alone.
 """
 from __future__ import annotations
+from locations import project_path
 
 import re
 import sqlite3
@@ -30,7 +31,7 @@ def _open(path):
 def _targets(root, path=None):
     if path:
         return [Path(path)]
-    return [Path(root) / 'data/qq/qq.db', Path(root) / 'data/qq/desktop-chat.db']
+    return [project_path(Path(root), 'data/qq/qq.db'), project_path(Path(root), 'data/qq/desktop-chat.db')]
 
 
 def _short(source):
@@ -45,8 +46,8 @@ def _short(source):
 def _target(root, source):
     name = Path(str(source)).name
     if name == 'desktop-chat.db' or str(source) in ('desktop', 'desktop-chat'):
-        return Path(root) / 'data/qq/desktop-chat.db'
-    return Path(root) / 'data/qq/qq.db'
+        return project_path(Path(root), 'data/qq/desktop-chat.db')
+    return project_path(Path(root), 'data/qq/qq.db')
 
 
 def _schema(db):

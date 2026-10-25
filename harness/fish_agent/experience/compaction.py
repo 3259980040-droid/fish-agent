@@ -13,6 +13,7 @@ estimates again from message counts or characters; the interface that turns a
 checkpoint into model material is ``DesktopContext.history``.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import time
@@ -69,7 +70,7 @@ _ADDED = (('started', 'REAL'), ('finished', 'REAL'), ('checkpoint_id', 'INTEGER'
 
 
 def _path(root):
-    return Path(root) / 'data/social/experience.db'
+    return project_path(Path(root), 'data/social/experience.db')
 
 
 def _name(source):
@@ -227,7 +228,7 @@ def legacy_summary(root, *, source, conversation):
     turn after an upgrade continue from what the owner already saw instead of
     restarting from message 1. No row is ever written here again.
     """
-    path = Path(root) / 'data/qq' / _name(source)
+    path = project_path(Path(root), 'data/qq', _name(source))
     import sqlite3
     from contextlib import closing
     if not path.is_file():
@@ -332,7 +333,7 @@ def request(root, *, source, conversation, through, pressure=0, threshold=0, ret
 
 # ------------------------------------------------------------------ one transaction
 def _original(root, job):
-    path = Path(root) / 'data/qq' / job['source']
+    path = project_path(Path(root), 'data/qq', job['source'])
     import sqlite3
     from contextlib import closing
     if not path.is_file():
@@ -606,7 +607,7 @@ def compact_now(root, *, source, conversation, role='qq', gateway=None):
     The automatic switch only governs entries nothing asked for; a manual request
     still uses the one selection/commit chain (09-06 wires the page action).
     """
-    path = Path(root) / 'data/qq' / _name(source)
+    path = project_path(Path(root), 'data/qq', _name(source))
     import sqlite3
     from contextlib import closing
     if not path.is_file():

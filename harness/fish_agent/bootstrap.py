@@ -1,9 +1,9 @@
 """The one assembly: build the agent's modules once and keep their lifecycle.
 
 The background host calls ``get_runtime`` at startup and ``start``/``stop`` around
-its own lifecycle; every entry then reaches the same modules. Nothing here is a new
-process, database or work root - it is the existing Fish source getting one owner
-for state that used to be re-created per entry.
+its own lifecycle; every entry reaches the modules of its explicit instance.
+Code, credentials and transport stay on the host; each instance owns existing
+store implementations and its one consumer, without copying the program.
 """
 from __future__ import annotations
 
@@ -16,7 +16,11 @@ _LOCK = threading.Lock()
 
 class FishRuntime:
     def __init__(self, root):
-        self.root = Path(root).resolve()
+        from .instances import instance_context
+        self.context = instance_context(root)
+        self.instance_id = self.context.instance_id
+        self.host_root = self.context.host_root
+        self.root = self.context.root
         from .adapters.desktop import DesktopAdapter
         from .adapters.qq import QQAdapter
         from .delivery import DeliveryModule
@@ -58,12 +62,14 @@ class FishRuntime:
 
 
 def get_runtime(root):
-    """The one assembly for this Fish source root."""
-    key = str(Path(root).resolve())
+    """The one assembly for this explicit Fish instance."""
+    from .instances import instance_context
+    context = instance_context(root)
+    key = str(context.root)
     with _LOCK:
         runtime = _RUNTIMES.get(key)
         if runtime is None:
-            runtime = _RUNTIMES[key] = FishRuntime(root)
+            runtime = _RUNTIMES[key] = FishRuntime(context)
         return runtime
 
 
@@ -74,7 +80,8 @@ def reset_runtime(root=None):
             runtimes = list(_RUNTIMES.values())
             _RUNTIMES.clear()
         else:
-            runtime = _RUNTIMES.pop(str(Path(root).resolve()), None)
+            from .instances import instance_context
+            runtime = _RUNTIMES.pop(str(instance_context(root).root), None)
             runtimes = [runtime] if runtime is not None else []
     for runtime in runtimes:
         try:

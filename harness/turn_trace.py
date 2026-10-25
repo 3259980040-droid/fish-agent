@@ -1,4 +1,5 @@
 """Display copies of real provider reasoning and tool facts; never ask a model to explain itself."""
+from locations import project_path
 import json
 import time
 import uuid
@@ -9,7 +10,7 @@ from request_inspector import redact
 
 class TurnTrace:
     def __init__(self,root,role,session,origin,reference='',child=False):
-        self.path = Path(root)/'data/social/experience.db'
+        self.path = project_path(Path(root), 'data/social/experience.db')
         self.id,self.reasoning,self.events = uuid.uuid4().hex,'',[]
         self.phase,self.last = 'preparing',0
         with database(self.path) as db:
@@ -39,7 +40,7 @@ class TurnTrace:
 
 
 def latest(root,role='qq'):
-    path = Path(root)/'data/social/experience.db'
+    path = project_path(Path(root), 'data/social/experience.db')
     if not path.is_file(): return None
     import sqlite3
     with sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True) as db:

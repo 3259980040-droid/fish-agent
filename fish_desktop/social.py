@@ -1,4 +1,5 @@
 """Local persona revision editor and explicit per-group participation controls."""
+from locations import project_path
 import time
 import json
 import difflib
@@ -125,7 +126,7 @@ class SocialPage(BasePage):
         self._load_persona()
         from storage import read_json
         selected = self.groups.currentData(); self.groups.blockSignals(True); self.groups.clear()
-        for gid in read_json(self.services.root / 'channels/fish_qq/config.json').get('allowlist', {}).get('group_ids', []):
+        for gid in read_json(project_path(self.services.root, 'channels/fish_qq/config.json')).get('allowlist', {}).get('group_ids', []):
             self.groups.addItem(str(gid), str(gid))
         target=self.apply_target.currentData();self.apply_target.clear();self.apply_target.addItem('主人私聊','owner')
         for i in range(self.groups.count()):self.apply_target.addItem('群 '+self.groups.itemText(i),'group:'+self.groups.itemData(i))

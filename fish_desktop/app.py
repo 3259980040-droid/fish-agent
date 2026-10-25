@@ -4,6 +4,7 @@
 """
 
 from __future__ import annotations
+from locations import project_path
 
 import argparse
 import os
@@ -47,7 +48,7 @@ def _run_backend() -> int | None:
     rest = argv[:index] + argv[index + 2:]
     root = Path(os.environ.get("FISH_HARNESS_HOME", str(Path(__file__).resolve().parent.parent)))
     if getattr(sys, "frozen", False) or sys.stdout is None or sys.stderr is None:
-        log = root / "harness" / "backend-bootstrap.log"
+        log = project_path(root, "harness", "backend-bootstrap.log")
         log.parent.mkdir(parents=True, exist_ok=True)
         stream = log.open("a", encoding="utf-8", buffering=1)
         sys.stdout = stream
@@ -107,7 +108,7 @@ def _run_backend() -> int | None:
             manager.stop_all()
             from tool_host import shutdown_host
             shutdown_host(root)
-        write_json(root / 'data/diagnostics/runtime-check.json', result)
+        write_json(project_path(root, 'data/diagnostics/runtime-check.json'), result)
         return 0 if result['ok'] else 1
     print(f"unknown backend: {kind}", file=sys.stderr)
     return 2
@@ -159,7 +160,7 @@ def main() -> int:
     if not (args.screenshot or args.ui_diagnostics or args.attach):
         from .setup_wizard import SetupWizard
         from storage import read_json
-        if read_json(services.root / 'harness/setup.json', {'completed': True}).get('completed') is False:
+        if read_json(project_path(services.root, 'harness/setup.json'), {'completed': True}).get('completed') is False:
             SetupWizard(services, window).exec()
         maintenance_result = os.environ.pop('FISH_MAINTENANCE_RESULT', '')
         maintenance_ok = True

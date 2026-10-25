@@ -7,6 +7,7 @@ status and the compatibility entry points; it no longer owns a second learning
 loop, a second daily tick or an independent dedup pass.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import re
@@ -226,7 +227,7 @@ def _qq_chat_scope(chat_id: str, conversation_id: str) -> str:
 
 def _qq_bot_id(root: Path) -> str:
     try:
-        config = json.loads((Path(root) / 'channels' / 'fish_qq' / 'config.json').read_text(encoding='utf-8'))
+        config = json.loads((project_path(Path(root), 'channels', 'fish_qq', 'config.json')).read_text(encoding='utf-8'))
         return str(config.get('bot_id') or config.get('self_id') or '').strip()
     except (OSError, ValueError, TypeError):
         return ''
@@ -241,7 +242,7 @@ def read_qq_messages(root: Path, role: str, start: float, after_id=0) -> list:
     earlier than its neighbours is still seen. The caller filters by both ts
     and id, which keeps this reader idempotent.
     """
-    path = Path(root) / 'data' / 'qq' / 'qq.db'
+    path = project_path(Path(root), 'data', 'qq', 'qq.db')
     if not path.is_file():
         return []
     bot_id = _qq_bot_id(root)
@@ -302,7 +303,7 @@ def read_desktop_messages(root: Path, role: str, start: float, after_id=0) -> li
     Ordinary chats and work chats share the owner scope; owner private test
     spaces are read only for recall (their queue is not written).
     """
-    path = Path(root) / 'data' / role / 'desktop-chat.db'
+    path = project_path(Path(root), 'data', role, 'desktop-chat.db')
     if not path.is_file():
         return []
     out = []
@@ -367,8 +368,8 @@ class HistoryCursor:
         self.root = Path(root)
 
     def roles(self):
-        found = [role for role in ('qq', 'research') if (Path(self.root) / 'data' / role / 'desktop-chat.db').is_file()]
-        if (Path(self.root) / 'data' / 'qq' / 'qq.db').is_file() and 'qq' not in found:
+        found = [role for role in ('qq', 'research') if (project_path(Path(self.root), 'data', role, 'desktop-chat.db')).is_file()]
+        if (project_path(Path(self.root), 'data', 'qq', 'qq.db')).is_file() and 'qq' not in found:
             found.append('qq')
         return found
 
@@ -386,7 +387,7 @@ class HistoryCursor:
             return 0
 
     def _path(self, role, store):
-        return self.root / 'data' / ('qq' if store == 'qq.db' else role) / store
+        return project_path(self.root, 'data', 'qq' if store == 'qq.db' else role, store)
 
     @staticmethod
     def _store(row) -> str:
@@ -534,7 +535,7 @@ class MemoryMaintenance:
         state.set('job:' + kind, {'record': record})
 
     def _roles(self):
-        return [role for role in ('qq', 'research') if (self.root / 'data' / role).is_dir()]
+        return [role for role in ('qq', 'research') if (project_path(self.root, 'data', role)).is_dir()]
 
     def status(self) -> dict:
         """Persisted schedule/run state, cursors, readiness; read-only."""
@@ -573,8 +574,8 @@ class MemoryMaintenance:
             'weekly': {'at': 'Sunday 04:30', 'due_window': _iso(windows['weekly']), 'next': _iso(upcoming['weekly'])},
             'jobs': jobs,
             'cursors': cursors,
-            'sources': {'qq.db': (self.root / 'data/qq/qq.db').is_file(),
-                        'desktop': {role: (self.root / 'data' / role / 'desktop-chat.db').is_file()
+            'sources': {'qq.db': (project_path(self.root, 'data/qq/qq.db')).is_file(),
+                        'desktop': {role: (project_path(self.root, 'data', role, 'desktop-chat.db')).is_file()
                                     for role in ('qq', 'research')}},
             'semantic': semantic,
             'upstream': {'commit': memory_source.MAIBOT_COMMIT,
@@ -748,12 +749,12 @@ def start_background(host, root=None, *, interval: float = 60.0, embed_interval:
 
     def warm_embeddings():
         """Local model worker only (no model API); readiness on the first pass."""
-        if not (root / 'harness' / 'agents.json').is_file():
+        if not (project_path(root, 'harness', 'agents.json')).is_file():
             return
         try:
             from memory_engine import MemoryEngine
             for role in ('qq', 'research'):
-                if (root / 'data' / role / 'memory.db').is_file():
+                if (project_path(root, 'data', role, 'memory.db')).is_file():
                     MemoryEngine(root, role).maintenance()
             from doc_store import maintain as maintain_documents
             maintain_documents(root)

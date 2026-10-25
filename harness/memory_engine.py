@@ -21,6 +21,7 @@ Design
   ``semantic.mode`` is ``hybrid`` only when vectors were actually used.
 """
 from __future__ import annotations
+from locations import project_path
 
 import atexit
 import hashlib
@@ -120,7 +121,7 @@ def _config(root: Path) -> dict:
     base = {'enabled': True, 'model': DEFAULT_MODEL, 'dim': 0, 'cache_dir': CACHE_RELATIVE,
             'venv': 'vendor/runtime/memory-python', 'faiss': True}
     try:
-        base.update(read_json(Path(root).joinpath(*CONFIG_RELATIVE), {}))
+        base.update(read_json(project_path(root, *CONFIG_RELATIVE), {}))
     except (OSError, ValueError):
         pass
     return base
@@ -144,9 +145,9 @@ def _python_for(root: Path, config: dict) -> Optional[Path]:
     candidates = []
     venv = config.get('venv')
     if venv:
-        base = Path(root) / str(venv)
+        base = project_path(root, str(venv))
         candidates += [base / 'Scripts' / 'python.exe', base / 'bin' / 'python']
-    candidates.append(Path(root).joinpath(*VENV_PYTHON_RELATIVE))
+    candidates.append(project_path(root, *VENV_PYTHON_RELATIVE))
     for candidate in candidates:
         if candidate.is_file():
             return candidate
@@ -154,7 +155,7 @@ def _python_for(root: Path, config: dict) -> Optional[Path]:
 
 
 def _worker_script(root: Path) -> Path:
-    return Path(root).joinpath(*WORKER_RELATIVE)
+    return project_path(root, *WORKER_RELATIVE)
 
 
 def _pack(vector: List[float]) -> bytes:
@@ -383,7 +384,7 @@ def _worker(root: Path, role: str) -> Optional[EmbeddingWorker]:
         return None
     python = _python_for(root, config)
     script = _worker_script(root)
-    cache = (Path(root) / str(config.get('cache_dir') or CACHE_RELATIVE)).resolve()
+    cache = (project_path(root, str(config.get('cache_dir') or CACHE_RELATIVE))).resolve()
     model = str(config.get('model') or DEFAULT_MODEL).strip()
     key = (str(Path(root).resolve()), model)
     with _workers_lock:
@@ -392,7 +393,7 @@ def _worker(root: Path, role: str) -> Optional[EmbeddingWorker]:
         if created:
             worker = EmbeddingWorker(root, role, python=python or Path('python'), script=script, model=model,
                                      cache_dir=cache, want_faiss=bool(config.get('faiss', True)),
-                                     log_path=Path(root) / 'data' / 'memory-embeddings.log')
+                                     log_path=project_path(Path(root), 'data', 'memory-embeddings.log'))
             worker.available = python is not None and script.is_file()
             _workers[key] = worker
         return worker
@@ -458,8 +459,8 @@ class MemoryEngine:
                 'model': self.config['model'], 'dim': worker.dim if worker else 0, 'faiss': bool(worker and worker.faiss), 'retrieval_backend': 'sqlite-current-vector-cosine',
                 'stored_vectors': len(stored), 'stored_dims': sorted(dims), 'embedded_memories': embedded,
                 'eligible_memories': eligible, 'pending': max(0, eligible - embedded),
-                'detail': detail[:400] if detail else '', 'cache_dir': str(Path(self.root) / str(self.config.get('cache_dir') or CACHE_RELATIVE)),
-                'log': str(Path(self.root) / 'data' / 'memory-embeddings.log')}
+                'detail': detail[:400] if detail else '', 'cache_dir': str(project_path(self.root, str(self.config.get('cache_dir') or CACHE_RELATIVE))),
+                'log': str(project_path(Path(self.root), 'data', 'memory-embeddings.log'))}
 
     def semantic_status(self) -> dict:
         status = self.embedding_status()

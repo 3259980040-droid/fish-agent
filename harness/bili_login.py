@@ -3,6 +3,7 @@
 The original license is retained under vendor/sources/dsh-bili-scroll/LICENSE.
 Fish stores the successful cookie bundle with Windows DPAPI, never in reports.
 """
+from locations import project_path
 import json
 import threading
 import time
@@ -27,7 +28,7 @@ class BiliLogin:
             if not data.get('qrcode_key') or not data.get('url'):
                 raise RuntimeError('B 站未返回可用二维码')
             self.key, self.started = data['qrcode_key'], time.time()
-            path = self.root / 'data/research/login-qr.png'; path.parent.mkdir(parents=True, exist_ok=True)
+            path = project_path(self.root, 'data/research/login-qr.png'); path.parent.mkdir(parents=True, exist_ok=True)
             qrcode.make(data['url']).save(path)
             return {'ok': True, 'path': str(path), 'state': 'waiting'}
 
@@ -48,5 +49,5 @@ class BiliLogin:
                 except requests.RequestException: pass
             SecretStore(self.root).put('bili-account', json.dumps(credential))
             self.key = ''
-            (self.root / 'data/research/login-qr.png').unlink(missing_ok=True)
+            (project_path(self.root, 'data/research/login-qr.png')).unlink(missing_ok=True)
             return {'state': 'done'}

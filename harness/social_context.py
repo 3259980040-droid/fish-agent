@@ -4,6 +4,7 @@ No persona text grants authority. Approval requires the currently verified owner
 on QQ; selecting or editing a revision never enables group replies.
 """
 from __future__ import annotations
+from locations import project_path
 
 import hashlib
 import json
@@ -24,7 +25,7 @@ def identifier(value):
 class SocialContext:
     def __init__(self, root):
         self.root = Path(root)
-        self.path = self.root / 'data/social/context.db'
+        self.path = project_path(self.root, 'data/social/context.db')
         with database(self.path) as db:
             db.executescript('''
             CREATE TABLE IF NOT EXISTS personas(
@@ -59,7 +60,7 @@ class SocialContext:
                 db.execute("ALTER TABLE audit ADD COLUMN runtime_digest TEXT NOT NULL DEFAULT ''")
 
     def owner(self):
-        return str(read_json(self.root / 'channels/fish_qq/config.json').get('allowlist', {}).get('owner_id', ''))
+        return str(read_json(project_path(self.root, 'channels/fish_qq/config.json')).get('allowlist', {}).get('owner_id', ''))
 
     def require_owner(self, sender):
         from governance import Governance
@@ -108,7 +109,7 @@ class SocialContext:
         return self.persona(revision)
 
     def _text(self, name):
-        path = self.root / name
+        path = project_path(self.root, name)
         return path.read_text(encoding='utf-8') if path.is_file() else ''
 
     @locked_settings
@@ -266,8 +267,8 @@ class SocialContext:
                     raise
             # A window that was deleted still needs a scratch directory: leftover task
             # rows point at it, and one stale row must not fail an unrelated reply.
-            return self.root / 'data' / 'qq' / 'spaces' / sid
-        return self.root / 'data' / space['role'] / 'spaces' / sid
+            return project_path(self.root, 'data', 'qq', 'spaces', sid)
+        return project_path(self.root, 'data', space['role'], 'spaces', sid)
 
     def bind_runtime(self, sid, session):
         self.space(sid)
@@ -318,7 +319,7 @@ class SocialContext:
         persona = self.persona(revision)
         if persona['role'] != 'qq' or not persona['approved']:
             raise PermissionError('此人格版本尚未由当前主人完成测试并认可')
-        allow = read_json(self.root / 'channels/fish_qq/config.json').get('allowlist', {}).get('group_ids', [])
+        allow = read_json(project_path(self.root, 'channels/fish_qq/config.json')).get('allowlist', {}).get('group_ids', [])
         if str(group_id) not in {str(value) for value in allow}:
             raise PermissionError('此群不在主人设置的白名单中')
         with database(self.path) as db:

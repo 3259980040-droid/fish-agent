@@ -5,6 +5,7 @@ protocol work delegates to bilibili-api-python; no commenting or messaging API
 is exposed by this module. Researcher opinions never rewrite owner directions.
 """
 from __future__ import annotations
+from locations import project_path
 import html
 import json
 import re
@@ -32,7 +33,7 @@ class ResearchControl:
     def __init__(self, root: Path):
         self.root = root
         self.path = role_dir(root, 'research') / 'autonomy.db'
-        self.config_path = root / 'harness/research-interests.json'
+        self.config_path = project_path(root, 'harness/research-interests.json')
         with database(self.path) as db:
             db.executescript('''CREATE TABLE IF NOT EXISTS jobs(
               id TEXT PRIMARY KEY,bvid TEXT UNIQUE,url TEXT,title TEXT,author TEXT,origin TEXT,

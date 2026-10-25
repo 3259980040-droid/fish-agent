@@ -5,6 +5,7 @@ The same resolution also feeds compression: the input ceiling, the 80% trigger a
 not three separately read settings and not fixed token limits.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import math
@@ -34,7 +35,7 @@ def _tokenizer(path):
 def model_metadata(root, gateway):
     """Resolve real provider metadata, cached by provider + model, never by alias alone."""
     root = Path(root)
-    path = root / 'data/social/model-metadata.json'
+    path = project_path(root, 'data/social/model-metadata.json')
     records = read_json(path, {})
     provider = str(gateway.base).rstrip('/')
     key = provider + '|' + str(gateway.model)
@@ -62,7 +63,7 @@ def current_metadata(root):
     capacity estimate for this one. This is a read-only lookup; it never fetches.
     """
     root = Path(root)
-    records = read_json(root / 'data/social/model-metadata.json', {}) or {}
+    records = read_json(project_path(root, 'data/social/model-metadata.json'), {}) or {}
     try:
         from core import HarnessConfig
         agent = HarnessConfig(root).agent('qq')
@@ -85,8 +86,8 @@ def settings(root):
     must survive that, so the override is applied on top instead of being read twice.
     """
     root = Path(root)
-    values = dict(read_json(root / 'harness/control.json'))
-    values.update(read_json(root / 'harness/context-settings.json', {}) or {})
+    values = dict(read_json(project_path(root, 'harness/control.json')))
+    values.update(read_json(project_path(root, 'harness/context-settings.json'), {}) or {})
     return values
 
 
@@ -171,13 +172,13 @@ class ContextBudget:
         else:
             if not model.startswith(('deepseek-flash', 'deepseek-v4')):
                 raise ValueError('当前模型尚未配备匹配的分词器，未将字符数当作token')
-            path = self.root / 'vendor/tokenizers/deepseek-v4/tokenizer.json'
+            path = project_path(self.root, 'vendor/tokenizers/deepseek-v4/tokenizer.json')
             if not path.is_file():
                 raise ValueError('DeepSeek V4官方分词器尚未就绪，请运行项目的依赖准备入口')
             self.tokenizer = _tokenizer(str(path))
         self.materials = {}
         self.turn_id = uuid.uuid4().hex
-        self.path = self.root / 'data/social/context-usage.db'
+        self.path = project_path(self.root, 'data/social/context-usage.db')
         with database(self.path) as db:
             db.execute('CREATE TABLE IF NOT EXISTS context_requests('
                        'id TEXT PRIMARY KEY,session TEXT,origin TEXT,created REAL,budget TEXT,usage TEXT,error TEXT,turn_id TEXT)')
@@ -318,7 +319,7 @@ def effective(root):
 
 
 def snapshot(root, session='', limit=20):
-    path = Path(root) / 'data/social/context-usage.db'
+    path = project_path(Path(root), 'data/social/context-usage.db')
     if not path.exists():
         return {'requests': [], 'latest': None, 'effective': effective(root)}
     import sqlite3

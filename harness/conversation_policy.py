@@ -1,15 +1,16 @@
 """Persistent community context shared by normal and test group routes."""
+from locations import project_path
 from storage import read_json, write_json
 
 
 def community(root, chat):
-    return read_json(root / 'harness/conversations.json', {}).get('groups', {}).get(str(chat).removeprefix('group:'), {})
+    return read_json(project_path(root, 'harness/conversations.json'), {}).get('groups', {}).get(str(chat).removeprefix('group:'), {})
 
 
 def set_community(root, chat, topic):
     if not isinstance(topic, str) or len(topic) > 1000:
         raise ValueError('群背景需为1000字以内的文字')
-    path = root / 'harness/conversations.json'
+    path = project_path(root, 'harness/conversations.json')
     cfg = read_json(path, {})
     cfg.setdefault('groups', {}).setdefault(str(chat).removeprefix('group:'), {})['topic'] = topic.strip()
     write_json(path, cfg)

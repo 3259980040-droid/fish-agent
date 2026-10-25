@@ -1,5 +1,6 @@
 """User-approved MCP, CLI and HTTP bridges. Runtime checks remain authoritative."""
 from __future__ import annotations
+from locations import project_path
 import asyncio
 import json
 import os
@@ -77,8 +78,8 @@ def health_details(item):
 class PluginRegistry:
     def __init__(self, root: Path, manager=None):
         self.root = root
-        self.path = root / 'harness/plugins/registry.json'
-        self.log = root / 'data/plugin-events.db'
+        self.path = project_path(root, 'harness/plugins/registry.json')
+        self.log = project_path(root, 'data/plugin-events.db')
         self.active = {}
         self.lock = threading.RLock()
         self.tulpa_call_lock = threading.Lock()
@@ -286,7 +287,7 @@ class PluginRegistry:
             # The UI and ToolHost use separate processes and SDK connections.
             # One cross-process queue also covers persona stop/start batches.
             from storage import settings_lock
-            with settings_lock(self.root/'data/integrations/tulpa/call-queue',timeout=120):
+            with settings_lock(project_path(self.root, 'data/integrations/tulpa/call-queue'),timeout=120):
                 return self._run_unlocked(item,method,tool,arguments,role,cancel)
         return self._run_unlocked(item,method,tool,arguments,role,cancel)
 
@@ -473,7 +474,7 @@ class PluginRegistry:
 
     def publish(self):
         for role in ('qq', 'research'):
-            write_json(self.root / f'harness/runtime/{role}.tools.json', {'tools': self.catalog(role)})
+            write_json(project_path(self.root, f'harness/runtime/{role}.tools.json'), {'tools': self.catalog(role)})
 
     def execute(self, alias, arguments, role, *, owner=False, cancel=None, chat_authorized=False):
         _, pid, tool = alias.split('__', 2)

@@ -1,4 +1,5 @@
 """Private/group expression context and asynchronous learning from human messages."""
+from locations import project_path
 import json
 import re
 import threading
@@ -14,7 +15,7 @@ _SIGNATURE=re.compile(r'白饭|鲸鲸|尾巴|鱼|🐟|水池|池子|游(?:过来
 def expression_examples(root,text):
     if re.search(r'认真|解释|原理|介绍|分析|写|编(?:一|个)|讲个|为什么|如何',text):return ''
     from storage import read_json
-    config=read_json(Path(root)/'harness/chat-expression-examples.json',{})
+    config=read_json(project_path(Path(root), 'harness/chat-expression-examples.json'),{})
     rows=[{k:row[k] for k in ('situation','guidance','dialogue')} for row in config.get('examples',[])
         if re.search(row['pattern'],text)][:1]
     if not rows:return ''
@@ -33,7 +34,7 @@ def repetition_context(text,replies):
 
 def private_context(root,text,*,conversation='',desktop=False,window=''):
     root=Path(root)
-    path=root/('data/qq/desktop-chat.db' if desktop else 'data/qq/qq.db')
+    path=project_path(root, 'data/qq/desktop-chat.db' if desktop else 'data/qq/qq.db')
     replies=[];human=[]
     if path.is_file():
         with database(path) as db:
@@ -65,13 +66,13 @@ def learn_private_async(root,conversation):
                 state=db.execute('SELECT * FROM learning_state WHERE chat=? AND window=?',(chat,'')).fetchone()
             if state and time.time()-state['updated']<300:return
             through=state['through'] if state else 0
-            with database(root/'data/qq/qq.db') as db:
+            with database(project_path(root, 'data/qq/qq.db')) as db:
                 rows=[dict(r) for r in db.execute('SELECT id,text,channel_message_id FROM messages '
                     "WHERE conversation_id=? AND direction='inbound' AND sender_id=? AND id>? ORDER BY id DESC LIMIT 12",
                     (conversation,owner,through))]
             if len(rows)<8:return
             rows.reverse()
-            with database(root/'data/qq/memory.db') as db:
+            with database(project_path(root, 'data/qq/memory.db')) as db:
                 excluded={r[0] for r in db.execute('SELECT source FROM exclusions')}
             messages=[{'message_id':str(r['channel_message_id'] or 'local:'+str(r['id'])),
                 'sender':{'id':owner},'text':r['text']} for r in rows

@@ -1,5 +1,6 @@
 """Native DSH Fish panel operations, backed by the existing Fish services."""
 from __future__ import annotations
+from locations import project_path, integration_settings, save_integration_option
 
 from pathlib import Path
 import json
@@ -51,7 +52,7 @@ def _life_reminder(root):
     else:
         source = '未开启（用户环境变量 FISH_MEMORY_REMINDER 未设置）'
     state = {'on': on, 'source': source, 'ledger_count': 0, 'last_state': '', 'last_receipt': ''}
-    path = root / 'data/qq/memory.db'
+    path = project_path(root, 'data/qq/memory.db')
     if not path.is_file():
         return state
     conn = _query_only(path)
@@ -72,7 +73,7 @@ def _life_memory(root):
     state = {'kinds': {kind: 0 for kind in LIFE_KINDS},
              'social': {kind: 0 for kind in LIFE_SOCIAL},
              'open_events': 0, 'next_due': 0.0, 'next_due_text': ''}
-    path = root / 'data/qq/memory.db'
+    path = project_path(root, 'data/qq/memory.db')
     if not path.is_file():
         return state
     now = time.time()
@@ -203,8 +204,11 @@ def _payload_tools(payload):
 
 class Workbench:
     def __init__(self, root):
-        self.root = Path(root)
-        self.path = self.root / 'data/social/workbench.db'
+        from locations import instance_context
+        self.context = instance_context(root)
+        self.instance_id = self.context.instance_id
+        self.root = self.context.root
+        self.path = project_path(self.root, 'data/social/workbench.db')
         self._chat_instance = None
         self._delegation_instance = None
         self._selected_conversation = ''
@@ -291,8 +295,8 @@ class Workbench:
         from governance import CAPABILITIES
         from storage import read_json
         return {**self.settings(), **mode, 'owner': policy.owner_id(), 'owner_capabilities': CAPABILITIES,
-                'keep_background_on_close': read_json(self.root / 'harness/integration.json', {}).get('keep_background_on_close', True),
-                'qzone_enabled': read_json(self.root / 'harness/integration.json', {}).get('qzone_enabled', False),
+                'keep_background_on_close': integration_settings(self.root).get('keep_background_on_close', True),
+                'qzone_enabled': integration_settings(self.root).get('qzone_enabled', False),
                 'send_policy': policy.config()['send_policy'],
                 'permissions': '、'.join(policy.owner_capabilities(desktop=True).values()),
                 'persona': {k: persona[k] for k in ('id', 'name', 'body')},
@@ -301,11 +305,11 @@ class Workbench:
     # ---------------------------------------------------------------- chat view
     def _role_db(self, name):
         """One database of the role this workbench answers for."""
-        return self.root / 'data' / self.chat().role / name
+        return project_path(self.root, 'data', self.chat().role, name)
 
     def _group_ids(self):
         from storage import read_json
-        config = read_json(self.root / 'channels/fish_qq/config.json', {})
+        config = read_json(project_path(self.root, 'channels/fish_qq/config.json'), {})
         return [str(value) for value in config.get('allowlist', {}).get('group_ids', [])]
 
     @staticmethod
@@ -397,7 +401,7 @@ class Workbench:
     def _persona_name(self, revision):
         if not revision:
             return ''
-        path = self.root / 'data/social/context.db'
+        path = project_path(self.root, 'data/social/context.db')
         if not path.is_file():
             return ''
         conn = _query_only(path)
@@ -458,7 +462,7 @@ class Workbench:
         """Request starts of one private conversation, each with the tools it carried."""
         role = self.chat().role
         events = []
-        usage = self.root / 'data' / role / 'model-usage.db'
+        usage = project_path(self.root, 'data', role, 'model-usage.db')
         if usage.is_file():
             conn = _query_only(usage)
             try:
@@ -472,7 +476,7 @@ class Workbench:
                         events.append((stamp, (str(row['tool'] or ''),)))
             finally:
                 conn.close()
-        inspector = self.root / 'data/social/request-inspector.db'
+        inspector = project_path(self.root, 'data/social/request-inspector.db')
         if inspector.is_file():
             conn = _query_only(inspector)
             try:
@@ -574,7 +578,7 @@ class Workbench:
             self.root, store + ':' + str(result['conversation_id']))
         from turn_trace import latest as latest_thought
         result['thought'] = latest_thought(self.root)
-        task_path = self.root/'data/delegation/tasks.db'
+        task_path = project_path(self.root, 'data/delegation/tasks.db')
         result['active_tasks'] = 0
         if task_path.is_file():
             with database(task_path) as db:
@@ -630,6 +634,18 @@ class Workbench:
         return {'ok': True, **removed}
 
     def dispatch(self, action, params):
+        from locations import InstanceCatalog
+        if not isinstance(params, dict):
+            raise ValueError('操作参数必须是对象')
+        if action == 'instances.list':
+            return InstanceCatalog(self.context.host_root).list()
+        selected = str(params.get('instance_id') or self.instance_id)
+        if selected != self.instance_id:
+            raise ValueError('工作台不属于所选Fish窗口：' + selected)
+        params = {key: value for key, value in params.items() if key != 'instance_id'}
+        return self._dispatch(action, params)
+
+    def _dispatch(self, action, params):
         from bot_control import BotControl
         from governance import Governance
         from memory_store import MemoryStore
@@ -695,7 +711,7 @@ class Workbench:
             # The pacing numbers are read straight from where they are written, so the
             # settings page shows the value that actually paces her.
             import json as _json
-            path = self.root / 'harness/context-settings.json'
+            path = project_path(self.root, 'harness/context-settings.json')
             pacing = _json.loads(path.read_text(encoding='utf-8') or '{}') if path.is_file() else {}
             keys = ('proactive_check_min_s', 'proactive_check_max_s', 'round_backoff_base',
                     'round_backoff_cap', 'round_backoff_start_after', 'round_bypass_messages',
@@ -709,7 +725,7 @@ class Workbench:
             # Autonomous pacing lives in context-settings.json: governance rewrites
             # control.json, and a number the owner typed must survive that.
             import json as _json
-            path = self.root / 'harness/context-settings.json'
+            path = project_path(self.root, 'harness/context-settings.json')
             current = {}
             if path.is_file():
                 current = _json.loads(path.read_text(encoding='utf-8') or '{}')
@@ -733,13 +749,12 @@ class Workbench:
                 from storage import write_json
                 value=params['image_identification_enabled']
                 if type(value) is not bool:raise ValueError('识图资料核对需为开关值')
-                write_json(self.root/'harness/vision-identification.json',{**image_settings(self.root),'enabled':value})
+                write_json(project_path(self.root, 'harness/vision-identification.json'),{**image_settings(self.root),'enabled':value})
             for option in ('keep_background_on_close', 'qzone_enabled'):
                 if option not in params: continue
                 from storage import read_json, write_json
                 if type(params[option]) is not bool: raise ValueError('开关必须为布尔值')
-                path = self.root / 'harness/integration.json'
-                write_json(path, {**read_json(path, {}), option: params[option]})
+                save_integration_option(self.root, option, params[option])
             if 'paused' in params:
                 if type(params['paused']) is not bool:
                     raise ValueError('暂停开关必须是布尔值')
@@ -778,7 +793,7 @@ class Workbench:
             from governance import control_token
             from group_policy import GroupPolicy
             from storage import read_json
-            config = read_json(self.root / 'channels/fish_qq/config.json', {})
+            config = read_json(project_path(self.root, 'channels/fish_qq/config.json'), {})
             headers = {'x-fish-token': control_token(self.root)}
             loop = {}
             try:
@@ -819,7 +834,7 @@ class Workbench:
             from group_policy import GroupPolicy
             from storage import read_json
             group_id = str(params.get('group_id', ''))
-            config = read_json(self.root / 'channels/fish_qq/config.json', {})
+            config = read_json(project_path(self.root, 'channels/fish_qq/config.json'), {})
             allowed = {str(value) for value in config.get('allowlist', {}).get('group_ids', [])}
             if group_id not in allowed:
                 raise ValueError('只能修改白名单群')
@@ -886,9 +901,9 @@ class Workbench:
                 with _c(_s.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
                     row = db.execute(sql, args).fetchone()
                     return row[0] if row else None
-            memory_db = self.root / 'data/qq/memory.db'
-            qq_db = self.root / 'data/qq/qq.db'
-            exp = self.root / 'data/social/experience.db'
+            memory_db = project_path(self.root, 'data/qq/memory.db')
+            qq_db = project_path(self.root, 'data/qq/qq.db')
+            exp = project_path(self.root, 'data/social/experience.db')
             layers = {
                 'retrieval': {
                     'active': _one(memory_db, "SELECT COUNT(*) FROM memories WHERE status='active'"),
@@ -1013,7 +1028,7 @@ class Workbench:
         if action == 'workspace.write':
             # One writer only: this delegates to the agent's own file tool, so the
             # workspace never gets a second, differently-guarded write path.
-            base = (self.root / 'workspace').resolve()
+            base = (project_path(self.root, 'workspace')).resolve()
             base.mkdir(parents=True, exist_ok=True)
             wanted = str(params.get('path', '') or '').strip()
             if not wanted:
@@ -1113,11 +1128,11 @@ class Workbench:
                 return round(total / 1024 / 1024, 1)
             root = self.root
             layers = {
-                'raw_messages_and_media': {'bytes_mb': _dir(root / 'data/qq'), 'what': '原始消息、附件、媒体' },
-                'memory': {'bytes_mb': _dir(root / 'data/qq/memory.db') if False else round((root / 'data/qq/memory.db').stat().st_size / 1024 / 1024, 1) if (root / 'data/qq/memory.db').exists() else 0.0, 'what': '长期记忆数据库' },
-                'social_models_and_logs': {'bytes_mb': _dir(root / 'data/social'), 'what': '用量、任务、摘要、目录' },
-                'embeddings': {'bytes_mb': _dir(root / 'data/shared'), 'what': '中文向量模型（不可删）' },
-                'research_cache': {'bytes_mb': _dir(root / 'data/research'), 'what': '调研缓存（可重建）' },
+                'raw_messages_and_media': {'bytes_mb': _dir(project_path(root, 'data/qq')), 'what': '原始消息、附件、媒体' },
+                'memory': {'bytes_mb': _dir(project_path(root, 'data/qq/memory.db')) if False else round((project_path(root, 'data/qq/memory.db')).stat().st_size / 1024 / 1024, 1) if (project_path(root, 'data/qq/memory.db')).exists() else 0.0, 'what': '长期记忆数据库' },
+                'social_models_and_logs': {'bytes_mb': _dir(project_path(root, 'data/social')), 'what': '用量、任务、摘要、目录' },
+                'embeddings': {'bytes_mb': _dir(project_path(root, 'data/shared')), 'what': '中文向量模型（不可删）' },
+                'research_cache': {'bytes_mb': _dir(project_path(root, 'data/research')), 'what': '调研缓存（可重建）' },
                 'backups': {'bytes_mb': _dir(root / 'backups'), 'what': '自动备份（保留 14 份）' },
                 'archived_for_owner': {'bytes_mb': _dir(root / '需要清理'), 'what': '已归档、等主人处理' },
             }
@@ -1126,7 +1141,7 @@ class Workbench:
             # Read-only view of Fish's own workspace. Writes stay with the tool path,
             # which already has its own permission story; a second writer would be a
             # second truth about who may touch the disk.
-            base = (self.root / 'workspace').resolve()
+            base = (project_path(self.root, 'workspace')).resolve()
             base.mkdir(parents=True, exist_ok=True)
             wanted = str(params.get('path', '') or '').strip()
             target = (base / wanted).resolve() if wanted else base
@@ -1235,7 +1250,7 @@ class Workbench:
             import sqlite3 as _sqlite3
             from contextlib import closing as _closing
             limit = min(200, max(5, int(params.get('limit', 40) or 40)))
-            path = self.root / 'data/social/experience.db'
+            path = project_path(self.root, 'data/social/experience.db')
             if not path.is_file():
                 return {'thoughts': []}
             with _closing(_sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
@@ -1254,7 +1269,7 @@ class Workbench:
             import sqlite3 as _sqlite3
             from contextlib import closing as _closing
             reference = str(params.get('reference', '') or '')
-            path = self.root / 'data/social/experience.db'
+            path = project_path(self.root, 'data/social/experience.db')
             if not reference or not path.is_file():
                 return {'reference': reference, 'reasoning': '', 'phase': '', 'error': ''}
             with _closing(_sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
@@ -1424,7 +1439,7 @@ class Workbench:
         except sqlite3.Error as exc:
             raise ValueError('故障记录库无法读取，请检查本地数据库；状态尚未读取成功') from exc
         configuration = []
-        path = self.root / 'channels/fish_qq/config.json'
+        path = project_path(self.root, 'channels/fish_qq/config.json')
         try:
             config = json.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
         except (OSError, json.JSONDecodeError) as exc:
@@ -1433,7 +1448,7 @@ class Workbench:
         if not owner:
             configuration.append({'source': 'owner_private', 'code': 'owner_missing',
                                   'reason': '尚未绑定主人 QQ 账号，主人私聊和系统故障通知不能发送'})
-        context = self.root / 'data/social/context.db'
+        context = project_path(self.root, 'data/social/context.db')
         if not context.is_file():
             configuration.append({'source': 'owner_private', 'code': 'persona_missing',
                                   'reason': 'QQ 人格库尚未建立，请先选择人格；状态读取不会创建默认人格'})
@@ -1461,7 +1476,7 @@ class Workbench:
     # ---------------------------------------------------------------- life page
     def _life_allowlist(self):
         from storage import read_json
-        config = read_json(self.root / 'channels/fish_qq/config.json', {})
+        config = read_json(project_path(self.root, 'channels/fish_qq/config.json'), {})
         return [str(value) for value in config.get('allowlist', {}).get('group_ids', [])]
 
     def _life_chat(self, params):
@@ -1479,7 +1494,7 @@ class Workbench:
     def _life_group(self, chat):
         from group_policy import DEFAULTS
         stored = {}
-        path = self.root / 'data/social/group-policy.db'
+        path = project_path(self.root, 'data/social/group-policy.db')
         if path.is_file() and chat:
             conn = _query_only(path)
             try:
@@ -1511,7 +1526,7 @@ class Workbench:
         limit = params.get('limit', 20)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError('事件条数需为 1 到 100 的整数')
-        path = self.root / 'data/qq/memory.db'
+        path = project_path(self.root, 'data/qq/memory.db')
         if not path.is_file():
             return []
         store = MemoryStore(self.root, 'qq')

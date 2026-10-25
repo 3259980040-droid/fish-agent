@@ -1,4 +1,5 @@
 """Shared group policy, passive observation and decision records."""
+from locations import project_path
 import json
 import sqlite3
 import time
@@ -16,7 +17,7 @@ class GroupWorkflow:
             self.policy = GroupTests(root).policy(trial)
         else:
             self.policy = GroupPolicy(root)
-        self.latest = {}; self.path = self.root / 'data/social/decisions.db'
+        self.latest = {}; self.path = project_path(self.root, 'data/social/decisions.db')
         with database(self.path) as db:
             db.execute('CREATE TABLE IF NOT EXISTS decisions(id INTEGER PRIMARY KEY,chat TEXT,cursor INTEGER,kind TEXT,stage TEXT,reason TEXT,created REAL)')
 
@@ -33,7 +34,7 @@ class GroupWorkflow:
 
     def allowed(self, loop, chat, revision=''):
         group = chat.split(':',1)[1]
-        allow = read_json(self.root / 'channels/fish_qq/config.json').get('allowlist',{}).get('group_ids',[])
+        allow = read_json(project_path(self.root, 'channels/fish_qq/config.json')).get('allowlist',{}).get('group_ids',[])
         if self.trial:
             from group_tests import GroupTests
             current = GroupTests(self.root).current(group)
@@ -58,7 +59,7 @@ class GroupWorkflow:
 
     async def observe(self, loop, payload):
         chat = str(payload.get('chat_id','')); group = chat.split(':',1)[-1]
-        allow = read_json(self.root / 'channels/fish_qq/config.json').get('allowlist',{}).get('group_ids',[])
+        allow = read_json(project_path(self.root, 'channels/fish_qq/config.json')).get('allowlist',{}).get('group_ids',[])
         sender = str((payload.get('sender') or {}).get('id',''))
         if group not in {str(v) for v in allow} or not sender or sender==str((loop.channel.bot or {}).get('id','')) or loop.governance.config()['paused']: return
         observed = self.policy.observe(payload)

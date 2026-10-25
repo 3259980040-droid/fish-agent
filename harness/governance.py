@@ -1,5 +1,6 @@
 """Local owner capabilities, outbound policy and atomic per-role call budgets."""
 from __future__ import annotations
+from locations import project_path
 
 import hashlib
 import hmac
@@ -156,8 +157,8 @@ class Governance:
         if agent_id not in ("qq", "research"):
             raise ValueError("未知角色")
         self.root, self.agent_id = Path(root), agent_id
-        self.path = self.root / "harness" / "control.json"
-        self.db = self.root / "data" / agent_id / "governance.db"
+        self.path = project_path(self.root, "harness", "control.json")
+        self.db = project_path(self.root, "data", agent_id, "governance.db")
         self.db.parent.mkdir(parents=True, exist_ok=True)
         with closing(self.connect()) as conn:
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='faults'").fetchone():
@@ -183,7 +184,7 @@ class Governance:
     def upgrade_fault_schema(cls, root, agent_id='qq'):
         """Explicit maintenance entry only; never called by the runtime constructor."""
         if agent_id not in ('qq','research'): raise ValueError('未知角色')
-        path = Path(root) / 'data' / agent_id / 'governance.db'
+        path = project_path(Path(root), 'data', agent_id, 'governance.db')
         with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=rw',uri=True,timeout=15)) as conn:
             return cls._upgrade_fault_schema(conn)
 
@@ -236,7 +237,7 @@ class Governance:
         return result
 
     def owner_id(self) -> str:
-        path = self.root / "channels" / "fish_qq" / "config.json"
+        path = project_path(self.root, "channels", "fish_qq", "config.json")
         if not path.exists():
             return ""
         return str(json.loads(path.read_text(encoding="utf-8")).get("allowlist", {}).get("owner_id", ""))
@@ -291,7 +292,7 @@ class Governance:
             owner_id = str(owner_id).strip()
             if not re.fullmatch(r"[1-9][0-9]{4,14}", owner_id):
                 raise ValueError("请填写真实的主人 QQ 号")
-            path = self.root / "channels" / "fish_qq" / "config.json"
+            path = project_path(self.root, "channels", "fish_qq", "config.json")
             channel = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
             channel.setdefault("allowlist", {}).update(owner_id=owner_id, private_mode="owner_only")
             write_json(path, channel)
@@ -434,8 +435,8 @@ class Governance:
         if agent_id not in ('qq','research'): raise ValueError('未知角色')
         value = cls.__new__(cls)
         value.root, value.agent_id = Path(root), agent_id
-        value.path = value.root / 'harness/control.json'
-        value.db = value.root / 'data' / agent_id / 'governance.db'
+        value.path = project_path(value.root, 'harness/control.json')
+        value.db = project_path(value.root, 'data', agent_id, 'governance.db')
         return value.fault_snapshot(limit)
 
     def fault_snapshot(self, limit=40):
@@ -493,7 +494,7 @@ class Governance:
             reason = "命中主人配置的阻断词"
         elif any(safe_search(pattern, normalize(text)) for pattern in cfg["block_patterns"]):
             reason = "命中主人配置的阻断规则"
-        rules = self.root / "harness" / "safety" / "rules.json"
+        rules = project_path(self.root, "harness", "safety", "rules.json")
         if not rules.exists():
             bundled = Path(__file__).parent / "safety"
             if not (bundled / "rules.json").exists():
@@ -540,7 +541,7 @@ class Governance:
 
 
 def control_token(root: Path) -> str:
-    path = Path(root) / "harness" / "runtime" / "control.token"
+    path = project_path(Path(root), "harness", "runtime", "control.token")
     env = os.environ.get("FISH_CONTROL_TOKEN", "")
     if env:
         return env

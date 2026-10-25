@@ -1,5 +1,6 @@
 """Current-user Windows DPAPI secrets. Config files contain references only."""
 from __future__ import annotations
+from locations import project_path
 
 import ctypes
 import os
@@ -10,7 +11,7 @@ from pathlib import Path
 
 class SecretStore:
     def __init__(self, root: Path):
-        self.directory = root / "harness" / "secrets"
+        self.directory = project_path(root, "harness", "secrets")
 
     def _path(self, name: str) -> Path:
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", name):

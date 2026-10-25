@@ -17,6 +17,7 @@ linked-request view P0 sends. The only file this module writes is the shadow
 ledger data/social/group-shadow.db.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import re
@@ -86,7 +87,7 @@ def _config(root, chat):
 
     GroupPolicy.config() inserts a row for the chat, which a shadow must not do.
     """
-    rows = _rows(Path(root) / 'data/social/group-policy.db',
+    rows = _rows(project_path(Path(root), 'data/social/group-policy.db'),
                  'SELECT config FROM groups WHERE chat=?', (chat,))
     stored = _object(rows[0]['config']) if rows else {}
     return {**DEFAULTS, **stored}
@@ -173,7 +174,7 @@ def _spend(root, chat, limit):
     if limit <= 0:
         return False
     day = time.strftime('%Y-%m-%d')
-    with database(Path(root) / LEDGER) as db:
+    with database(project_path(root, LEDGER)) as db:
         db.execute('CREATE TABLE IF NOT EXISTS shadow_usage(chat TEXT,day TEXT,calls INTEGER,PRIMARY KEY(chat,day))')
         db.execute('BEGIN IMMEDIATE')
         row = db.execute('SELECT calls FROM shadow_usage WHERE chat=? AND day=?', (chat, day)).fetchone()
@@ -212,7 +213,7 @@ def _admit(root, chat):
 def _channel(root):
     """The channel config as stored; the owner id and the bot name both live in it."""
     try:
-        data = json.loads((Path(root) / 'channels/fish_qq/config.json').read_text(encoding='utf-8'))
+        data = json.loads((project_path(Path(root), 'channels/fish_qq/config.json')).read_text(encoding='utf-8'))
     except (OSError, ValueError, TypeError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -235,7 +236,7 @@ def _test_window_revision(root, group):
     It is the old group test surface, not the persona the owner talks to Fish
     with, so it never decides what a shadow runs on.
     """
-    contexts = Path(root) / 'data/social/context.db'
+    contexts = project_path(Path(root), 'data/social/context.db')
     routes = _rows(contexts, 'SELECT space FROM group_test_routes WHERE group_id=?', (group,))
     if routes and routes[0]['space']:
         space = _rows(contexts, 'SELECT revision FROM spaces WHERE id=? AND role=? AND origin=?',
@@ -249,7 +250,7 @@ def _persona(root, revision):
     """The persona row itself; SocialContext would create its tables to answer."""
     if not revision:
         raise ValueError('主人私聊当前没有可读的人格版本，影子无法确定基准人格')
-    rows = _rows(Path(root) / 'data/social/context.db',
+    rows = _rows(project_path(Path(root), 'data/social/context.db'),
                  'SELECT id,role,name,body,global_rules,workspace_rules FROM personas WHERE id=?',
                  (str(revision),))
     if not rows:
@@ -269,9 +270,9 @@ def _bot_name(root):
 
 def _names(root, chat, window=''):
     """Sender names: the listening snapshot for that message first, then the roster."""
-    stores = [Path(root) / 'data/social/group-policy.db']
+    stores = [project_path(Path(root), 'data/social/group-policy.db')]
     if window:
-        stores.append(Path(root) / 'data/qq/spaces' / str(window) / 'group-policy.db')
+        stores.append(project_path(Path(root), 'data/qq/spaces', str(window), 'group-policy.db'))
     observed = {}
     for path in stores:
         for row in _rows(path, 'SELECT data FROM observations WHERE chat=? ORDER BY seq DESC LIMIT 200', (chat,)):
@@ -282,7 +283,7 @@ def _names(root, chat, window=''):
             if name:
                 observed.setdefault(str(data.get('message_id') or ''), name)
     roster = {}
-    for row in _rows(Path(root) / 'data/social/people.db',
+    for row in _rows(project_path(Path(root), 'data/social/people.db'),
                      'SELECT user_id,nickname,card FROM members WHERE group_id=?', (chat[6:],)):
         name = str(row['card'] or row['nickname'] or '').strip()
         if name:
@@ -437,7 +438,7 @@ def _dialogue(root, chat, names):
     resolved to name and account, because a sentence alone cannot say who its
     "你" was: the addressee is the only part of the record that can.
     """
-    rows = _rows(Path(root) / 'data/qq/qq.db',
+    rows = _rows(project_path(Path(root), 'data/qq/qq.db'),
                  'SELECT ' + _QQ_COLUMNS + ' FROM messages WHERE chat_id=? ORDER BY id DESC LIMIT ?',
                  (chat, HISTORY_ROWS))
     faces = {}
@@ -487,7 +488,7 @@ def _reference(root, chat, message_id, names):
     GroupHistory.reference() answers the same question but also consults the
     window's job table, which a read-only shadow has no window for.
     """
-    rows = _rows(Path(root) / 'data/qq/qq.db',
+    rows = _rows(project_path(Path(root), 'data/qq/qq.db'),
                  'SELECT ts,sender_id,text,segments,direction,channel_message_id,reply_to '
                  'FROM messages WHERE chat_id=? AND channel_message_id=? ORDER BY id DESC LIMIT 1',
                  (chat, str(message_id)))
@@ -604,7 +605,7 @@ def _bot_ids(root, chat, names):
     name = names.get('bot') or ''
     if name:
         ids.update(str(row['user_id']) for row in _rows(
-            Path(root) / 'data/social/people.db',
+            project_path(Path(root), 'data/social/people.db'),
             'SELECT user_id FROM members WHERE group_id=? AND (card=? OR nickname=?)',
             (chat[6:], name, name)) if row['user_id'])
     return ids
@@ -705,7 +706,7 @@ def _attribution(root, chat, payload, names, digest):
 
 def _watermark(root, chat):
     """(handled, cursor) of this group, read without GroupPolicy: no row, no line."""
-    rows = _rows(Path(root) / 'data/social/group-policy.db',
+    rows = _rows(project_path(Path(root), 'data/social/group-policy.db'),
                  'SELECT cursor,handled FROM groups WHERE chat=?', (chat,))
     if not rows:
         return 0, 0
@@ -737,7 +738,7 @@ def _arrived(root, chat, message_id):
     """The clock time the group received one message, '' when the store has no row."""
     if not message_id:
         return ''
-    rows = _rows(Path(root) / 'data/qq/qq.db',
+    rows = _rows(project_path(Path(root), 'data/qq/qq.db'),
                  'SELECT ts FROM messages WHERE chat_id=? AND channel_message_id=? '
                  'ORDER BY id DESC LIMIT 1', (chat, str(message_id)))
     return _clock(_stamp(rows[0]['ts'])) if rows else ''
@@ -785,7 +786,7 @@ def _current(root, chat, payload, names, quotes):
 
 def _experience(root, chat, payload):
     from experience import ExperienceTurn
-    path = Path(root) / 'data/qq/qq.db'
+    path = project_path(Path(root), 'data/qq/qq.db')
     rows = _rows(path, 'SELECT id,conversation_id FROM messages WHERE chat_id=? AND channel_message_id=? AND direction=?',
                  (chat, str(payload.get('message_id') or ''), 'inbound'))
     if not rows:
@@ -979,7 +980,7 @@ def record_shadow(root, chat, *, payload, candidate, source='engine-shadow') -> 
     payload = payload if isinstance(payload, dict) else {}
     if item.get('skipped'):
         return
-    with database(Path(root) / 'data/social/group-shadow.db') as db:
+    with database(project_path(Path(root), 'data/social/group-shadow.db')) as db:
         db.execute('CREATE TABLE IF NOT EXISTS shadows(id INTEGER PRIMARY KEY,chat TEXT,message_id TEXT,'
                    'created REAL,engine TEXT,text TEXT,tools TEXT,elapsed_ms INTEGER,error TEXT,source TEXT)')
         db.execute('INSERT INTO shadows(chat,message_id,created,engine,text,tools,elapsed_ms,error,source) '
@@ -994,7 +995,7 @@ def record_shadow(root, chat, *, payload, candidate, source='engine-shadow') -> 
 
 def shadows(root, chat, limit=20) -> list:
     """Read the ledger back for hand comparison, newest first."""
-    rows = _rows(Path(root) / 'data/social/group-shadow.db',
+    rows = _rows(project_path(Path(root), 'data/social/group-shadow.db'),
                  'SELECT id,chat,message_id,created,engine,text,tools,elapsed_ms,error,source '
                  'FROM shadows WHERE chat=? ORDER BY id DESC LIMIT ?',
                  (_chat(chat), max(1, min(200, int(limit)))))
@@ -1112,7 +1113,7 @@ def _relay_open(root, chat, now):
     它给的，冷却这一条不再重复问。没有记录、读不到、记录超出窗口，一律 False：
     多挡一次只是少说一句，凭猜放行才是真的坏了冷却。
     """
-    rows = _rows(Path(root) / 'data/social/group-policy.db',
+    rows = _rows(project_path(Path(root), 'data/social/group-policy.db'),
                  'SELECT ts FROM relay_bypass WHERE chat=? AND ts>?', (chat, now - RELAY_SPAN_S))
     return bool(rows)
 
@@ -1142,7 +1143,7 @@ def _last_sent(root, chat):
     unreadable reservations file proves no recent send, and the judge budget and
     the sender's own reservation still bound what follows.
     """
-    rows = _rows(Path(root) / 'data/social/group-policy.db',
+    rows = _rows(project_path(Path(root), 'data/social/group-policy.db'),
                  "SELECT MAX(finished) AS at FROM reservations WHERE chat=? AND state='sent'",
                  (chat,))
     try:
@@ -1160,7 +1161,7 @@ def _judge_spend(root, chat, limit):
     if limit <= 0:
         return False
     day = time.strftime('%Y-%m-%d')
-    with database(Path(root) / LEDGER) as db:
+    with database(project_path(root, LEDGER)) as db:
         db.execute('CREATE TABLE IF NOT EXISTS fish_judge_usage('
                    'chat TEXT,day TEXT,calls INTEGER,PRIMARY KEY(chat,day))')
         db.execute('BEGIN IMMEDIATE')
@@ -1241,7 +1242,7 @@ def _judge_context(root, chat, payload):
     if not text.strip():
         text = str(payload.get('text') or '')
     own = str(payload.get('message_id') or '')
-    store = Path(root) / 'data/qq/qq.db'
+    store = project_path(Path(root), 'data/qq/qq.db')
     columns = 'id,ts,sender_id,text,segments,direction,status,channel_message_id'
     own_row = _rows(store, 'SELECT ' + columns + ' FROM messages WHERE chat_id=? AND '
                            'channel_message_id=? ORDER BY id DESC LIMIT 1', (chat, own)) if own else []

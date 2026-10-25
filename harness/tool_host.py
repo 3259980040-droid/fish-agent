@@ -1,5 +1,6 @@
 """Authenticated loopback bridge between DSH tools and Fish's private stores."""
 from __future__ import annotations
+from locations import project_path
 import hashlib
 import hmac
 import json
@@ -48,11 +49,12 @@ def _state_scope(identity):
 
 
 def port(root):
-    root = Path(root)
-    local = _ports.get(str(root.resolve()))
+    from locations import host_root
+    root = host_root(root)
+    local = _ports.get(str(root))
     if local:
         return int(local)
-    return int(read_json(root / 'harness/agents.json').get('runtime', {}).get('tool_host_port', 3103))
+    return int(read_json(project_path(root, 'harness/agents.json')).get('runtime', {}).get('tool_host_port', 3103))
 
 
 def host_here(root):
@@ -61,7 +63,8 @@ def host_here(root):
     A port held by another data directory must not silently turn the verified
     main chat into a no-tool reply; every caller reaches us through port().
     """
-    root = Path(root).resolve()
+    from locations import host_root
+    root = host_root(root)
     with _host_lock:
         if str(root) in _hosts:
             return
@@ -118,7 +121,7 @@ def sender_surface(root, session, role='qq'):
     instead of becoming thinking nobody sends.
     """
     try:
-        with database(Path(root) / 'data/tool-host.db') as db:
+        with database(project_path(Path(root), 'data/tool-host.db')) as db:
             row = db.execute('SELECT * FROM identities WHERE role=? AND session=?',
                              (role, str(session))).fetchone()
     except sqlite3.Error:
@@ -129,7 +132,7 @@ def sender_surface(root, session, role='qq'):
 def stage_says(root, session, bubbles):
     """Append this turn's bubbles to its queue; returns how many the turn holds now."""
     now = time.time()
-    with database(Path(root) / 'data/tool-host.db') as db:
+    with database(project_path(Path(root), 'data/tool-host.db')) as db:
         _says(db)
         _fresh(db, session)
         held = int(db.execute('SELECT COUNT(*) FROM chat_says WHERE session=?', (session,)).fetchone()[0])
@@ -145,14 +148,14 @@ def stage_says(root, session, bubbles):
 
 def note_reason(root, session, reason):
     """Her own one-line answer to 'why are you speaking now?'; auditing only."""
-    with database(Path(root) / 'data/tool-host.db') as db:
+    with database(project_path(Path(root), 'data/tool-host.db')) as db:
         _says(db)
         db.execute('UPDATE chat_say_turns SET reason=? WHERE session=?', (str(reason)[:60], session))
 
 
 def peek_says(root, session):
     """What this turn has decided to say so far, oldest first; nothing is consumed."""
-    with database(Path(root) / 'data/tool-host.db') as db:
+    with database(project_path(Path(root), 'data/tool-host.db')) as db:
         _says(db)
         _fresh(db, session)
         rows = db.execute('SELECT body FROM chat_says WHERE session=? ORDER BY id', (session,)).fetchall()
@@ -161,7 +164,7 @@ def peek_says(root, session):
 
 def take_says(root, session):
     """Hand the turn's queue to its one sender, once: a resend never replays it."""
-    with database(Path(root) / 'data/tool-host.db') as db:
+    with database(project_path(Path(root), 'data/tool-host.db')) as db:
         _says(db)
         db.execute('BEGIN IMMEDIATE')
         _fresh(db, session)
@@ -172,7 +175,7 @@ def take_says(root, session):
 
 def clear_says(root, session):
     """Start a turn with an empty queue: only this turn's decisions may be sent."""
-    with database(Path(root) / 'data/tool-host.db') as db:
+    with database(project_path(Path(root), 'data/tool-host.db')) as db:
         _says(db)
         db.execute('DELETE FROM chat_says WHERE session=?', (session,))
         db.execute('DELETE FROM chat_say_turns WHERE session=?', (session,))
@@ -185,7 +188,7 @@ def take_said(root, session):
     used to be able to veto a line she had already decided to send. Taken once per
     turn, like the queue: a second read must not turn an unsaid turn into a said one.
     """
-    with database(Path(root) / 'data/tool-host.db') as db:
+    with database(project_path(Path(root), 'data/tool-host.db')) as db:
         _says(db)
         db.execute('BEGIN IMMEDIATE')
         row = db.execute('SELECT said,reason FROM chat_say_turns WHERE session=?', (session,)).fetchone()
@@ -197,13 +200,13 @@ def take_said(root, session):
 
 def note_preview(root, session, asset):
     """One sticker she actually looked at this turn; the executor's preview gate reads it."""
-    with database(Path(root) / 'data/tool-host.db') as db:
+    with database(project_path(Path(root), 'data/tool-host.db')) as db:
         _says(db)
         db.execute('INSERT OR REPLACE INTO chat_previews VALUES(?,?,?)', (session, str(asset), time.time()))
 
 
 def previewed_assets(root, session):
-    with database(Path(root) / 'data/tool-host.db') as db:
+    with database(project_path(Path(root), 'data/tool-host.db')) as db:
         _says(db)
         db.execute('DELETE FROM chat_previews WHERE session=? AND created<?', (session, time.time() - SAY_TTL_S))
         return {str(row['asset']) for row in
@@ -213,8 +216,8 @@ def previewed_assets(root, session):
 def _fish_settings(root):
     """Context/tool settings live in a file the governance schema never rewrites."""
     from storage import read_json
-    merged = dict(read_json(Path(root) / 'harness/control.json'))
-    merged.update(read_json(Path(root) / 'harness/context-settings.json', {}) or {})
+    merged = dict(read_json(project_path(Path(root), 'harness/control.json')))
+    merged.update(read_json(project_path(Path(root), 'harness/context-settings.json'), {}) or {})
     return merged
 
 
@@ -437,11 +440,15 @@ def builtins(role):
 
 class ToolHost:
     def __init__(self, root):
-        self.root = Path(root)
-        self.registry = PluginRegistry(self.root)
+        from locations import instance_context
+        self.context = instance_context(root)
+        self.instance_id = self.context.instance_id
+        self.host_root = self.context.host_root
+        self.root = self.context.root
+        self.registry = PluginRegistry(self.host_root)
         from agent_tools import AgentTools
         self.computer = AgentTools(self.root)
-        self.path = self.root / 'data/tool-host.db'
+        self.path = project_path(self.root, 'data/tool-host.db')
         self.cancelled = {}
         self.lock = threading.RLock()
         self.stop = threading.Event()
@@ -460,7 +467,7 @@ class ToolHost:
                        'description TEXT,created REAL,PRIMARY KEY(chat,message_id,image_index))')
         self.registry.publish()
         from research_autonomy import ResearchWorker
-        self.research = ResearchWorker(self.root)
+        self.research = ResearchWorker(self.host_root)
 
     def identity(self, role, session):
         with database(self.path) as db:
@@ -471,7 +478,8 @@ class ToolHost:
         if row['owner'] and not row['desktop'] and not Governance(self.root).is_owner(row['sender']):
             raise PermissionError('主人账号已变更，请重新核验会话身份')
         from owner_mode import OwnerMode
-        return {**dict(row), 'owner_mode': selected['mode'] if selected else OwnerMode(self.root).get()['mode']}
+        return {**dict(row), 'instance_id': self.instance_id, 'workspace': str(self.context.workspace),
+                'owner_mode': selected['mode'] if selected else OwnerMode(self.root).get()['mode']}
 
     def task_service(self):
         with self.lock:
@@ -492,7 +500,7 @@ class ToolHost:
             place = occurrence['target']
         conversation = parent['source_conversation'] if parent else session[len('desktop:'):] if identity.get('desktop') and session.startswith('desktop:') else QQStore(self.root).get_or_create_conversation(place,'qq')['id']
         reference = parent['source_message'] if parent else ''
-        path = self.root/'data/social/experience.db'
+        path = project_path(self.root, 'data/social/experience.db')
         if path.exists():
             with database(path) as db:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='experience_turns'").fetchone():
@@ -556,6 +564,7 @@ class ToolHost:
             identities = [dict(r) for r in db.execute('SELECT * FROM identities WHERE role=? ORDER BY updated DESC LIMIT 3000', (role,))]
             modes = {r['session']: r['mode'] for r in db.execute('SELECT * FROM identity_modes WHERE role=?', (role,))}
             for identity in identities:
+                identity.update(instance_id=self.instance_id, workspace=str(self.context.workspace))
                 from owner_computer import authorized as owner_computer_authorized
                 from owner_mode import OwnerMode
                 identity['owner_mode'] = modes.get(identity['session'], OwnerMode(self.root).get()['mode'])
@@ -609,7 +618,7 @@ class ToolHost:
                     deployment = SocialContext(self.root).deployment(identity['scope'].split(':')[2])
                     if deployment.get('enabled'):
                         identity['persona_revision'] = deployment['revision']
-            write_json(self.root / f'harness/runtime/{role}.identities.json', {r['session']: r for r in identities})
+            write_json(project_path(self.root, f'harness/runtime/{role}.identities.json'), {r['session']: r for r in identities})
         if role == 'qq' and str(session).startswith('group-proactive:') and GROUP_SCOPE.fullmatch(str(scope) or ''):
             # 主动开口的草稿窗口和群回复窗口共用同一个群面，所以它也拿到了那一套
             # 本群范围的工具（发话、本群记忆/社交笔记/表情、本群历史、联网）。这是
@@ -628,7 +637,7 @@ class ToolHost:
     def work_context(self,role,session,scope):
         import sqlite3
         from contextlib import closing
-        with closing(sqlite3.connect(self.root/'data'/role/'desktop-chat.db')) as db:
+        with closing(sqlite3.connect(project_path(self.root, 'data', role, 'desktop-chat.db'))) as db:
             db.row_factory=sqlite3.Row
             row=db.execute("SELECT * FROM conversations WHERE id=? AND mode='work' AND session_id=?",(scope[5:],session)).fetchone()
         if not row:raise PermissionError('本地工作窗口或模型会话不匹配')
@@ -1321,7 +1330,7 @@ class ToolHost:
         their pictures one by one until count is reached. A named message with two
         pictures answers two, and "the newest one" answers the last picture in the chat.
         """
-        path = self.root / 'data/qq/qq.db'
+        path = project_path(self.root, 'data/qq/qq.db')
         if not path.is_file():
             raise PermissionError('这个会话里还没有收到过图片，我拿不到')
         sql = "SELECT id,channel_message_id,segments FROM messages WHERE chat_id=? AND direction='inbound'"
@@ -1394,7 +1403,7 @@ class ToolHost:
             if local and Path(local).is_file():
                 path = Path(local)
             else:
-                directory = self.root / 'data/qq/media/chat-views' / str(row['id']) / str(index)
+                directory = project_path(self.root, 'data/qq/media/chat-views', str(row['id']), str(index))
                 path = MediaService(self.root, 'qq').attachment_path(segment, directory)
             scope = 'owner' if chat.startswith('private:') else 'chat:' + chat
             resource = ImageViews(self.root).register(path, scope=scope, reference='qq:' + str(row['id']))
@@ -1486,7 +1495,7 @@ class ToolHost:
         A dive must never move the group's water level, so neither value is
         written here; the row is opened read-only the same way the ledger is.
         """
-        path = self.root / 'data/social/group-policy.db'
+        path = project_path(self.root, 'data/social/group-policy.db')
         if not path.is_file():
             return 0, False
         try:
@@ -1610,7 +1619,7 @@ class ToolHost:
 
     def ledger(self, sql, params=(), *, one=False):
         """Read the existing owner-control store read-only; nothing is created here."""
-        path = self.root / 'data/social/owner-control.db'
+        path = project_path(self.root, 'data/social/owner-control.db')
         if not path.is_file():
             return None
         try:
@@ -1637,7 +1646,7 @@ class ToolHost:
     def generating(self, chat):
         """True while GroupPolicy holds a live reservation for this chat."""
         from group_policy import RESERVATION_TTL_S
-        path = self.root / 'data/social/group-policy.db'
+        path = project_path(self.root, 'data/social/group-policy.db')
         if not path.is_file():
             return False
         try:
@@ -1676,6 +1685,10 @@ class ToolHost:
         return view
 
     def dispatch(self, route, body, role, admin):
+        # The HTTP envelope identifies the originating instance, never the active UI.
+        requested = str(body.get('instance_id') or self.instance_id)
+        if requested != self.instance_id:
+            raise ValueError('工具请求不属于此Fish窗口：' + requested)
         if route=='/tasks/stop-processes':
             if not admin: raise PermissionError('停止本机任务进程需主人控制端身份')
             return self.computer.cancel_session(str(body['session']))
@@ -1724,7 +1737,7 @@ class ToolHost:
         if route == '/health':
             import os as _os
             from memory_reminder import ON_VALUES as _ON, SWITCH as _SWITCH
-            return {'ok': True, 'root': hashlib.sha256(str(self.root.resolve()).encode()).hexdigest(), 'social_context_version': 1, 'social_roster_version': 1, 'chat_actions_version': 1, 'workbench_version': 2, 'reply_pipeline_version': 2, 'memory_evidence_version': 3, 'vision_identification_version': 1, 'conversation_style_version': 2, 'group_identity_version': 1, 'persona_defaults_version': 1,
+            return {'ok': True, 'root': hashlib.sha256(str(self.host_root).encode()).hexdigest(), 'social_context_version': 1, 'social_roster_version': 1, 'chat_actions_version': 1, 'workbench_version': 2, 'reply_pipeline_version': 2, 'memory_evidence_version': 3, 'vision_identification_version': 1, 'conversation_style_version': 2, 'group_identity_version': 1, 'persona_defaults_version': 1,
                     # What this serving process actually does, not what the registry says.
                     'memory_reminder': 'on' if _os.environ.get(_SWITCH, '').strip().lower() in _ON else 'off'}
         if route == '/system/p0-status':
@@ -1868,7 +1881,7 @@ class ToolHost:
 
     def worker(self):
         while not self.stop.wait(2):
-            if not (self.root / 'harness/agents.json').is_file():
+            if not (project_path(self.root, 'harness/agents.json')).is_file():
                 return
             for role in ('qq', 'research'):
                 try:
@@ -1949,7 +1962,10 @@ class ToolHost:
 
 
 def request(root, route, body=None, *, role='research', admin=True, timeout=8):
-    response = requests.post(f'http://127.0.0.1:{port(root)}' + route, json=body or {},
+    from locations import instance_context
+    context = instance_context(root)
+    envelope = {**(body or {}), 'instance_id': context.instance_id}
+    response = requests.post(f'http://127.0.0.1:{port(root)}' + route, json=envelope,
         headers={'x-fish-token': control_token(root) if admin else role_token(root, role), 'x-fish-role': role}, timeout=timeout, proxies={'http':None,'https':None,'all':None})
     data = response.json()
     if not response.ok or not data.get('ok'):
@@ -1958,7 +1974,8 @@ def request(root, route, body=None, *, role='research', admin=True, timeout=8):
 
 
 def ensure_host(root, *, workers=True):
-    root = Path(root).resolve()
+    from locations import host_root
+    root = host_root(root)
     with _host_lock:
         if str(root) in _hosts:
             return
@@ -2001,8 +2018,9 @@ def set_group_context(root, session, text):
 
 
 def shutdown_host(root):
+    from locations import host_root
     with _host_lock:
-        host = _hosts.pop(str(Path(root).resolve()), None)
+        host = _hosts.pop(str(host_root(root)), None)
     if host:
         host.stop.set(); host.research.stop.set(); host.research.cancel_event.set()
         for plugin in host.registry.entries(): host.registry.cancel(plugin['id'], notify=False)

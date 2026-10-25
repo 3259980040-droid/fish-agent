@@ -5,6 +5,7 @@ this turn's measured pressure together with the compression numbers resolved fro
 same policy, and this module selects the complete older range. It only queues that
 range; the summary itself runs outside the main thinking lock.
 """
+from locations import project_path
 import time
 import uuid
 from pathlib import Path
@@ -21,7 +22,7 @@ class ExperienceTurn:
         self.positions = {}
         self.covered = set()
         self.surface = []
-        self.ledger = self.root / 'data/social/experience.db'
+        self.ledger = project_path(self.root, 'data/social/experience.db')
         with database(self.ledger) as db:
             db.execute('CREATE TABLE IF NOT EXISTS considered(reference TEXT PRIMARY KEY,turn TEXT NOT NULL,at REAL NOT NULL,outcome TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS experience_turns(id TEXT PRIMARY KEY,session TEXT NOT NULL,reference TEXT NOT NULL,arrival TEXT NOT NULL,started REAL,first_output REAL,sending REAL,receipt REAL,outcome TEXT NOT NULL,error TEXT NOT NULL)')
@@ -114,7 +115,7 @@ class ExperienceTurn:
 
 def was_considered(root, reference, *, session=None):
     """Coverage is shared; consuming a queued wake is local to its actual session."""
-    path = Path(root) / 'data/social/experience.db'
+    path = project_path(Path(root), 'data/social/experience.db')
     if not path.exists():
         return False
     import sqlite3
@@ -135,7 +136,7 @@ def was_considered(root, reference, *, session=None):
 
 def delivery(root, reference, *, sending=False, outcome=None,error=''):
     """Stamp real transport actions, including unknown receipts; never resend here."""
-    path = Path(root) / 'data/social/experience.db'
+    path = project_path(Path(root), 'data/social/experience.db')
     if not path.exists():
         return
     with database(path) as db:
@@ -148,7 +149,7 @@ def delivery(root, reference, *, sending=False, outcome=None,error=''):
 
 def reference_for_session(root,session):
     import sqlite3
-    path=Path(root)/'data/social/experience.db'
+    path=project_path(Path(root), 'data/social/experience.db')
     if not session or not path.is_file():return ''
     with sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True) as db:
         if not db.execute("SELECT 1 FROM sqlite_master WHERE name='experience_turns'").fetchone():return ''

@@ -1,4 +1,5 @@
 """QQ identity and file delivery adapter around the single B-batch task service."""
+from locations import project_path
 import json
 import threading
 import time
@@ -11,7 +12,7 @@ from storage import database
 class OwnerDelegation:
     def __init__(self, root, tasks):
         self.root, self.tasks = Path(root), tasks
-        self.path = self.root / 'data/social/owner-control.db'
+        self.path = project_path(self.root, 'data/social/owner-control.db')
         self.lock = threading.Lock()
         with database(self.path) as db:
             db.execute('''CREATE TABLE IF NOT EXISTS task_file_deliveries(

@@ -1,4 +1,5 @@
 """Explicit owner-private execution route for the original Tulpa MCP."""
+from locations import project_path
 from pathlib import Path
 import os
 import subprocess
@@ -10,7 +11,7 @@ PREFIX = 'fishp__tulpa_owner__'
 
 
 def configuration(root):
-    return read_json(Path(root) / 'data/integrations/tulpa/owner-route.json', {})
+    return read_json(project_path(Path(root), 'data/integrations/tulpa/owner-route.json'), {})
 
 
 def ensure_service(root):
@@ -23,15 +24,15 @@ def ensure_service(root):
         try:
             reply = requests.get('http://127.0.0.1:3120/health', timeout=1,
                                  proxies={'http': None, 'https': None, 'all': None}).json()
-            return reply.get('source') == str(root / 'vendor/integrations/tulpa/source')
+            return reply.get('source') == str(project_path(root, 'vendor/integrations/tulpa/source'))
         except (requests.RequestException, ValueError):
             return False
     if healthy():
         return
     parent = int(os.environ.get('FISH_LOOP_PARENT_PID', str(os.getpid())))
-    with (root / 'data/integrations/tulpa/service.log').open('a', encoding='utf-8') as output:
-        subprocess.Popen([str(root / 'vendor/integrations/tulpa/venv/Scripts/pythonw.exe'),
-                          str(root / 'harness/tulpa_service.py'), '--parent', str(parent)],
+    with (project_path(root, 'data/integrations/tulpa/service.log')).open('a', encoding='utf-8') as output:
+        subprocess.Popen([str(project_path(root, 'vendor/integrations/tulpa/venv/Scripts/pythonw.exe')),
+                          str(project_path(root, 'harness/tulpa_service.py')), '--parent', str(parent)],
                          cwd=str(root), stdout=output, stderr=subprocess.STDOUT,
                          creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
     for _ in range(60):

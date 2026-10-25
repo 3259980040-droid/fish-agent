@@ -12,6 +12,7 @@ all become the same kind of wake, so they merge into one thought instead of star
 a second one.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import threading
@@ -196,7 +197,7 @@ class ExecutionModule:
     def _turn_trace(self, reference):
         import sqlite3
         from contextlib import closing
-        path = self.root / 'data/social/experience.db'
+        path = project_path(self.root, 'data/social/experience.db')
         if not reference or not path.is_file():
             return {'reference': reference, 'phase': '', 'reasoning': '', 'events': []}
         with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
@@ -229,7 +230,7 @@ class ExecutionModule:
     def _delivery_times(self, reference):
         import sqlite3
         from contextlib import closing
-        path = self.root / 'data/social/experience.db'
+        path = project_path(self.root, 'data/social/experience.db')
         if not reference or not path.is_file():
             return None
         with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:

@@ -1,5 +1,6 @@
 """Role-specific DeepSeek calls and an atomic request/usage ledger."""
 from __future__ import annotations
+from locations import project_path
 import json
 import asyncio
 import time
@@ -59,7 +60,7 @@ def response_error(status_code, response_body):
 
 
 def chat_options(root):
-    settings = read_json(root / 'harness/control.json')
+    settings = read_json(project_path(root, 'harness/control.json'))
     effort = settings.get('chat_reasoning_effort', 'high')
     maximum = int(settings.get('desktop_chat_max_tokens', 8192))
     timeout = float(settings.get('desktop_chat_timeout_seconds', 180))
@@ -82,7 +83,7 @@ class ModelLedger:
 
     def reserve(self, origin):
         from governance import daily_limits_enabled
-        settings = read_json(self.root / 'harness/control.json')
+        settings = read_json(project_path(self.root, 'harness/control.json'))
         maximum = int(settings.get('max_model_requests_daily', 300))
         tokens = int(settings.get('max_model_tokens_daily', 2000000))
         day = date.today().isoformat()
@@ -109,7 +110,7 @@ class ModelLedger:
         with database(self.path) as db:
             row = db.execute('SELECT COUNT(*) requests,COALESCE(SUM(input_tokens),0) input_tokens,COALESCE(SUM(output_tokens),0) output_tokens FROM requests WHERE day=?', (date.today().isoformat(),)).fetchone()
             pending = db.execute("SELECT COUNT(*) FROM requests WHERE day=? AND status IN ('reserved','unknown')", (date.today().isoformat(),)).fetchone()[0]
-        enabled = daily_limits_enabled(read_json(self.root / 'harness/control.json'), self.role)
+        enabled = daily_limits_enabled(read_json(project_path(self.root, 'harness/control.json')), self.role)
         note = ('token 按服务商回传统计；未回传及并行在途请求可能超出 token 阈值，请求次数为硬上限。' if enabled
                 else '本角色每日用量限制已关闭；调用次数和服务商回传 token 继续累计统计。')
         return {**dict(row), 'unreported': pending, 'daily_limits_enabled': enabled, 'note': note}

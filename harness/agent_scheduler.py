@@ -1,11 +1,12 @@
 """One Fish wake queue for reliable plans and discretionary social opportunities."""
+from locations import project_path
 import time
 
 from storage import database
 
 
 def autonomous_enabled(root):
-    path = root / 'data/social/owner-control.db'
+    path = project_path(root, 'data/social/owner-control.db')
     if not path.is_file():
         return False
     import sqlite3

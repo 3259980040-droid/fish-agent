@@ -5,6 +5,7 @@ FTS5 index makes topic lookup a real lexical query; the original message rows
 are read from the owning store and are never copied into this module.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import sqlite3
@@ -18,7 +19,7 @@ CATALOG_FTS = ("CREATE VIRTUAL TABLE IF NOT EXISTS catalog_fts "
 
 
 def _ledger(root):
-    return Path(root) / 'data/social/experience.db'
+    return project_path(Path(root), 'data/social/experience.db')
 
 
 def _open(path):
@@ -149,7 +150,7 @@ def _shape(db):
 
 def _source_path(root, source):
     name = 'desktop-chat.db' if str(source) == 'desktop-chat.db' else 'qq.db'
-    return Path(root) / 'data/qq' / name
+    return project_path(Path(root), 'data/qq', name)
 
 
 def read_message(root, source, message_id):

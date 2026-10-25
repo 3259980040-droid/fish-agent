@@ -6,6 +6,7 @@ process jobs whose completion is separate from their initial acknowledgement.
 This is a Python implementation at Fish's existing ToolHost seam, not a second
 Agent loop. DSH interfaces/source references are recorded in docs/agents/tools.md.
 """
+from locations import project_path
 import json
 import os
 import shutil
@@ -58,15 +59,15 @@ class AgentTools:
         self.lock = threading.RLock()
         from interaction_tools import InteractionTools
         self.interaction = InteractionTools(root,self.workspace)
-        self.path = self.root / 'data/social/computer-jobs.db'
+        self.path = project_path(self.root, 'data/social/computer-jobs.db')
         with database(self.path) as db:
             db.execute('CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,session TEXT NOT NULL,pid INTEGER,command TEXT,workdir TEXT,output TEXT,created REAL,ended REAL,status TEXT,exit_code INTEGER)')
 
     def workspace(self, session):
         import hashlib
         task = hashlib.sha256(session.encode()).hexdigest()[:16]
-        base = self.root / 'workspace/tasks' / task
-        task_db = self.root / 'data/delegation/tasks.db'
+        base = project_path(self.root, 'workspace/tasks', task)
+        task_db = project_path(self.root, 'data/delegation/tasks.db')
         if task_db.is_file():
             import sqlite3
             with sqlite3.connect(task_db.resolve().as_uri()+'?mode=ro',uri=True) as db:
@@ -232,13 +233,13 @@ class AgentTools:
     def qq(self, args, identity):
         import asyncio
         import sys
-        channels = str(self.root / 'channels')
+        channels = str(project_path(self.root, 'channels'))
         if channels not in sys.path:
             sys.path.insert(0, channels)
         from fish_qq.onebot import OneBotClient, OneBotTimeout, OneBotUnavailable, OneBotError
         from secrets_store import SecretStore
         from storage import read_json
-        config = read_json(self.root / 'channels/fish_qq/config.json')
+        config = read_json(project_path(self.root, 'channels/fish_qq/config.json'))
         action = str(args['action'])
         if not action or not all(c.isalnum() or c == '_' for c in action):
             raise ValueError('QQ动作名不是合法的接口动作')

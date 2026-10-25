@@ -11,6 +11,7 @@ resource's own state. Nothing here starts a thought: the batch only supplies the
 references a turn was already going to use.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import sqlite3
@@ -31,7 +32,7 @@ class BatchLog:
     def __init__(self, root):
         self.root = Path(root)
         self.path = schema.ensure(self.root)
-        self.db_path = self.root / 'data/qq/attachment.db'
+        self.db_path = project_path(self.root, 'data/qq/attachment.db')
 
     # ------------------------------------------------------------- registration
     def register(self, *, place, reference, resource='', received=None):
@@ -161,7 +162,7 @@ def load_segments(root, reference):
     if not ident.isdigit():
         return []
     name = 'desktop-chat.db' if source == 'desktop' else 'qq.db'
-    path = Path(root) / 'data/qq' / name
+    path = project_path(Path(root), 'data/qq', name)
     if not path.is_file():
         return []
     try:
