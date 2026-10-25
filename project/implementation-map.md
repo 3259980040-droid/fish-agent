@@ -148,16 +148,16 @@
 
 | 职责/真实位置 | 本轮核对事实 | 09 接法与退出对象 |
 |---|---|---|
-| `harness/workbench.py:642` | delegations.list/submit/get/cancel/open/download 已有 | 执行任务详情接真实结果与成果；退出页面独立推断的成功状态 |
-| `harness/workbench.py:673`、`:721`、`:764` | settings.get/save、channels.status/update 已有；现有设置保存只覆盖其明确字段 | 读取真实配置并按项保存；模型服务管理先找正式配置入口，不往 settings.save 塞一份无运行读取的页面配置 |
-| `harness/workbench.py:783`、`:797`、`:804`；`DSH宿主/ui-fish/src/client/pages/FishPersonasPage.tsx:132` | 人格列举、保存、应用入口已有；saveDraft 后 load 会从活动人格重装编辑内容 | 区分保存后的选中预设与当前活动版本；退出保存后被旧正文覆盖的交互，不另造人格存储 |
-| `harness/workbench.py:806`—`:848` | memory 的 overview/curate/digest/history/search/save 已有；digest.revise 为模型按意见修订；工作台当前分支未暴露删除/合并动作，删除实现已在 MemoryStore.delete | 现有动作与删除方法直接接管理流程；合并需补到资源与记忆，保留来源关联；退出仅时间线、假列表删除和将模型改写当直接保存 |
-| `harness/workbench.py:850`—`:859` | schedules.list/create/update/delete 已有；当前已读分支未见 schedules.run，但 BotControl.run_now 和 FishSchedules.run_now 均已存在 | 工作台补最小桥接到既有 run_now；核对暂停计划人工实例的领取语义；退出只读任务页，不造第二调度器 |
-| `harness/workbench.py:975`—`:1003` | library.status/open/organize/upload/list/detail/delete/search 已有；upload 直接为文本 ingest | 接资料对象管理、真实试查与导入进度；文件沿现有 attachments 分块原件通路，不把文本表单等同全格式解析 |
-| `harness/plugin_registry.py:77`、`:89`、`:93`、`:163`、`:182`、`:348`、`:382` | 已有 PluginRegistry 的 entries/save/toggle/remove/discover/catalog；该事实不证明工作台已有完整管理桥接 | 核其他正式入口后复用这一注册表接插件/API/MCP；不在前端另存第二份工具清单；当前无通用热更新实现证据时不宣称所有插件支持 |
-| `DSH宿主源码/packages/client/ui-plugin-manager`、`ui-plugin-market`、`ui-skill` | 组件包存在；当前未证明可直接管理 Fish 模型/插件/Skills 来源 | 复用合适表单和编辑器，数据绑定 Fish；模型用途/Skills 管理先核正式配置和加载路径，确缺才补对应桥接 |
-| `DSH宿主源码/packages/client/ui-sidebar-files`、`ui-sidebar-terminal` | 已有文件与终端界面包 | 接 Fish 实际工作区/交办工程与任务，不沿用 DSH 当前项目默认值，不另建客户端或搬工作根 |
-| `DSH宿主/ui-fish/src/client/pages`、`pages.module.css`、`FishPanel` 与 `locales` | 现有 Fish 页面和原生宿主集成位置 | 在此演进导航、对象列表/详情、操作及反馈；迁移完成后退出对应旧路由、重复控件和无用文案；具体删除记录实施后补齐 |
+| `E:/Program Files/DSH/source/fish/harness/workbench.py:642` | delegations.list/submit/get/cancel/open/download 已有 | 执行任务详情接真实结果与成果；退出页面独立推断的成功状态 |
+| `E:/Program Files/DSH/source/fish/harness/workbench.py:673`、`:721`、`:764` | settings.get/save、channels.status/update 已有；现有设置保存只覆盖其明确字段 | 读取真实配置并按项保存；模型服务管理先找正式配置入口，不往 settings.save 塞一份无运行读取的页面配置 |
+| `E:/Program Files/DSH/source/fish/harness/workbench.py:783`、`:797`、`:804`；`E:/Program Files/DSH/source/dsh/packages/client/ui-fish/src/client/pages/FishPersonasPage.tsx:132` | 人格列举、保存、应用入口已有；saveDraft 后 load 会从活动人格重装编辑内容 | 区分保存后的选中预设与当前活动版本；退出保存后被旧正文覆盖的交互，不另造人格存储 |
+| `E:/Program Files/DSH/source/fish/harness/workbench.py:806`—`:848` | memory 的 overview/curate/digest/history/search/save 已有；digest.revise 为模型按意见修订；工作台当前分支未暴露删除/合并动作，删除实现已在 MemoryStore.delete | 现有动作与删除方法直接接管理流程；合并需补到资源与记忆，保留来源关联；退出仅时间线、假列表删除和将模型改写当直接保存 |
+| `E:/Program Files/DSH/source/fish/harness/workbench.py:850`—`:859` | schedules.list/create/update/delete 已有；当前已读分支未见 schedules.run，但 BotControl.run_now 和 FishSchedules.run_now 均已存在 | 工作台补最小桥接到既有 run_now；核对暂停计划人工实例的领取语义；退出只读任务页，不造第二调度器 |
+| `E:/Program Files/DSH/source/fish/harness/workbench.py:975`—`:1003` | library.status/open/organize/upload/list/detail/delete/search 已有；upload 直接为文本 ingest | 接资料对象管理、真实试查与导入进度；文件沿现有 attachments 分块原件通路，不把文本表单等同全格式解析 |
+| `E:/Program Files/DSH/source/fish/harness/plugin_registry.py:77`、`:89`、`:93`、`:163`、`:182`、`:348`、`:382` | 已有 PluginRegistry 的 entries/save/toggle/remove/discover/catalog；该事实不证明工作台已有完整管理桥接 | 核其他正式入口后复用这一注册表接插件/API/MCP；不在前端另存第二份工具清单；当前无通用热更新实现证据时不宣称所有插件支持 |
+| `E:/Program Files/DSH/source/dsh/packages/client/ui-plugin-manager`、`ui-plugin-market`、`ui-skill` | 组件包存在；当前未证明可直接管理 Fish 模型/插件/Skills 来源 | 复用合适表单和编辑器，数据绑定 Fish；模型用途/Skills 管理先核正式配置和加载路径，确缺才补对应桥接 |
+| `E:/Program Files/DSH/source/dsh/packages/client/ui-sidebar-files`、`ui-sidebar-terminal` | 已有文件与终端界面包 | 接 Fish 实际工作区/交办工程与任务，不沿用 DSH 当前项目默认值，不另建客户端或搬工作根 |
+| `E:/Program Files/DSH/source/dsh/packages/client/ui-fish/src/client/pages`、`pages.module.css`、`FishPanel` 与 `locales` | 现有 Fish 页面和原生宿主集成位置 | 在此演进导航、对象列表/详情、操作及反馈；迁移完成后退出对应旧路由、重复控件和无用文案；具体删除记录实施后补齐 |
 
 拟退役的设计规则：固定六页、每页仅一个操作、灰字只能空/错、错误只能到设置看、为“只改前端”而保留空按钮。当前没有删除任何生产源码；本节列的是 09 实施对象，不以文档改写充当源码清理完成。
 
@@ -169,16 +169,16 @@
 
 | 源码证据 | 当前事实 / 深化位置 | 09 要退出的散落知识 |
 |---|---|---|
-| `DSH宿主/ui-fish/src/client/workbench-client.ts:createWorkbench`；`src/index.ts:apply/forward`；`harness/tool_host.py:1533`；`harness/workbench.py:dispatch` | 浏览器 → 宿主同源转发 → Fish工作台分派的真实 Seam 已有；宿主包含启动/维护转发，不能将它另作 Agent 核心 | 不再造第二条直连通路或万能 WorkbenchCore；不在宿主重算人格、计划、记忆或工具决定 |
-| `DSH宿主/ui-fish/src/client/FishPanel.tsx:requestRefresh`、`pageProps`；`page-props.ts:FishPageProps` | 各页接 raw call/reportRefresh；外框每切页读全局 status，各页操作又分别读/解析/刷新；这不是全部后端状态都由外框维护的证据 | 对象 Module 集中操作顺序与结果；外框只留全局摘要；对象读写定向刷新，不另建一个全局包揽业务的状态仓库 |
-| `DSH宿主/ui-fish/src/client/pages/FishPersonasPage.tsx:load/saveDraft/applyDraft/applyRevision` | load 同时 setCurrent 与 setBody；saveDraft 保存后调用 load，草稿被活动人格覆写；保存并应用的两个阶段由页面直接编排 | 草稿/已保存/活动分别关联；保存应用和部分成功集中在人格编辑 Module；退出页面各自重写的保存刷新顺序 |
-| `harness/bot_control.py:130`、`:198`；`harness/fish_schedules.py:222`、`:231`、`:235` | 已有 run_now 创建 due 实例；pending/claim 排除 paused，单纯桥接按钮不保证暂停计划能手动运行 | 复用实例和调度；人工立即运行与暂停状态的接续在计划 Module 内实现，不临时恢复再暂停，不另开执行线程/计时器 |
-| `DSH宿主/ui-fish/src/client/pages/FishTasksPage.tsx:dueText/firstField/statusDot` | 页面猜多个时间字段、状态映射；有效表单转换也在页内 | 在计划操作 Module 的 Interface 适配一次；不把业务原始记录复制成第二库，不强制所有格式化函数独立成文件 |
-| `harness/memory_store.py:385`；`harness/bot_control.py:204`—`:220` | MemoryStore.delete 已删除活动条目/向量并按既有参数登记防重学；工具管理已有调用；不证明工作台删除/合并已接通 | 工作台走原存储方法；合并保留来源与修订关系由原 Module 内补，不在页面或工作台再写一遍 DELETE |
-| `harness/core.py:978`；`harness/app.py:410`、`:426`；`harness/setup_config.py:save_setup`；`harness/model_gateway.py:ModelGateway.__init__` | 现有角色配置保存、保护凭据和主模型读取已有；setup保存同时涉及DSH CLI/QQ/人格等，不能直接当作仅改模型连接的 Interface | 在运行设置内保留同一有效模型/密钥来源，按用途补接；新连接表单不调用整套初始化向导，不顺带改人格/DSH配置，不建一份没人读取的 model-providers 页面 JSON |
-| `harness/plugin_registry.py:PluginRegistry`；`DSH宿主源码/packages/client/ui-skill/src/index.ts` | Fish 已有插件登记/发现/执行；ui-skill 节点侧是纯UI入口的空apply，该事实不能证明其已管理Fish技能加载 | 扩展页复用Fish注册；Skills接实际Fish加载 Interface，缺口如实补；不把DSH界面包存在当作后端接通或借用DSH人格加载 |
-| `harness/agent_tools.py:AgentTools.workspace/execute` | 文件读写、目录、workspace、shell/process已有，工作目录按真实任务归属；前端工作区尚待接通 | 文件和进程来自既有 Module；不复制一套网页文件服务器，不把DSH当前项目当作Fish默认根 |
-| `DSH宿主/ui-fish/src/client/parsers.ts`、`contract/workbench.ts`、`contract/slots.ts` | 已有传输结果与对象解析；旧mode/work语义仍能在类型中看到，这只是现状而非本轮允许重新引入工作模式 | 新页面只依赖真实需要的对象 Interface；迁移完成时清理失效解析/文案及仅锁死旧布局的断言，不从旧类型自动生成新产品开关 |
+| `E:/Program Files/DSH/source/dsh/packages/client/ui-fish/src/client/workbench-client.ts:createWorkbench`；`src/index.ts:apply/forward`；`E:/Program Files/DSH/source/fish/harness/tool_host.py:1533`；`harness/workbench.py:dispatch` | 浏览器 → 宿主同源转发 → Fish工作台分派的真实 Seam 已有；宿主包含启动/维护转发，不能将它另作 Agent 核心 | 不再造第二条直连通路或万能 WorkbenchCore；不在宿主重算人格、计划、记忆或工具决定 |
+| `E:/Program Files/DSH/source/dsh/packages/client/ui-fish/src/client/FishPanel.tsx:requestRefresh`、`pageProps`；`page-props.ts:FishPageProps` | 各页接 raw call/reportRefresh；外框每切页读全局 status，各页操作又分别读/解析/刷新；这不是全部后端状态都由外框维护的证据 | 对象 Module 集中操作顺序与结果；外框只留全局摘要；对象读写定向刷新，不另建一个全局包揽业务的状态仓库 |
+| `E:/Program Files/DSH/source/dsh/packages/client/ui-fish/src/client/pages/FishPersonasPage.tsx:load/saveDraft/applyDraft/applyRevision` | load 同时 setCurrent 与 setBody；saveDraft 保存后调用 load，草稿被活动人格覆写；保存并应用的两个阶段由页面直接编排 | 草稿/已保存/活动分别关联；保存应用和部分成功集中在人格编辑 Module；退出页面各自重写的保存刷新顺序 |
+| `E:/Program Files/DSH/source/fish/harness/bot_control.py:130`、`:198`；`harness/fish_schedules.py:222`、`:231`、`:235` | 已有 run_now 创建 due 实例；pending/claim 排除 paused，单纯桥接按钮不保证暂停计划能手动运行 | 复用实例和调度；人工立即运行与暂停状态的接续在计划 Module 内实现，不临时恢复再暂停，不另开执行线程/计时器 |
+| `E:/Program Files/DSH/source/dsh/packages/client/ui-fish/src/client/pages/FishTasksPage.tsx:dueText/firstField/statusDot` | 页面猜多个时间字段、状态映射；有效表单转换也在页内 | 在计划操作 Module 的 Interface 适配一次；不把业务原始记录复制成第二库，不强制所有格式化函数独立成文件 |
+| `E:/Program Files/DSH/source/fish/harness/memory_store.py:385`；`harness/bot_control.py:204`—`:220` | MemoryStore.delete 已删除活动条目/向量并按既有参数登记防重学；工具管理已有调用；不证明工作台删除/合并已接通 | 工作台走原存储方法；合并保留来源与修订关系由原 Module 内补，不在页面或工作台再写一遍 DELETE |
+| `E:/Program Files/DSH/source/fish/harness/core.py:978`；`harness/app.py:410`、`:426`；`harness/setup_config.py:save_setup`；`harness/model_gateway.py:ModelGateway.__init__` | 现有角色配置保存、保护凭据和主模型读取已有；setup保存同时涉及DSH CLI/QQ/人格等，不能直接当作仅改模型连接的 Interface | 在运行设置内保留同一有效模型/密钥来源，按用途补接；新连接表单不调用整套初始化向导，不顺带改人格/DSH配置，不建一份没人读取的 model-providers 页面 JSON |
+| `E:/Program Files/DSH/source/fish/harness/plugin_registry.py:PluginRegistry`；`E:/Program Files/DSH/source/dsh/packages/client/ui-skill/src/index.ts` | Fish 已有插件登记/发现/执行；ui-skill 节点侧是纯UI入口的空apply，该事实不能证明其已管理Fish技能加载 | 扩展页复用Fish注册；Skills接实际Fish加载 Interface，缺口如实补；不把DSH界面包存在当作后端接通或借用DSH人格加载 |
+| `E:/Program Files/DSH/source/fish/harness/agent_tools.py:AgentTools.workspace/execute` | 文件读写、目录、workspace、shell/process已有，工作目录按真实任务归属；前端工作区尚待接通 | 文件和进程来自既有 Module；不复制一套网页文件服务器，不把DSH当前项目当作Fish默认根 |
+| `E:/Program Files/DSH/source/dsh/packages/client/ui-fish/src/client/parsers.ts`、`contract/workbench.ts`、`contract/slots.ts` | 已有传输结果与对象解析；旧mode/work语义仍能在类型中看到，这只是现状而非本轮允许重新引入工作模式 | 新页面只依赖真实需要的对象 Interface；迁移完成时清理失效解析/文案及仅锁死旧布局的断言，不从旧类型自动生成新产品开关 |
 
 删除判断：传输 Adapter 只搬运数据，保持小且清楚；人格编辑/计划管理 Module 则应消化保存应用顺序、草稿关联、时间选择与执行实例拼接。若只加一层原样转发，不能认作完成深化。未被证明失效的独立行为检查和历史数据继续保留。
 
@@ -205,7 +205,7 @@
 
 ## 9. 2026-10-24 今日改动与09的只读复核
 
-完整证据：Codex只读审查报告（历史记录仅留本机）。本节只记录当前事实、负责位置和计划退出对象，以下未修复。
+完整证据：Codex只读审查报告（本地资料，未公开）。本节只记录当前事实、负责位置和计划退出对象，以下未修复。
 
 | 当前源码/对象 | 已核实事实 | 负责票与替换去向 |
 |---|---|---|
@@ -237,7 +237,7 @@
 
 ### 10.1 已有能力及真实旧调用者
 
-后端源码根：`Fish仓库根`；前端根：`DSH宿主/ui-fish`。下列行号定位本次工作树，实施时按方法名复核。
+后端源码根：`E:/Program Files/DSH/source/fish`；前端根：`E:/Program Files/DSH/source/dsh/packages/client/ui-fish`。下列行号定位本次工作树，实施时按方法名复核。
 
 | 已核实源码/入口 | 当前事实 | 目标迁接与退役归属 |
 |---|---|---|
@@ -264,7 +264,7 @@
 以下为**建议目标位置，尚未创建这些文件**。只列有明确职责的文件；先按完整用户切片迁实际Implementation，不先机械搬全仓。包入口只导出公共Interface，内部代码承接真实复杂性，不能全部原样转调旧模块。
 
 ```text
-
+E:/Program Files/DSH/source/fish/
   harness/
     unified_service.py               # 保留受支持启动入口，调用装配
     fish_agent/
@@ -381,3 +381,29 @@
 | 09-10 | 07-01（另有原09-02—09-09） | 新后端所有运行事实接通后，与新工作台在同一次私聊/客户端过程集中验收 |
 
 09-01/03/04/05/09没有增加无关后端前置；原09-01的工作台入口依赖继续保留。完整原09职责和具体页面源码仍按第8/10节，不复制成第二组前端票。原父项和历史状态保持，本轮真正领取新子票。
+
+
+<a id="repair-code-map-20261026"></a>
+
+## 12．2026-10-26 验收修复源码映射
+
+此节只负责代码落点与退出对象，行为以唯一规格§8为准。当前运行版本后端008731f、前端d93de44f52；规格/工单发布不代表已修代码。全局模块/插件协作原则适用于每一行，不只适用于研究模块。
+
+| 修复票 | 需核查和修改的现有Implementation | 退出对象与交付边界 |
+|---|---|---|
+| R01（A1/C1） | 后端根内harness/fish_agent/execution/state.py:AgentState.claim_next、execution/__init__.py:submit/_execute；experience.py:ExperienceTurn.prepare/requested/received/finish、was_considered；desktop_context.py:DesktopContext.history；fish_agent/experience/context.py各材料入口；fish_agent/plans:dispatch/_payload/record_result | 退出跨场所越序合并、独立plan被最后一个payload替代、背景covered越过认领范围。复用agent_inputs/agent_runs和既有经历，不重建消息队列 |
+| R02（A4/A5） | harness/fish_agent/execution/__init__.py:_finish_clock/_stored_place/_due_wake；fish_agent/experience/context.py:self_wake_materials；qq_agent_loop.py:_submit_group/watch_turn/_watch_turn、_fault/_recovered/_fault_notice与_maintenance；governance.py现有fault/audit记录；owner_private.py:故障通知调用者；ui-fish既有回合/维护显示 | 共同结束计时已有，不再加计划timer；修plan触发和场所交接；退出未await/未创建任务的监听调用。技术诊断归管理员日志，普通聊天不自动推故障通知，需同时核既有周期故障通知入口，不能只改一个回合场景 |
+| R03（B1/B2） | harness/fish_agent/execution/runner.py:run_model_loop工具列表和offered检查；fish_agent/tools工具目录/执行；tool_host.py:fish_tool_list、/catalog；plugin_registry.py:save/discover/set_enabled/catalog/execute；ui-fish/src/client/pages/FishExtensionsPage.tsx与相应contract/parsers | 退出本轮初始清单阻断已发现工具；按需目录覆盖实际启用内置/扩展能力，初始公布裁剪不变成调用缺失。补CLI/HTTP工具schema交接，不另建代理；现有连接不擅自删除 |
+| R04（C2/C3） | harness/memory_curation.py:submit/_collect/_groups/_learn/execute/tick/_last_end/_finish；memory_maintenance.py读取原库及既有游标；memory_store.py:learning_jobs/enqueue/extract/apply_extraction；memory_digest.py:build；daily_curate.py适配入口；tool_host.py:fish_memory_curate、workbench.py:memory.curate.run/status；现有整理进度页面 | 沿memory_curate_runs与learning_jobs，固定本次范围/截止后由程序自动分批调用提炼器，正常批结束继续下一批直到范围处理完。退出rows[:400]后整体推进、deferred仍done、每日只取新04:00短范围；原文保留，不建立另一套整理队列 |
+| R05（C4） | harness/knowledge.py:_document_hits和open相关分发；tool_host.py:library/fish_doc_search/fish_doc_read；doc_store.py:search/doc_detail的真实过滤；workbench.py统一检索及ui-fish的KnowledgeSearch/FishLibraryPage | 退出阻断已确定统一读取的owner+本群默认硬过滤；保留显式资料来源、原件/分块/修订关联和实际检索模式，不复制资料库 |
+
+### 12.1 研究用途的现状与暂存
+
+research_autonomy.py:_discover用research-discovery判断B站元数据方向；ResearchReviewer.review用research-chunk分段归纳、research-review生成报告；ResearchReviewer.save负责程序性报告/资料登记及研究记忆保存。research_pipeline.py:LocalVideoAnalyzer经MediaService(root,'research')处理无字幕研究的媒体材料。它不是QQ日常聊天或默认qq记忆整理的模型用途。
+
+tool_host.py:ToolHost.__init__直接导入并创建ResearchWorker、serve组装其线程，未来插件化要先迁接加载/生命周期而不是直接删文件。B3当前仅保留调查，不改凭据、现有研究代码、B站配置或调研开关。真实开关/任务/用量快照仅在本地审计保存，不公开上传生产数据。
+
+### 12.2 发布与复核
+
+本轮实际源码位置只在本节维护，子票不复制行号。各票可以复用现有最高层入口独立复核；共享文件的改动统一整合。五票完成后接续原09-10的一次客户端＋主人私聊使用，不另设第二张验收票。原21票记录和原父Issue正文/状态保留。
+

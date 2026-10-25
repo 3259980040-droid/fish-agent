@@ -4,10 +4,10 @@
 
 **Blocked by:** [09-01：人格保存应用与原生工作台入口](https://github.com/3259980040-droid/fish-agent/blob/codex/fish-tickets-20261025/project/tickets/09-%E6%93%8D%E4%BD%9C%E5%B7%A5%E4%BD%9C%E5%8F%B0/09-01-%E4%BA%BA%E6%A0%BC%E4%BF%9D%E5%AD%98%E5%BA%94%E7%94%A8%E4%B8%8E%E5%8E%9F%E7%94%9F%E5%B7%A5%E4%BD%9C%E5%8F%B0%E5%85%A5%E5%8F%A3.md)。
 
-**Status:** ready-for-agent
+**Status:** done（2026-10-25 实施；结果见 `实施记录/09-工作台/09-05-结果.md`，DSH 提交 `b7a4af50bf`，已合并；后端 `2b18a23`）
 **GitHub:** https://github.com/3259980040-droid/fish-agent/issues/13
 
-**执行状态：** 未实施；可在前置完成后领取。独立可演示不等于逐票实发测验。
+**执行状态：** 已实施：技能列表/导入/编辑/启停/删除与 `fish_skill_use` 真实加载；页面为空态（生产尚无技能）。
 **Parent:** [09：原生操作工作台与管理闭环](https://github.com/3259980040-droid/fish-agent/blob/codex/fish-tickets-20261025/project/tickets/09-%E5%8E%9F%E7%94%9F%E6%93%8D%E4%BD%9C%E5%B7%A5%E4%BD%9C%E5%8F%B0%E4%B8%8E%E7%AE%A1%E7%90%86%E9%97%AD%E7%8E%AF.md)。父项保留原文，不在本票另立需求。
 **权威规格：** [唯一实施规格](https://github.com/3259980040-droid/fish-agent/blob/codex/fish-tickets-20261025/project/spec.md)，关联 4.1、4.7.3 Skills、4.7.4、4.10.5 B；用户故事 61,62,63,84,85,101。
 **代码事实：** [实施对照表：工作台映射](https://github.com/3259980040-droid/fish-agent/blob/codex/fish-tickets-20261025/project/implementation-map.md#workbench-operation-map)。具体源码路径与行号在对照表维护，领取时核当前调用者。
