@@ -1721,7 +1721,7 @@ class ToolHost:
             if runtime is None:
                 raise PermissionError('主执行尚未启动，请重载后台')
             source = str(body.get('source') or '')
-            if source not in ('desktop', 'qq-private'):
+            if source not in ('desktop', 'qq-private', 'qq-group', 'plan'):
                 raise ValueError('未知输入来源')
             return runtime.execution.submit(
                 source=source, conversation=str(body.get('conversation') or ''),
