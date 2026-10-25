@@ -1,5 +1,7 @@
 # Fish 实施对照表：代码位置、当前规则与退出清单
 
+**当前结构设计：** [第13节](#instance-design-20261026)对应唯一规格第八节合并范围，已核对当前源码，供下一步to-tickets整合工单。第1—12节分别保留历史定位及原修复映射；当前设计不表示已经实施。程序、配置和生产数据未改变。
+
 > 状态说明：第1—6节保留实施前定位快照，旧行号会随实施改变；当前工作树的新接口与退出状态见第7节。源码已改不代表已构建、载入或验收，运行结果以实施记录和最终07证据为准。
 
 > 2026-10-24 本轮只读审查补充：第1—8节为各次定位快照，今日最新代码差异及未闭环问题见第9节。原30%预算、尚无目录/FTS等旧描述不再表示当前事实；需求仍仅由唯一规格负责。本轮只更新文档，未改运行代码。
@@ -415,3 +417,170 @@ tool_host.py:ToolHost.__init__直接导入并创建ResearchWorker、serve组装�
 - memory_curation.py:_groups/tidy_memories负责明确去重与已有记忆状态维护，不调用聊天模型；fts5_index.py、history_index.py、memory_store.py:sync_index、doc_store.py:sync_index、memory_digest.py:sync_index负责词法索引与原文/结果回查，不进行语义归纳。
 - 当前_index还并列调用MemoryEngine.backfill/doc_store.maintain的向量路径，是否使用本地或远端嵌入配置需另按实际连接核实，不能把“不调用聊天API”泛称“所有阶段零模型/零网络”。
 - 技术依据：SQLite官方FTS5文档明确其为全文检索虚拟表模块，提供分词索引、查询、排序及片段；snippet是命中摘录，不是语义摘要：https://www.sqlite.org/fts5.html 。
+
+<a id="instance-design-20261026"></a>
+
+## 13．2026-10-26 codebase-design：合并规格的结构与实际改造位置
+
+本节是唯一规格§8.9的源码对照与Implementation设计，不另列产品规则。当前后端HEAD为008731f5885ad3816daac3602a86c8141ee96370，DSH前端HEAD为d93de44f525a538d0368bc655d0030eee5da7e3f；本次读取时两个工作区干净。只读源码、设计及文档同步，不执行生产查询、模型调用、程序测试或部署。
+
+### 13.1 当前真实关系与目标差异
+
+| 已核实Implementation | 实际含义 | 本轮设计处理 |
+|---|---|---|
+| harness/fish_agent/bootstrap.py:get_runtime按resolved root缓存；FishRuntime持有一个execution/state/settings等集合 | 运行实例不是前端聊天标题，现有单根只装配一份可变状态 | 同一宿主管理多份有稳定instance_id的Runtime；共用实现，每份持有自己的状态和资料位置。 |
+| harness/core.py:HarnessConfig把配置、工作区路径解析都放在root；storage.py:role_dir、fish_agent/schema.py:path与多个Store也据root定位库 | 当前root同时承担程序、宿主资源和实例数据的定位 | 显式区分宿主位置与实例位置；不将另一个数据文件夹假扮源码根，不靠切换环境变量或进程全局root。 |
+| harness/tool_host.py:serve只启动self.runtime；/submit、/turn/status、/turn/cancel和fish_think_again均取它 | 即使前端有多个聊天，控制端仍指向一份运行对象 | 宿主按instance_id解析目标Runtime；续醒、状态、取消和异步结果都保留原实例。 |
+| harness/qq_agent_loop.py:_on_group须listen且reply且engine=fish才提交 | 关闭发送也停止群输入交给主思考 | 接收参与决定分发；发送开关仅控制相应工具/投递。QQ进程处理账号连接，实例自己持有参与与能力设置。 |
+| QQStore已有db_path参数；QQAdapter同时持有记录与账号控制请求 | 原文/处理状态与公共连接混在一个root中 | 账号连接共用；每个接入实例用自己的原记录及处理库。解析事件一次，再按实际订阅逐实例入库和提交。 |
+| ToolHost.identities主键(role,session)，chat_says等主要按session；PluginRegistry.execute用共享entry.enabled及role | 没有表达不同窗口的独立调用归属与能力开关 | 工具调用绑定实例，身份/待发气泡/预览及取消状态随实例定位；共用注册和连接，实例启停由本实例Settings解析。 |
+| AgentState.claim_next认领最早run后合并所有同source/conversation后继；ExperienceTurn可扩展covered | 对应R01原越序合并与背景提前结清风险 | 认领连续有序范围，计划不被普通消息覆盖；背景查阅与实际认领分开，沿原队列修复。 |
+| ExecutionModule._finish_clock已有共同结束路径；_watch_turn被直接调用而未调度，已有watch_turn负责create_task | 无需再做第二个计时器；监听调用本身需要修通 | 沿每实例相同结束钩子计时，修plan来源与场所；使用已有异步监听入口，日志区分真实结果。 |
+| runner.run_model_loop在gateway.chat前调用RequestInspector.capture；capture在清理前检查240000 UTF-8字节 | 额外调试副本能阻断模型请求与工具结果接续 | 正常循环退出强制capture；保留已有原记录/trace/usage，管理诊断按需取。 |
+| ExecutionModule.turn_view已关联输入、trace、文件批次及投递时间；workbench另有按会话拼的chat.snapshot和全局latest | 有可复用真实回合入口，当前界面仍被会话/最新一条拆开 | 扩充turn_view及列表查询组成当前实例的工作台投影，不从调试快照重建历史。 |
+| ThoughtRail读取call返回的外层字段；真实FishResult值在value；chat.reasoning又截20000字符 | 空白/截短不代表模型没有产生思考 | 前端用同一解包和解析约定，完整历史按实例及回合读取；修读链，不重跑模型。 |
+| DSH StatsPills有轮/步、usage与缓存计算；Fish ModelGateway/ContextBudget已有usage和时间 | 风格和部分统计可复用，不能直接拿DSH工作会话数据 | 在Fish回合投影聚合本实例数据，复用显示与计算；没有足够原始计时的数据据实为空。 |
+
+以上来自实际方法读取；没有读取截图当轮完整请求，不据此认定240000字节具体被哪个字段撑满。实际源码路径均以Fish源码根为基准；前端位于同宿主dsh/packages/client下。
+
+### 13.2 唯一推荐结构：单宿主、按实例持有状态、共用实现与连接
+
+保留现有统一后台与QQ账号进程。后台增加实例目录和生命周期装配，每份启用实例复用现有ExecutionModule的消费者线程，各实例独立推进；不启动多套完整程序、不为每窗口开一套端口。实例内部仍一轮主思考与工具接续，不把消息数量变成生成线程数。
+
+```mermaid
+flowchart TB
+  UI[客户端：当前查看窗口] --> WB[现有工作台Interface：显式instance_id]
+  QQ[共用QQ账号连接] --> Fan[按各实例接入设置分发事件]
+  WB --> Host[实例目录与生命周期]
+  Fan --> Host
+  Host --> W1[实例一：原主执行及各负责Module]
+  Host --> W2[实例二：相同Implementation]
+  W1 --> D1[实例一自己的数据与工作区]
+  W2 --> D2[实例二自己的数据与工作区]
+  W1 --> Tools[共用工具实现和连接资源]
+  W2 --> Tools
+  Tools --> QQ
+```
+
+这不是新增一套Agent核心。实例装配负责名称、资料归属与生命周期；是否唤醒、如何合并、如何调用模型和工具仍由现有主执行负责。共用账号的实际发送可沿原传输顺序串行，这不再占用全系统的同一思考锁；不承诺多个实例共享服务额度时仍具有固定响应秒数。
+
+#### 宿主位置与实例位置
+
+- 新增显式InstanceContext值对象：稳定instance_id、实例数据位置、默认工作区及宿主资源引用。它不是一个执行器或通用仓库层。上下文经构造/调用显式传递，不用当前前端窗口或线程全局变量推断。
+- 程序根、监听端口、账号凭据、工具安装和可复用模型连接仍由宿主持有。复用model_connections/HarnessConfig/SecretStore，不恢复已退出的models.json，也不为每窗口拷贝密钥。
+- 每实例选择和有效运行设置在实例侧保存；引用同一实际连接是明确共享资源，不等于共享人格、思考进度或工具启用状态。现有research用途和凭据处理继续暂存，不因本设计重新初始化N份ResearchWorker。
+- 存储访问统一从实例位置取得原有数据库/文件位置。当前Store、role_dir、schema.path、归档和模型材料调用者一起迁接；原有表结构和算法尽量保留。不在每张表都加一份容易漏写的instance_id过滤，再继续让所有实例混写同一个库。
+
+建议资料布局在当前程序根的现有data目录下细分；这是必要的实例内归类，不是M01跨盘迁程序根：
+
+```text
+data/
+├─ host/
+│  └─ instances.json       # 目录：实例ID和名称等定位信息，不复制业务状态
+└─ instances/
+   ├─ <实例ID一>/
+   │  ├─ config/           # 本实例参与项、工具启停、运行设置
+   │  ├─ social/           # 原context/experience等对应数据库
+   │  ├─ qq/               # 本实例原消息、桌面对话、记忆等现有库
+   │  ├─ resources/        # 资料、语料、图片/表情及附件，继续细分
+   │  └─ workspace/        # 默认任务工作区和成果
+   └─ <实例ID二>/          # 同级、同类归属
+```
+
+文件夹以稳定ID定位，显示名称可改；不能因改名改变调用归属。工作区是默认保存位置，不从本设计额外产生一套主人文件工具访问限制。具体旧文件分项对应由同一位置解析持有，不把每个目录都再包装为公共Module。
+
+### 13.3 公共Interface与规则所有者
+
+以下是在原七个Module上深化，并加必要的实例装配；名称是设计约定，尚未创建代码。
+
+| Module | 小Interface及其含义 | 内部负责与不外泄的复杂性 |
+|---|---|---|
+| 实例装配（新增） | list/create/set_running/runtime：列现有实例、建独立档案、明确启停、取得指定实例运行面 | 初始资料承接、实例目录、启动/停止和缓存；不持有全局活动人格、不决定发言。 |
+| 运行设置（原） | snapshot/save/apply及同一effective_capability查询 | 人格活动版本、接入/发送/工具有效值及保存结果；目录公布、真实工具执行和投递都消费这一来源，不各写规则。 |
+| 主执行（原） | submit/request_followup/status/cancel/turn_view，补已有回合的列表读取 | 每实例FIFO认领、固定本轮输入引用、计划、8条计数、45分钟/3秒、串行模型接续和真实完成记录。 |
+| 共同经历与上下文（原） | record/prepare/record_result/read | 逐实例原始材料、统一时间排序、引用、实际纳入范围、预算与DSH压缩；不把背景阅读当认领完成。 |
+| 工具执行（原） | catalog/execute，返回同调用的真实结果 | 注入实例设置与共用注册/连接，按需发现接执行，参数/错误转换与异步关联。 |
+| 记忆资料（原） | 原有search/open及curation submit/status | 实例内跨场所FTS5/原文、固定范围自动续批、内容提炼与保存进度；不另造记忆库或调度Agent。 |
+| 计划（原） | 原有计划管理、dispatch/record_result | 每实例计划与到期实例，明确提醒履约；调主执行而非自己生成。 |
+| 投递（原） | 原有submit_*及receipt，对实例上下文和真实目标执行 | 每实例待发内容到共用账号传输，最后可控交付点消费同一能力判定，记实际回执和未确认。 |
+
+原QQ、本地工作台和模型都是现有Adapter接法，不因增加实例再加N套抽象代理。删除实例装配会让定位/生命周期散落每个入口，删除设置Module会让目录/工具/投递分别重写启停规则，这两处有实际Depth；仅传参数的HTTP壳保持简单。
+
+### 13.4 接入、工具与结果的一条完整路径
+
+**接收：** QQ账号进程解析原始事件→宿主按连接ID和场所查本次参与实例→各实例沿QQStore/Experience登记自己的原文和输入→主执行按本实例触发规则处理。解析/连接资源共用，独立实例保存自己的已接收记录是资料归属，不是复制整理算法。原消息状态/runtime_turn_id不能由多个实例覆写同一全局行。
+
+连接端如需要接收对象集合，应由使用此账号的各实例参与设置汇总；不能先拿旧单实例allowlist/reply或当前前台窗口过滤掉另一实例已接入的群。账号实际可达范围和主人身份仍按真实连接核验，实例接入不自动执行入群。
+
+同一外部事件保留连接、平台消息和场所来源，各实例内部引用各自原记录；实例外的控制请求以(instance_id,execution_id)定位。重投同一事件在本实例去重，另一实例仍可合法接收。
+
+**开关：** 工作台对instance_id保存本实例设置→返回保存值→Settings读取同值→目录与执行使用同一个effective_capability结果。发送工具判断目标私聊/群一/群二后，实际交付沿相同解析函数核对；不是复制两份if逻辑。关闭发送不控制接收提交。关闭窗口一不修改共用PluginRegistry的全局启用或账号连接状态。
+
+目录在后续模型请求/按需发现时读取实例当前有效值；重新开启后不继续用初始关闭清单锁死。当前调用已经产生副作用的事实按真实记录保留，开关不倒写历史。
+
+**发送时点：** 目录是当前可用能力展示，执行仍依据调用所属实例的当前值；内容还在本地队列时，最终出站沿既有validate入口读取同一设置。已经送到外部服务的请求不能靠之后切开关撤回；已送达保留送达事实，未确认仍是未确认，不补发。这里是能力生效时点说明，不新增冷却/额度/审批。
+
+**工具返回：** 参数错误、被关工具、当前工具执行失败由原runner捕获并加入同tool_call_id的结果；已发现工具通过更新本轮可调用定义来源进入原执行器，不用初始offered清单二次误拒。发送内容排队只返回受理状态，不冒充投递完成。
+
+最终异步结果或生成结束后的发送失败由原任务/投递记录交回发起实例经历和可续接材料。当前模型循环还在时可随工具接续读取；该轮已结束则下次读取真实结果，不为了补一份状态强行再调用一次模型或要求她补说一句。完整模型连接已断时记录失败，不声称模型当时已经知道。
+
+#### 主执行与整理的内部交接
+
+- 修R01时按待处理顺序认领连续的普通输入范围；同轮可按既定合并语义保留多个场所材料的完整顺序，不能抽走后方同群输入却越过中间来信。明确计划实例保持独立任务，不能以最后一个payload代表全部。实际处理材料由Experience.prepare取认领引用；已完成历史可作背景，晚到尚未认领输入不被提前结清。
+- “本轮输入认领边界”继续保留，它与额外请求调试副本完全不同。退出RequestInspector强制capture不删除输入范围、原文、压缩检查点或trace。
+- 计划结束和普通结束沿同一_finish_clock重置本实例45分钟；每实例消费者持有各自活动运行。thinking_slot及压缩锁按实例定位，不用共享role=qq把不同窗口主思考排成一个全局队列。
+- R04继续在同一memory_curate_runs/learning_jobs中保存范围、实际批次位置与小结结果，日常/工具/页面调同一执行程序。按当前实例读取原件与索引；程序自动续批，不让模型决定下一批或完成游标。
+
+### 13.5 工作台Interface与前端实现
+
+沿现有POST /fish/workbench → ToolHost /workbench保留通道。作用于窗口的动作在现有params携带instance_id；本地客户端绑定调用函数时固定该ID，后台开始执行前解析为InstanceContext。全局实例列表/创建及明确的连接维护动作才走宿主范围。Frontend不传任意根路径，不在服务端维护“最后选中的全局窗口”。
+
+| 既有/拟补动作 | 实际返回 | 前端如何消费 |
+|---|---|---|
+| instances.list/create/set_running（补） | 实例身份、名称、真实运行与人格配置情况 | 顶部窗口列表/新增/明确启停；切换本身只换查看对象。 |
+| 现有personas/settings、groups/plugins等动作（迁接） | 所属实例保存对象、活动/有效值、必要原因 | 同窗口各管理页消费同一值；工具安装/连接资源编辑与本窗口启停含义分清。 |
+| turns.list（补到原主执行读面） | 全部实际回合的稳定分页、触发、时间、状态及摘要引用 | 主记录与快速定位；不只列非空reasoning，不把已发送气泡当全部回合。 |
+| turn.view（沿原入口补） | 实际输入引用及来源/时间/对象、工具、任务/投递、已有reasoning、时间与usage关联 | 左侧完整材料与结果、右侧选中回合、底部本实例统计；细节取同一执行引用。 |
+| 现有原文与reasoning读取（修） | 完整已保存内容，长材料按原读取能力连续取回 | 无固定20000字符静默截断；无reasoning和读失败分别显示，不调用模型补写。 |
+
+前端保留FishResult的ok/value或failure约定，统一解析一次；修ThoughtRail目前把reply.value当外层的读法。页面以实例+回合为数据键，异步返回绑定发起ID；切窗后旧返回不能覆盖新窗口画面。显示所选历史回合与是否跟随最新分开，后台更新不抢占历史阅读。
+
+布局沿FishChatPage及CSS Modules，保留宿主主题；主区撤下原灰色技术details堆叠，替换为实际回合内容。两侧独立滚动、全文复制与定位，输入及底部栏保持可用。窗口/接入/工具管理与该页面使用同一绑定调用面，不积压成纯前端壳。
+
+StatsPills的展示和纯计算复用，Fish的数据投影由本实例turn/trace/context usage提供；默认展示本实例累计轮/步及token/缓存，当前/选中回合提供其独立详情。输出速度仅在有真实输出阶段时长时计算，不能把“reasoning或工具首事件”到结束的总时长冒充纯输出速度；旧记录缺数据据实显示。这个默认范围是本轮技术设计选择，可在现有显示设置内调整，不新增模型统计程序。
+
+### 13.6 源码落点与退出清单
+
+| 改造点 | 当前实际文件/方法及建议落点 | 保留与替换 |
+|---|---|---|
+| 实例目录与装配 | fish_agent/bootstrap.py:get_runtime/FishRuntime；拟fish_agent/instances.py放目录与上下文值；unified_service.py、tool_host.py:serve | 保留现有后台启动、同一主执行实现。替换按源码root唯一runtime及shutdown只停一个的假设，启动/停止遍历真实实例；不按实例创建ToolHost服务器/ResearchWorker。 |
+| 程序/资源/数据位置 | core.py:HarnessConfig/resolve；storage.py:role_dir/settings_lock/thinking_slot；fish_agent/schema.py:path；各Store构造；model_gateway.py、model_connections.py、secrets_store.py | 共享连接和凭据来源保留，数据位置按InstanceContext。退出裸root既读源码又读实例资料、按全局qq角色思考锁；不新增模型注册表或复制源码。 |
+| 工作台归属 | workbench.py:__init__/runtime/chat/dispatch/_chat_view；tool_host.py:/workbench、/submit、/turn/* | 宿主动作和实例动作分清，实例Workbench缓存与jobs各归属；退出全局_selected_conversation/active人格作为所有入口目标。原窗口聊天记录变为实例内历史，不与实例身份混用。 |
+| 人格与权限 | social_context.py:active_persona/apply_active_persona/create_space/owner_space/deployment；owner_mode.py；tool_host.py:bind/identity/work_context | 保留预设保存与应用；活动人格在实例数据内。已有稳定主人校验保留，旧space作为授权根/全局活动路由退出。旧测试空间资料按原事实承接，不删除、恢复或将它们全当新运行实例。 |
+| QQ事件分发和记录 | qq_agent_loop.py:on_event/_on_group/_submit_group/watch_turn/_watch_turn；QQStore(record_message/update_message,db_path)；fish_agent/adapters/qq.py；host /submit | 账号解析/网络共用；参与实例分别入库/提交/监听。退出reply开关阻止思考提交、共享一行runtime_turn_id和直接调用未调度的_watch_turn。 |
+| 回合队列、材料、计时 | execution/state.py:claim_next；execution/__init__.py:submit/_consume/_execute/_finish_clock；experience.py；fish_agent/experience/context.py；plans/__init__.py | R01/R02按原修复来源实施；固定认领、实例内顺序和计划保留，实例时钟/锁独立；退出背景covered结清未认领材料。 |
+| 设置和工具真正生效 | fish_agent/settings、fish_agent/tools；tool_host.py:identity/execute/fish_tool_list/dispatch；plugin_registry.py:catalog/execute；agent_tools.py | 共用注册/CLI/HTTP/MCP执行实现，实例能力来源统一。替换全局enabled当窗口开关、offered固定拒绝、带旧root读全局暂停的旁路；文件/进程输出默认本实例workspace，跨进程结果保持实例归属。 |
+| 实际出站与回执 | fish_agent/delivery；QQAdapter.deliver；qq_agent_loop.py:group_deliver/_group_blocked及现有validate；bot_control.py；tool_host.py:say/group_send | 保留现有气泡、账号发送队列、回执与未确认；出站消费同一实例设置，退出第二套独立群reply决策；不改为自动重发或必发。所有发送工具及直发/计划/MCP接法都要带原实例归属，不只修fish_say一个名称。 |
+| 请求调试副本及工具返回 | execution/runner.py:run_model_loop/execute；request_inspector.py:capture；tool_host.py:/requests/capture；turn_trace.py | 正常执行退出前置capture调用，原trace/usage/请求继续。既有按需诊断入口可保留；工具结果沿同call_id记录，当前上限等中断按真实状态结束，不新加重试。 |
+| 记忆/资料与整理 | memory_curation.py:submit/_collect/_learn/execute/tick/_finish；memory_store.py；memory_digest.py；knowledge.py:_document_hits/search/open；doc_store.py；各FTS入口 | 复用原整理和索引算法，实例物理库与归档位置独立；R04自动续批，R05实例内跨场所查原文。退出旧owner+当前群硬过滤，不变成跨实例查询，research保留。 |
+| 回合投影与完整历史 | ExecutionModule.turn_view/_turn_trace；turn_trace.py；workbench.py:chat.thoughts/chat.reasoning/turn.view；context_budget.py:snapshot、ModelGatewayusage | 扩展同一主执行读面及分页列表，保留真实reasoning；退出主区全局latest和按单会话分割的替代记录，解除外层解包及20000截断。无需另建展示事件数据库。 |
+| 前端与宿主桥接 | dsh/packages/client/ui-fish/src/index.ts；client/workbench-client.ts、contract/slots.ts、contract/workbench.ts、parsers.ts、client/index.ts；pages/FishChatPage.tsx/.module.css、FishExtensionsPage及实际接入设置页 | 保留action/params传输与原主题。绑定instance_id、保存值回读、实例切换隔离、回合选择/双滚动；移除灰色诊断主视图和无数据思考栏，所有相关页迁同一调用面。 |
+| 底栏复用 | dsh/packages/client/ui-chat/src/client/chat/StatsPills.tsx；ui-chat/src/client/apply.ts；Fish context_budget/ModelGateway/turn trace | 复用控件或抽出其纯展示/计算以两处真实调用，不能注入DSH会话store；同窗口累计与单轮详情分开，缺失输出计时不编速度。 |
+
+临时新文件名仅为Implementation建议，实际实施可依当前目录收敛；Interface及职责不随意分散。行号不复制进下一步子票，领取时按方法核对最新改动即可。
+
+### 13.7 承接顺序、迁接与验证的实际范围
+
+1. **先落实实例上下文这一条可用路径。** 原有Fish登记为初始实例，客户端原过程经明确归属照常运行；接通实例资料位置与工作台入口。接着新增第二窗口，沿同一程序创建自己的档案和设置。不是先造一套只列列表的空壳。
+2. **原资料迁接单独明示。** 保持程序根与宿主连接位置；实例侧原库、文件和绝对引用在同一维护过程迁接到同级实例目录。识别所有者后退出旧活动写路径，不把同一份数据两边长期双写。保留原ID、原文、原授权关系和真实删除状态，不恢复主人删掉的历史。具体迁接清单随位置解析在实施时生成，不在本轮搬文件。
+3. **接QQ分发与实际能力控制。** 有稳定实例后让接收、工具执行和投递都带该实例；同一组改动内迁完目录和真实出站调用者，再启用多窗口参与。共用账号凭据不复制，旧按群控制中的窗口能力职责退出。
+4. **各修复沿原负责位置完成。** R01/R02依赖实例内执行含义稳定，R03依赖有效设置与共用注册来源明确；R04/R05依赖资料位置和原文引用已稳定。具体票可在Interface稳定后推进，不要求所有模块全部结束才开始另一个，也不从五张旧票的无阻塞直接推导新依赖。
+5. **工作台消费同一真实记录。** 回合列表/详情、历史思考、底栏与设置操作随相应完整路径接通，保留原21张已实现能力；原09-10承担整组最后一次客户端＋主人私聊体验，群只读或临时根。这里不是新增票号或已批准依赖图。
+
+采用同一整合分支推进；尚未迁接的入口保持旧实现可用，迁接后对应调用者退出，启用目标结构时只有一套活动主执行路径。必要过渡不得变成永久兼容层。实施期同步源码GLOSSARY/ADR的实例含义；本轮只在规格和此表记录，不改当前运行包里的ADR或源码。
+
+验证直接跨已有工作台/主执行/工具/整理Interface看保存、生效和真实结果；SQLite及文件可用临时实例根，QQ/模型沿现有替代返回，不新建每张表的Repository或额外实验框架。原测试若仅锁定被替换的全局root、全局活动人格和旧页面字段布局，随该Implementation替换；独立有效行为继续保留。整体完成后集中验收，必要局部核对不是每票一轮付费实发。
+
+### 13.8 本轮完成与下一步
+
+本次已给出实例装配、数据归属、工具实际能力、QQ分发、回合读取与前端消费的Interface、实际调用者及退出对象。没有新增运行Module、创建实例文件夹、迁移生产库、改代码、调用模型、重载或发送消息。下一步to-tickets依据本节合并/修订原R01—R05与新增目标，列真正前置和完整用户过程；当前不擅自改Issue图。
