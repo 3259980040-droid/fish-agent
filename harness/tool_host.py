@@ -1649,7 +1649,7 @@ class ToolHost:
         if route == '/health':
             import os as _os
             from memory_reminder import ON_VALUES as _ON, SWITCH as _SWITCH
-            return {'ok': True, 'root': hashlib.sha256(str(self.root.resolve()).encode()).hexdigest(), 'social_context_version': 1, 'social_roster_version': 1, 'chat_actions_version': 1, 'workbench_version': 1, 'reply_pipeline_version': 2, 'memory_evidence_version': 3, 'vision_identification_version': 1, 'conversation_style_version': 2, 'group_identity_version': 1, 'persona_defaults_version': 1,
+            return {'ok': True, 'root': hashlib.sha256(str(self.root.resolve()).encode()).hexdigest(), 'social_context_version': 1, 'social_roster_version': 1, 'chat_actions_version': 1, 'workbench_version': 2, 'reply_pipeline_version': 2, 'memory_evidence_version': 3, 'vision_identification_version': 1, 'conversation_style_version': 2, 'group_identity_version': 1, 'persona_defaults_version': 1,
                     # What this serving process actually does, not what the registry says.
                     'memory_reminder': 'on' if _os.environ.get(_SWITCH, '').strip().lower() in _ON else 'off'}
         if route == '/system/p0-status':
@@ -1836,6 +1836,11 @@ class ToolHost:
             self.scheduler_thread.start()
             from memory_maintenance import start_background
             self.memory_thread = start_background(self)
+            # The one assembly and its one main execution belong to the real
+            # background host: entries only submit into it.
+            from fish_agent import get_runtime
+            self.runtime = get_runtime(self.root)
+            self.runtime.start()
         threading.Thread(target=self.server.serve_forever, daemon=True, name='fish-tool-host').start()
 
 
@@ -1898,6 +1903,8 @@ def shutdown_host(root):
         host.stop.set(); host.research.stop.set(); host.research.cancel_event.set()
         for plugin in host.registry.entries(): host.registry.cancel(plugin['id'], notify=False)
         if getattr(host,'_workbench',None): host._workbench.close()
+        if getattr(host,'runtime',None):
+            host.runtime.stop()
         if getattr(host,'scheduler_thread',None): host.scheduler_thread.join()
         host.computer.interaction.close()
         # The research driver owns its subprocess. Let it kill and reap that

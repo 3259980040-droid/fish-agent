@@ -1,7 +1,6 @@
 """Native DSH Fish panel operations, backed by the existing Fish services."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
 import os
@@ -206,19 +205,26 @@ class Workbench:
     def __init__(self, root):
         self.root = Path(root)
         self.path = self.root / 'data/social/workbench.db'
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='fish-chat')
         self._chat_instance = None
         self._delegation_instance = None
         self._selected_conversation = ''
         self._lock = threading.Lock()
-        self._job_cancels = {}
         with database(self.path) as db:
             db.execute('''CREATE TABLE IF NOT EXISTS jobs(
                 id TEXT PRIMARY KEY, conversation TEXT NOT NULL, status TEXT NOT NULL,
                 error TEXT NOT NULL DEFAULT '', created REAL NOT NULL, updated REAL NOT NULL)''')
-            if 'input_message' not in {row[1] for row in db.execute('PRAGMA table_info(jobs)')}:
+            columns = {row[1] for row in db.execute('PRAGMA table_info(jobs)')}
+            if 'input_message' not in columns:
                 db.execute('ALTER TABLE jobs ADD COLUMN input_message INTEGER')
+            if 'execution' not in columns:
+                # The client's request map only keeps the reference; the real status is
+                # always read back from the one main execution's own turn ledger.
+                db.execute("ALTER TABLE jobs ADD COLUMN execution TEXT NOT NULL DEFAULT ''")
             db.execute("UPDATE jobs SET status='failed',error='服务已重启，原记录保留，请继续任务',updated=? WHERE status IN ('queued','running')", (time.time(),))
+
+    def runtime(self):
+        from fish_agent import get_runtime
+        return get_runtime(self.root)
 
     def chat(self):
         with self._lock:
@@ -588,9 +594,11 @@ class Workbench:
                 wanted.append(value)
         chat = self.chat()
         removed = {'conversations': 0, 'messages': 0, 'conversation_ids': []}
+        # The main execution owns the running turn; ask it, not a page-local flag.
+        active = self.runtime().execution.active_conversation() or chat.active_cid
+        if active and active in wanted:
+            raise ValueError('这个会话正在回复，请先取消再删除')
         with chat._state_lock:
-            if chat.active_cid and chat.active_cid in wanted:
-                raise ValueError('这个会话正在回复，请先取消再删除')
             conn = chat.connect()
             try:
                 for cid in wanted:
@@ -1196,40 +1204,40 @@ class Workbench:
                         raise ValueError('请求编号已用于另一会话')
                     return {'job_id': job, 'status': old['status']}
                 db.execute('INSERT INTO jobs(id,conversation,status,created,updated) VALUES(?,?,?,?,?)', (job, cid, 'queued', now, now))
-            with self._lock:
-                self._job_cancels[job] = threading.Event()
             try:
                 message_id = self.chat().receive(cid, text, attachments)
                 with database(self.path) as db:
                     db.execute('UPDATE jobs SET input_message=? WHERE id=?', (message_id, job))
+                # One main execution owns the turn: the same submission reference goes
+                # to its ledger, and the client polls that real status, not a copy.
+                submission = self.runtime().execution.submit(
+                    source='desktop', conversation=cid, message=message_id, text=text,
+                    reference='desktop:' + str(message_id), request=job)
+                with database(self.path) as db:
+                    db.execute('UPDATE jobs SET execution=? WHERE id=?', (submission.get('execution', ''), job))
             except Exception as exc:
                 with database(self.path) as db:
                     db.execute("UPDATE jobs SET status='failed',error=?,updated=? WHERE id=?", (str(exc)[:500], time.time(), job))
-                with self._lock:
-                    self._job_cancels.pop(job, None)
                 raise
-            self._executor.submit(self._send, job, cid, text, attachments, message_id)
-            return {'job_id': job, 'status': 'queued'}
+            return {'job_id': job, 'status': submission.get('status', 'queued')}
         if action == 'chat.job':
             with database(self.path) as db:
                 row = db.execute('SELECT * FROM jobs WHERE id=?', (params['job_id'],)).fetchone()
             if row is None:
                 raise ValueError('任务不存在')
-            return dict(row)
+            result = dict(row)
+            execution = str(result.get('execution') or '')
+            if execution:
+                live = self.runtime().execution.job_status(execution)
+                result['status'] = live['status']
+                result['error'] = live.get('error') or ''
+                result['execution'] = live.get('execution') or execution
+                result['elapsed_ms'] = live.get('elapsed_ms', 0)
+            return result
         if action == 'chat.cancel':
             cid = str(params['id'])
-            chat = self.chat()
-            with chat._state_lock:
-                with database(self.path) as db:
-                    rows = db.execute("SELECT id FROM jobs WHERE conversation=? AND status IN ('queued','running')", (cid,)).fetchall()
-                    db.execute("UPDATE jobs SET status='cancelled',updated=? WHERE conversation=? AND status='queued'", (time.time(), cid))
-                # A worker may have claimed the job just before DesktopChat.send.
-                # Its event is already registered, so cancellation cannot be lost.
-                with self._lock:
-                    for row in rows:
-                        if row['id'] in self._job_cancels and not (chat.active_cid == cid and chat._committed):
-                            self._job_cancels[row['id']].set()
-                return chat.cancel() if chat.active_cid == cid else {'ok': True}
+            info = self.runtime().execution.cancel(cid)
+            return {'ok': True, **info}
         if action.startswith('library.'):
             from doc_store import delete_doc, doc_detail, ingest, list_docs
             from doc_store import search as search_documents
@@ -1447,31 +1455,8 @@ class Workbench:
             raise ValueError(str(result.get('reason') or '事件没有更新成功'))
         return self.life_events({'limit': params.get('limit', 20)})
 
-    def _send(self, job, cid, text, attachments, message_id=None):
-        with database(self.path) as db:
-            changed = db.execute("UPDATE jobs SET status='running',updated=? WHERE id=? AND status='queued'", (time.time(), job)).rowcount
-            if not changed:
-                with self._lock:
-                    self._job_cancels.pop(job, None)
-                return
-        try:
-            with self._lock:
-                cancelled = self._job_cancels.setdefault(job, threading.Event())
-            self.chat().send(cid, text, attachments, cancelled=cancelled, message_id=message_id)
-        except Exception as error:
-            from dsh_web import safe_runtime_error
-            state = 'cancelled' if isinstance(error, InterruptedError) else 'failed'
-            message = safe_runtime_error(str(error) or type(error).__name__)
-        else:
-            state, message = 'complete', ''
-        with database(self.path) as db:
-            db.execute('UPDATE jobs SET status=?,error=?,updated=? WHERE id=?', (state, message, time.time(), job))
-        with self._lock:
-            self._job_cancels.pop(job, None)
-
     def close(self):
         if self._delegation_instance:
             self._delegation_instance.close()
         if self._chat_instance:
             self._chat_instance.cancel()
-        self._executor.shutdown(wait=False, cancel_futures=True)

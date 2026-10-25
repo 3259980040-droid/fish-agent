@@ -63,6 +63,8 @@ def main():
         finally:
             if getattr(host, '_workbench', None):
                 host._workbench.close()
+            if getattr(host, 'runtime', None):
+                host.runtime.stop()
             if getattr(host,'scheduler_thread',None):
                 host.scheduler_thread.join()
             host.computer.interaction.close()

@@ -34,15 +34,6 @@ class ExperienceTurn:
                        (self.id, self.session, self.reference, source['current_event']['time'], None, None, None, None, 'running', ''))
         return history, source
 
-    def updates(self, cancelled=None):
-        history, source = self.context.history(self.conversation, self.message, None, None, cancelled, after=self.positions, event=self.event)
-        self.positions = source['positions']
-        # These arrived after the snapshot while tools were executing. They are
-        # live inputs for this thought, rather than another independent generation.
-        for message in history:
-            message['_fish_layer'] = 0
-        return history
-
     def requested(self, report):
         with database(self.ledger) as db:
             db.execute('UPDATE experience_turns SET started=COALESCE(started,?) WHERE id=?', (time.time(), self.id))

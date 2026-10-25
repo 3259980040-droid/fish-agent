@@ -205,11 +205,3 @@ def thinking_slot(root, role, cancelled=None, *, key=None):
         with condition:
             queue.remove(ticket)
             condition.notify_all()
-
-
-def serial_thinking(function):
-    @functools.wraps(function)
-    def run(root, role, *args, **kwargs):
-        with thinking_slot(root, role, kwargs.get('cancelled'), key=kwargs.get('execution_key')):
-            return function(root, role, *args, **kwargs)
-    return run
