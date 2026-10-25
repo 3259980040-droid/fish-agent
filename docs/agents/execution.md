@@ -18,3 +18,9 @@
 初始实例`main`归在`data/instances/main`；首次新版本初始化在停服维护时搬接既有可变数据，`data/host/initial-migration.json`记录实际移动及结构化文件引用更新。程序、端口、模型凭据、账号连接、MCP应用保留宿主位置；旧测试space仅保留为初始实例历史资料，不当作新实例。当前票只在临时根执行迁接，生产维护留最终部署。
 
 窗口工作台动作以params.instance_id定位，`instances.list`为宿主动作。所有入口未显式指定时只落稳定初始实例，永远不从当前前端选中值推断目标。
+
+## QQ执行结果监听
+
+`QQAgentLoop.watch_turn(execution, source=..., chat=..., instance=runtime.context)`在QQ事件循环调用，返回已创建的Task；也接受实例root。监听固定该实例的状态请求和管理员日志，完成后自动移出生命周期集合，QQ停机由原stop取消并等待。阻塞提交在线程结束后回到事件循环再调监听；私聊沿watch_private使用同一入口。
+
+W03逐实例保存原消息、提交后，用对应runtime.context和execution调用此入口。监听只读取原执行记录并写所属实例管理员日志，不改QQStore消息；原消息的runtime_turn_id等写回由提交方使用所属实例QQStore负责，不使用共享连接的默认Store覆写另一实例记录。开始/结束、工具与投递事实仍由原turn_view/trace读取。

@@ -92,23 +92,9 @@ def run_model_loop(root, role, *, persona, history, history_source, memory, scop
         if cancelled is not None and cancelled.is_set():
             raise InterruptedError('本轮聊天已取消，未继续生成或调用工具')
         budget_report = budget.fit(messages, tool_list, options.max_tokens)
-        preview = []
-        for message in messages:
-            body = message.get('content') or ''
-            if isinstance(body, list):
-                body = [({'type': 'image_url', 'omitted': '附件数据'} if block['type'] == 'image_url'
-                         else {'type': 'text', 'text': block['text'][:1000]}) for block in body]
-            else:
-                body = body[:2000]
-            preview.append({**{k: v for k, v in message.items() if k in ('role', 'tool_calls', 'tool_call_id')},
-                            'content': body})
-        from request_inspector import RequestInspector
-        RequestInspector(root).capture(role, {'session': session, 'scope': scope},
-            {'provider': gateway.base, 'model': gateway.model, 'purpose': origin, 'messages': preview[-30:],
-             'system': request['sources'], 'tools': tool_list or [], 'maxTokens': options.max_tokens,
-             'effort': options.effort, 'context_budget': budget_report,
-             'omitted': {'preview': '快照只截取文字，完整组装结果与工具结果见 messages',
-                         'tools': '工具目录取自 tool_host.builtins；本轮实际公布的工具见 tools，执行结果见 messages'}})
+        # RequestInspector is an optional administrator diagnostic. The real input
+        # boundaries, trace and usage below own this turn's records; a debug copy
+        # must never be a prerequisite for either a request or its tool continuation.
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break

@@ -1447,7 +1447,7 @@ class Workbench:
         owner = str(config.get('allowlist', {}).get('owner_id', ''))
         if not owner:
             configuration.append({'source': 'owner_private', 'code': 'owner_missing',
-                                  'reason': '尚未绑定主人 QQ 账号，主人私聊和系统故障通知不能发送'})
+                                  'reason': '尚未绑定主人 QQ 账号，主人私聊不能发送'})
         context = project_path(self.root, 'data/social/context.db')
         if not context.is_file():
             configuration.append({'source': 'owner_private', 'code': 'persona_missing',
