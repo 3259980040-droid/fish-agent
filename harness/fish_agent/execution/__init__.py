@@ -463,6 +463,9 @@ class ExecutionModule:
                 runtime.experience.record_result(run, st.SILENT)
             except Exception:
                 pass
+            # A deliberate silence is a completed turn that already read its material:
+            # its files belong to it and must not be re-read in a later unrelated turn.
+            outcome_ok = True
             self._finish(run, st.SILENT, result={'silent': True, 'note': str(exc)})
         except InterruptedError as exc:
             error = str(exc) or '本轮已取消'

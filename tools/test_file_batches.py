@@ -210,6 +210,37 @@ class BatchTurnTests(unittest.TestCase):
             row = wb.dispatch('chat.job', {'job_id': job_id})
         return row
 
+    def test_a_deliberate_silent_file_turn_still_consumes_its_batch(self):
+        # The model reads the file and chooses not to speak: that turn already used the
+        # batch, so a later text turn must not receive the same file again.
+        fake = self.gateway([final(''), saying('文件里是一句静默批次的测试内容'), final('')])
+        wb = Workbench(self.root)
+        cid = wb.dispatch('chat.new', {'title': '静默批次'})['id']
+        path = self.root / 'quiet.txt'
+        path.write_text('静默批次的文件内容', encoding='utf-8')
+        first = wb.dispatch('chat.send', {'id': cid, 'text': '看看这个文件',
+                                          'attachments': [{'path': str(path), 'type': 'file'}],
+                                          'request_id': uuid.uuid4().hex})
+        settled = self.wait_job(wb, first['job_id'])
+        self.assertEqual(settled['status'], 'complete', settled)
+        batches = wb.dispatch('attachments.batches', {'id': cid})['batches']
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(batches[0]['state'], 'consumed')
+        view = wb.dispatch('turn.view', {'execution': settled['execution']})
+        self.assertTrue(view['silent'])
+        # A later text-only turn does not inherit the file.
+        second = wb.dispatch('chat.send', {'id': cid, 'text': '刚才那个文件里写了什么？',
+                                           'request_id': uuid.uuid4().hex})
+        second_settled = self.wait_job(wb, second['job_id'])
+        self.assertEqual(second_settled['status'], 'complete')
+        with database(self.root / 'data/social/experience.db') as db:
+            runs = [dict(row) for row in db.execute('SELECT * FROM agent_runs ORDER BY created')]
+        self.assertEqual(runs[1]['status'], st.COMPLETE)
+        self.assertEqual(runs[1]['error'], '')  # it ran, rather than being merged away
+        # The silent turn consumed the batch; the next turn is handed no batch of its own.
+        self.assertEqual(wb.dispatch('turn.view', {'execution': second_settled['execution']})['batches'], [])
+        self.assertEqual(wb.dispatch('attachments.batches', {'id': cid})['batches'][0]['state'], 'consumed')
+
     def test_two_files_in_one_window_are_handled_by_one_turn(self):
         fake = self.gateway([saying('收到两个文件'), final('')])
         wb = Workbench(self.root)
