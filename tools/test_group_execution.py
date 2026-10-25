@@ -315,6 +315,43 @@ class GroupExecutionTests(unittest.TestCase):
             self.assertEqual(settled['status'], st.FAILED, (source, settled))
             self.assertNotIn('未知输入来源', settled['error'])
 
+    def test_a_transport_group_turn_keeps_its_place_for_a_later_wake(self):
+        runtime = get_runtime(self.root)
+        runtime.start()
+        self.host.runtime = runtime
+        row, payload = self.inbound('@我 在吗', 'gm-place', mention=True)
+        body = {'source': 'qq-group', 'conversation': self.conversation['id'],
+                'message': str(row), 'text': '@我 在吗', 'place': CHAT,
+                'reference': 'qq:' + str(row), 'kind': 'message', 'payload': payload}
+        self.gateway([saying('在的'), final(''), saying('自主看一眼'), final('')])
+        result = self.host.dispatch('/submit', body, role='qq', admin=True)
+        settled = self.wait_run(runtime, result['execution'])
+        self.assertEqual(settled['status'], st.COMPLETE, settled)
+        with database(self.root / 'data/social/experience.db') as db:
+            place = db.execute('SELECT place FROM agent_inputs WHERE reference=?',
+                               ('qq:' + str(row),)).fetchone()[0]
+        self.assertEqual(place, CHAT)
+        # The 45-minute wake after a group input must build group materials, not fail
+        # with "自主回合缺少群场所" because the transport dropped the place.
+        deadline = time.time() + 5
+        start = runtime.state.get_state('auto_deadline')
+        while runtime.state.get_state('auto_deadline') == start and time.time() < deadline:
+            time.sleep(0.05)
+        runtime.state.set_state('auto_deadline', str(time.time() - 1))
+        wake_deadline = time.time() + 15
+        timer = None
+        while time.time() < wake_deadline:
+            with database(self.root / 'data/social/experience.db') as db:
+                found = db.execute("SELECT id FROM agent_runs WHERE kind='timer' ORDER BY created DESC LIMIT 1").fetchone()
+            if found:
+                timer = found[0]
+                break
+            time.sleep(0.1)
+        self.assertIsNotNone(timer, 'the clock should have started a group wake')
+        view = self.wait_run(runtime, timer)
+        self.assertEqual(view['status'], st.COMPLETE, view)
+        self.assertEqual(view['place'], CHAT)
+
     def test_a_paused_or_reply_off_group_never_reaches_a_turn(self):
         from qq_agent_loop import QQAgentLoop
         loop = QQAgentLoop(self.root)
