@@ -66,13 +66,8 @@ class ExperienceTurn:
             return
         self._compaction_decided = True
         try:
-            from fish_agent.experience.compaction import request, select_region
-            region = select_region(self.surface, tokens, int(retain or 0))
-            if region is None:
-                return
-            outcome = request(self.root, source=self.path, conversation=self.conversation,
-                              through=region['through'], pressure=int(pressure),
-                              threshold=int(threshold), retain=int(retain or 0), reason='pressure')
+            from fish_agent.experience.compaction import request, select_regions
+            regions = select_regions(self.surface, tokens, int(retain or 0))
         except Exception as exc:
             # A configuration or storage problem must not turn the owner's turn into a
             # failure; it is audited and this range stays unscheduled.
@@ -83,7 +78,24 @@ class ExperienceTurn:
             except Exception:
                 pass
             return
-        self.compaction_request = outcome
+        queued = []
+        for region in regions:
+            # Each region belongs to its own original store and conversation: its
+            # progress must not be written under the asking place's database.
+            try:
+                queued.append(request(self.root, source=region['source'],
+                                      conversation=region['conversation'] or self.conversation,
+                                      through=region['through'], pressure=int(pressure),
+                                      threshold=int(threshold), retain=int(retain or 0),
+                                      reason='pressure'))
+            except Exception as exc:
+                from governance import Governance
+                try:
+                    Governance(self.root).audit('context.compaction.request',
+                                                '自动压缩没有入队，本轮对话继续', str(exc)[:200])
+                except Exception:
+                    pass
+        self.compaction_request = queued
 
     def received(self, first_output_at=None):
         self.covered.update(self.pending)

@@ -120,35 +120,62 @@ def _cost(node, tokens):
     return int(tokens(node.get('text')) or 0)
 
 
-def select_region(surface, tokens, retain_tokens):
-    """DSH selectCompactableRange over the current place's original records.
+def _groups(surface):
+    """Original layer-1 nodes of each store+conversation, keeping surface order."""
+    groups = {}
+    for node in surface:
+        if int(node.get('layer') or 0) != 1 or not node.get('source') or not node.get('id'):
+            continue
+        key = (str(node.get('source')), str(node.get('conversation') or ''))
+        groups.setdefault(key, []).append(node)
+    return groups
 
-    Walks the priced surface from the newest end, keeping at least ``retain_tokens``
-    of the recent conversation verbatim, then moves the boundary earlier until it no
-    longer splits a bundle or a tool pair. Returns the complete older range, or None
-    when nothing may be compacted.
-    """
-    points = [index for index, node in enumerate(surface)
-              if int(node.get('layer') or 0) == 1 and node.get('source') and node.get('id')]
-    if not points:
+
+def _select_one(nodes, tokens, retain_tokens):
+    """DSH range selection over one place's own nodes, or None when nothing may go."""
+    if not nodes:
         return None
     retain_tokens = max(0, int(retain_tokens or 0))
     accumulated = 0
-    keep = len(points)
-    for position in range(len(points) - 1, -1, -1):
-        accumulated += _cost(surface[points[position]], tokens)
+    keep = len(nodes)
+    for position in range(len(nodes) - 1, -1, -1):
+        accumulated += _cost(nodes[position], tokens)
         keep = position
         if accumulated >= retain_tokens:
             break
     if keep <= 0:
         return None
-    while keep > 0 and not balanced_before(surface, points[keep]):
+    while keep > 0 and not balanced_before(nodes, keep):
         keep -= 1
     if keep <= 0:
         return None
-    chosen = [surface[points[position]] for position in range(keep)]
+    chosen = nodes[:keep]
     return {'nodes': chosen, 'through': max(int(node['id']) for node in chosen),
             'tokens': sum(_cost(node, tokens) for node in chosen)}
+
+
+def select_region(surface, tokens, retain_tokens):
+    """The first place's complete older range; kept for single-store callers/tests."""
+    for (source, conversation), nodes in _groups(surface).items():
+        region = _select_one(nodes, tokens, retain_tokens)
+        if region:
+            return {**region, 'source': source, 'conversation': conversation}
+    return None
+
+
+def select_regions(surface, tokens, retain_tokens):
+    """One complete older range per original store+conversation.
+
+    A shared experience view may hold several places' records; a compressed range
+    must never span two stores or two conversations, because its progress and
+    checkpoint belong to exactly one of them.
+    """
+    regions = []
+    for (source, conversation), nodes in _groups(surface).items():
+        region = _select_one(nodes, tokens, retain_tokens)
+        if region:
+            regions.append({**region, 'source': source, 'conversation': conversation})
+    return regions
 
 
 # ------------------------------------------------------- checkpoint/progress reads
