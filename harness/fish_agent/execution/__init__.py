@@ -346,11 +346,11 @@ class ExecutionModule:
             conversation = self.state.get_state('followup_conversation')
             place = self.state.get_state('followup_place')
             if source:
-                return {'source': source, 'conversation': conversation, 'place': place or source}
+                return self._thinking_place({'source': source, 'conversation': conversation,
+                                             'place': place or source})
         latest = self.state.latest_place()
         if latest and latest.get('source'):
-            return {'source': str(latest['source']), 'conversation': str(latest.get('conversation') or ''),
-                    'place': str(latest.get('place') or latest['source'])}
+            return self._thinking_place(latest)
         # Nothing has ever been said: the owner's private chat is still the home place.
         from governance import Governance
         from qq_store import QQStore
@@ -359,6 +359,18 @@ class ExecutionModule:
             return {'source': '', 'conversation': '', 'place': ''}
         conversation = QQStore(self.root).get_or_create_conversation('private:' + owner, 'qq')['id']
         return {'source': 'qq-private', 'conversation': conversation, 'place': 'private:' + owner}
+
+    @staticmethod
+    def _thinking_place(row):
+        """A plan is a trigger; its target is the place of its later self-wakes."""
+        source = str(row.get('source') or '')
+        place = str(row.get('place') or source)
+        if source == 'plan':
+            if place.startswith('group:'):
+                source = 'qq-group'
+            elif place.startswith('private:'):
+                source = 'qq-private'
+        return {'source': source, 'conversation': str(row.get('conversation') or ''), 'place': place}
 
     def _consume(self):
         while not self._stop.is_set():
@@ -525,9 +537,10 @@ class ExecutionModule:
             if (self.state.get_state('followup_pending') == '1'
                     and self.state.get_state('followup_from') == run['id']):
                 self.state.set_state('followup_due', str(time.time() + FOLLOWUP_DELAY_S))
-                self.state.set_state('followup_source', str(run['source']))
-                self.state.set_state('followup_conversation', str(run['conversation']))
-                self.state.set_state('followup_place', str(run.get('place') or ''))
+                place = self._thinking_place(run)
+                self.state.set_state('followup_source', place['source'])
+                self.state.set_state('followup_conversation', place['conversation'])
+                self.state.set_state('followup_place', place['place'])
             self.state.set_state('followup_pending', '0')
             self.state.set_state('followup_from', '')
         self.state.set_state('auto_deadline', str(time.time() + AUTO_INTERVAL_S))

@@ -95,7 +95,6 @@ def submit(loop, item):
         raise
     loop.store.update_message(item['message_id'], status='submitted',
                               runtime_turn_id=submission.get('execution', ''))
-    loop.watch_private(submission.get('execution', ''), item)
     return submission
 
 
@@ -124,10 +123,14 @@ async def handle(loop, item):
     if intent['kind'] == 'CLARIFY':
         await reply(loop, item, intent['text'], 'owner-task-clarify:' + str(item['message_id']))
         return None
-    return await asyncio.to_thread(submit, loop, item)
+    submission = await asyncio.to_thread(submit, loop, item)
+    # submit performs blocking transport work in a thread. The existing watcher
+    # must be scheduled here, on the QQ event loop that owns its lifecycle.
+    loop.watch_private(submission.get('execution', ''), item)
+    return submission
 
 
-async def reply(loop, item, text, key, *, turn='', inbound_status='processed', _system_fault=False):
+async def reply(loop, item, text, key, *, turn='', inbound_status='processed'):
     if loop.private_cancel.is_set():
         raise InterruptedError('本轮回复已取消')
     cid, target = item['conversation']['id'], item['payload']['chat_id']
@@ -137,13 +140,9 @@ async def reply(loop, item, text, key, *, turn='', inbound_status='processed', _
     outbound = [loop.store.record_message(cid, target, 'bot', 'outbound', '', None,
         entry['segments'], bubble.get('text') or '[表情:'+bubble['emoji_id']+']', 'pending', runtime_turn_id=turn) for bubble, entry in zip(bubbles, plan)]
     try:
-        # A system fault receipt has no persona window or fabricated inbound message.
-        # It still uses this sender, its owner-only target and the ordinary send gate.
-        validate = (lambda: target == 'private:' + loop.owner and loop.governance.is_owner(loop.owner)
-                    and not loop.governance.config()['paused']) if _system_fault else lambda: window_current(loop, item)
+        validate = lambda: window_current(loop, item)
         from experience import delivery
-        if not _system_fault:
-            delivery(loop.root, 'qq:' + str(item['message_id']), sending=True)
+        delivery(loop.root, 'qq:' + str(item['message_id']), sending=True)
         result = await loop._deliver_reply(target, [], key, loop.private_cancel,
             validate=validate, validation_error=WINDOW_CHANGED, bubble_plan=plan)
     except Exception as exc:
@@ -170,41 +169,16 @@ async def reply(loop, item, text, key, *, turn='', inbound_status='processed', _
         loop.store.update_message(mid, status=bubble_state, error=bubble_error if bubble_state != 'sent' else '',
             channel_message_id=ids[-1] if ids else '', cancelled=bubble_state == 'cancelled',
             segments=[{**part, 'delivery': detail_bubble} for part in plan[index]['segments']])
-    if not _system_fault:
-        from experience import delivery
-        delivery(loop.root,'qq:'+str(item['message_id']),outcome=state,error=error)
-    if _system_fault:
-        item['_fault_receipt'] = {'sent': bool(result.get('ok')), 'uncertain': state == 'uncertain'}
-    else:
-        loop.store.update_message(item['message_id'], status=inbound_status if result.get('ok') else state, error=error,
-                                  cancelled=state == 'cancelled')
+    from experience import delivery
+    delivery(loop.root,'qq:'+str(item['message_id']),outcome=state,error=error)
+    loop.store.update_message(item['message_id'], status=inbound_status if result.get('ok') else state, error=error,
+                              cancelled=state == 'cancelled')
     if turn:
         loop.store.finish_turn(turn, 'done' if result.get('ok') else 'cancelled' if state == 'cancelled' else 'send_failed',
                                error=error, assistant_message_id=receipt)
     return {'ok': bool(result.get('ok')), 'state': state, 'error': error,
             'receipt': {'message_id': receipt,
                         'message_ids': [item['message_ids'] for item in receipts if item.get('message_ids')]}}
-
-
-async def fault_notice(loop, fault, token, *, recovered=False):
-    """Explicit system notice, never a model utterance or a second send channel."""
-    if not loop.owner or not loop.governance.is_owner(loop.owner):
-        return {'sent': False, 'uncertain': False}
-    cfg = loop.governance.config()
-    if cfg['paused'] or not cfg['send_policy']['owner_private']['owner_reply']:
-        return {'sent': False, 'uncertain': False}
-    conversation = loop.conversation or loop.store.get_or_create_conversation('private:' + loop.owner, loop.agent_id)
-    item = {'conversation': conversation, 'payload': {'chat_id': 'private:' + loop.owner}}
-    label = '本阶段已恢复' if recovered else '故障'
-    recovery = '此阶段后续调用已经实际成功，连续失败已清零。'
-    if fault.get('uncertain'):
-        recovery += '原条消息的送达结果仍未确认，没有自动重发。'
-    text = ('系统故障通知：' + label + '\n来源：' + fault['source'] + '\n阶段：' + fault['stage']
-            + '\n' + (recovery if recovered else fault['reason'])
-            + '\n累计失败：' + str(fault['total']) + ' 次；连续失败：' + str(fault['consecutive'])
-            + ' 次。详情可在 Fish 设置的故障状态查看。')
-    await reply(loop, item, text, 'system-fault:' + token, _system_fault=True)
-    return item.get('_fault_receipt', {'sent': False, 'uncertain': False})
 
 
 async def deliveries(loop):
