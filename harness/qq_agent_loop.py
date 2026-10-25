@@ -455,7 +455,7 @@ class QQAgentLoop:
         from tool_host import request
         body = {'source': 'qq-group',
                 'conversation': self._group_conversation(chat),
-                'message': message, 'text': text,
+                'message': message, 'text': text, 'place': chat,
                 'reference': 'qq:' + str(message), 'kind': 'message',
                 'payload': {key: payload.get(key) for key in
                             ('chat_id', 'message_id', 'sender', 'segments', 'reply_to', 'text',

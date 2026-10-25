@@ -46,6 +46,29 @@ STATE = """CREATE TABLE IF NOT EXISTS agent_state(
     value TEXT NOT NULL DEFAULT '',
     updated REAL NOT NULL)"""
 
+BATCHES = """CREATE TABLE IF NOT EXISTS agent_batches(
+    id TEXT PRIMARY KEY,
+    place TEXT NOT NULL,
+    anchor REAL NOT NULL,
+    window_index INTEGER NOT NULL,
+    opens REAL NOT NULL,
+    closes REAL NOT NULL,
+    state TEXT NOT NULL,
+    run TEXT NOT NULL DEFAULT '')"""
+
+BATCH_ITEMS = """CREATE TABLE IF NOT EXISTS agent_batch_items(
+    batch TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    reference TEXT NOT NULL,
+    resource TEXT NOT NULL DEFAULT '',
+    received REAL NOT NULL,
+    PRIMARY KEY(batch, reference, resource))"""
+
+BATCH_PLACES = """CREATE TABLE IF NOT EXISTS agent_batch_places(
+    place TEXT PRIMARY KEY,
+    anchor REAL NOT NULL,
+    last_index INTEGER NOT NULL)"""
+
 WAKES = """CREATE TABLE IF NOT EXISTS agent_wakes(
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -53,7 +76,7 @@ WAKES = """CREATE TABLE IF NOT EXISTS agent_wakes(
     created REAL NOT NULL,
     claimed_run TEXT NOT NULL DEFAULT '')"""
 
-TABLES = (INPUTS, RUNS, WAKES, STATE)
+TABLES = (INPUTS, RUNS, WAKES, STATE, BATCHES, BATCH_ITEMS, BATCH_PLACES)
 
 
 def path(root) -> Path:

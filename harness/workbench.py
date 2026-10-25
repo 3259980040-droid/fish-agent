@@ -1125,6 +1125,11 @@ class Workbench:
                 return store.upload_status(cid, params['upload_id'])
             if action == 'attachments.import':
                 raise ValueError('整份base64导入入口已退役，请使用当前客户端分块导入')
+            if action == 'attachments.batches':
+                source = str(params.get('source') or 'desktop')
+                place = source + ':' + cid
+                return {'place': place, 'batches': self.runtime().experience.batches.state(place),
+                        'limits': store.limits()}
             if action == 'attachments.list':
                 return store.list(cid)
             if action == 'attachments.search':
@@ -1212,7 +1217,7 @@ class Workbench:
                 # to its ledger, and the client polls that real status, not a copy.
                 submission = self.runtime().execution.submit(
                     source='desktop', conversation=cid, message=message_id, text=text,
-                    reference='desktop:' + str(message_id), request=job)
+                    reference='desktop:' + str(message_id), request=job, place='desktop')
                 with database(self.path) as db:
                     db.execute('UPDATE jobs SET execution=? WHERE id=?', (submission.get('execution', ''), job))
             except Exception as exc:

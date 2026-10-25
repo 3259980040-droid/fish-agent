@@ -303,6 +303,7 @@ class QQPrivateFlowTests(unittest.TestCase):
         class Loop:
             root = self.root
             store = self.store
+            owner = OWNER
 
             def watch_private(self, execution, item):
                 calls.append(('watch', execution, item['message_id']))

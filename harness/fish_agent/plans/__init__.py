@@ -48,7 +48,7 @@ class PlansModule:
             result = self.runtime.execution.submit(
                 source='plan', kind='plan', conversation=conversation,
                 reference='plan:%s:%s' % (schedule_id, slot),
-                reason=str(row.get('title') or '计划到期'),
+                reason=str(row.get('title') or '计划到期'), place=target,
                 payload={'schedule_id': schedule_id, 'slot': slot, 'target': target,
                          'purpose': str(row.get('purpose') or 'reminder')})
             submitted.append({'schedule_id': schedule_id, 'slot': slot,

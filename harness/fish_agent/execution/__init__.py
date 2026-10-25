@@ -291,6 +291,8 @@ class ExecutionModule:
             self._cancels[run['id']] = cancel
         self._active = run['id']
         self_run = str(run['kind']) in ('timer', 'followup')
+        materials = {}
+        outcome_ok = False
         try:
             if not inputs and not self_run:
                 runtime.experience.record_result(run, st.CANCELLED)
@@ -301,8 +303,14 @@ class ExecutionModule:
                 self._finish(run, st.CANCELLED, error_kind='InterruptedError',
                              error='后台正在关闭，这次提交没有开始')
                 return
-            materials = {}
-
+            references = [str(row.get('reference') or '') for row in inputs]
+            if references and all(runtime.experience.batches.covered([ref]) for ref in references):
+                # The files of this input were already handed to the turn that owned
+                # their 3-second batch; the batch is handled once, not re-generated.
+                runtime.experience.record_result(run, st.SILENT)
+                self._finish(run, st.SILENT, result={'merged': True,
+                                                     'note': '同批文件已由上一回合统一处理'})
+                return
             def prepare():
                 materials.update(runtime.experience.prepare(run, inputs, cancel))
                 return materials
@@ -349,6 +357,7 @@ class ExecutionModule:
                 delivered = runtime.delivery.submit_qq(run, answer, message_id=str(inputs[-1]['message']),
                                                        previewed=previewed, cancelled=cancel)
             runtime.experience.record_result(run, st.COMPLETE)
+            outcome_ok = True
             self._finish(run, st.COMPLETE, result={'delivery': delivered}, delivered=delivered)
         except TurnSilent as exc:
             try:
@@ -371,6 +380,10 @@ class ExecutionModule:
                 pass
             self._finish(run, st.FAILED, error=error, error_kind=type(exc).__name__)
         finally:
+            try:
+                self.runtime.experience.batches.finish(materials.get('batch_ids') or [], ok=outcome_ok)
+            except Exception:  # noqa: BLE001 - a batch bookkeeping miss cannot undo the turn
+                pass
             self._finish_clock(run)
             self._active = ''
             with self._cancels_lock:

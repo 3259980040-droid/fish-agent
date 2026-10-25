@@ -84,6 +84,7 @@ def submit(loop, item):
     body = {'source': 'qq-private', 'conversation': item['conversation']['id'],
             'message': item['message_id'], 'text': item['text'],
             'reference': 'qq:' + str(item['message_id']),
+            'place': 'private:' + str(loop.owner),
             'payload': {'chat_id': item['payload'].get('chat_id', ''),
                         'reply_to': item['payload'].get('reply_to') or ''}}
     try:

@@ -10,19 +10,52 @@ import json
 from pathlib import Path
 
 from . import context
+from .batches import BatchLog
 
 
 class ExperienceModule:
     def __init__(self, runtime):
         self.runtime = runtime
         self.root = Path(runtime.root)
+        self.batches = BatchLog(self.root)
 
     def record(self, *, reference, source, conversation='', message='', place='', text='', payload=None,
                kind='message'):
         """Register one received event in the unified order; a repeat is not counted twice."""
-        return self.runtime.state.record_input(
+        event = self.runtime.state.record_input(
             reference=reference, kind=kind, source=source, conversation=conversation,
             message=message, place=place, text=text, payload=payload)
+        self.register_files(event)
+        return event
+
+    def register_files(self, event):
+        """Register each received file in its place's fixed 3-second window.
+
+        The registration uses the input's own reception time, so a slow download can
+        never move a file into a later batch. A text-only input registers nothing.
+        """
+        from .batches import file_segments, resource_of
+        segments = self._segments(event)
+        files = file_segments(segments)
+        if not files:
+            return []
+        batch_place = '%s:%s' % (event.get('source') or '', event.get('conversation') or '')
+        ids = []
+        for index, segment in enumerate(files):
+            ids.append(self.batches.register(place=batch_place, reference=event['reference'],
+                                             resource=resource_of(segment) + '#' + str(index),
+                                             received=float(event['received'])))
+        return ids
+
+    def _segments(self, event):
+        from .batches import load_segments
+        try:
+            payload = json.loads(event.get('payload') or '{}')
+        except (TypeError, ValueError):
+            payload = {}
+        if isinstance(payload, dict) and isinstance(payload.get('segments'), list):
+            return [item for item in payload['segments'] if isinstance(item, dict)]
+        return load_segments(self.root, event.get('reference') or '')
 
     def prepare(self, run, inputs, cancelled=None):
         """Assemble the materials of one claimed turn, with their real source references."""

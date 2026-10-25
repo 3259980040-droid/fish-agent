@@ -140,8 +140,11 @@ def desktop_materials(runtime, run, inputs, cancelled=None):
     media = MediaService(root, role)
     if space:
         media.directory = SocialContext(root).directory(space['id']) / 'media'
-    content = media.prepare_content(imported, text or '请查看附件。', local=True, cancelled=cancelled,
-                                    include_sources=True, source_reference='desktop:' + message)
+    extra, batch_ids = batch_materials(runtime, source='desktop', conversation=conversation,
+                                       run=run, current_segments=imported)
+    content = media.prepare_content([*imported, *extra], text or '请查看附件。', local=True,
+                                    cancelled=cancelled, include_sources=True,
+                                    source_reference='desktop:' + message)
     from owner_private import note_media_gaps
     note_media_gaps(imported, content, Governance(root, role))
     context = DesktopContext(root, client.path, channel='desktop')
@@ -173,7 +176,7 @@ def desktop_materials(runtime, run, inputs, cancelled=None):
             'emoji_state': {'previewed': set(), 'tools': []}, 'tool_context': tool_context,
             'delivery_required': False, 'experience': experience_turn,
             'trace_reference': source['current_reference'],
-            'conversation': conversation, 'message': message}
+            'conversation': conversation, 'message': message, 'batch_ids': batch_ids}
 
 
 def group_materials(runtime, run, inputs, cancelled=None):
@@ -230,11 +233,16 @@ def group_materials(runtime, run, inputs, cancelled=None):
     current = [{'type': 'text', 'text': '[本轮来信] ' + json.dumps(event_body, ensure_ascii=False) +
                 ('\n引用：' + json.dumps(quote, ensure_ascii=False) if quote else '')},
                {'type': 'text', 'text': current_text}]
+    notes, batch_ids = batch_note(runtime, source='qq-group', conversation=conversation, run=run,
+                                  current_segments=payload.get('segments') or [])
+    if notes:
+        current.append({'type': 'text', 'text': '[本轮同批文件；原件和实际读取范围按资源引用查看] '
+                         + json.dumps(notes, ensure_ascii=False)})
     return {'persona': persona, 'history': history, 'history_source': source, 'memory': memory_text,
             'scope': 'chat:' + chat, 'references': references, 'current': current, 'session': session,
             'emoji_state': {'previewed': set(), 'tools': []}, 'tool_context': 'group',
             'delivery_required': False, 'experience': experience_turn,
-            'trace_reference': source['current_reference'],
+            'trace_reference': source['current_reference'], 'batch_ids': batch_ids,
             'conversation': conversation, 'message': str(event['message']), 'chat': chat}
 
 
@@ -278,8 +286,10 @@ def qq_private_materials(runtime, run, inputs, cancelled=None):
     client.status(message, 'processing', turn=run['id'])
     client.begin_turn(run['id'], conversation)
     media = MediaService(root, role)
-    content = media.prepare_content(segments, text, cancelled=cancelled, include_sources=True,
-                                    source_reference='qq:' + message)
+    extra, batch_ids = batch_materials(runtime, source='qq-private', conversation=conversation,
+                                       run=run, current_segments=segments)
+    content = media.prepare_content([*segments, *extra], text, cancelled=cancelled,
+                                    include_sources=True, source_reference='qq:' + message)
     from owner_private import note_media_gaps
     note_media_gaps(segments, content, governance)
     client.update_segments(message, segments)
@@ -311,7 +321,7 @@ def qq_private_materials(runtime, run, inputs, cancelled=None):
             'emoji_state': {'previewed': set(), 'tools': []}, 'tool_context': tool_context,
             'delivery_required': False, 'experience': experience_turn,
             'trace_reference': source['current_reference'],
-            'conversation': conversation, 'message': message}
+            'conversation': conversation, 'message': message, 'batch_ids': batch_ids}
 
 
 def self_wake_materials(runtime, run, inputs, cancelled=None):
@@ -483,3 +493,47 @@ def plan_materials(runtime, run, inputs, cancelled=None):
             'conversation': str(run.get('conversation') or conversation), 'message': '',
             'plan': {'schedule_id': schedule_id, 'slot': slot,
                      'target': str(row.get('target') or ''), 'purpose': str(row.get('purpose') or '')}}
+
+
+def batch_materials(runtime, *, source, conversation, run, current_segments):
+    """Sealed file batches of this place: extra segments plus their batch references.
+
+    The current input's own files are already in its segments; this adds the other
+    files of the same batch so one batch is handled once, and reports the batch ids
+    so the turn's result can close them.
+    """
+    from .batches import file_segments, load_segments, resource_of
+    place = '%s:%s' % (source, conversation)
+    current = file_segments(current_segments)
+    taken = runtime.experience.batches.take(place, run=run['id'], wait_for_close=bool(current))
+    seen = {resource_of(item) for item in current if resource_of(item)}
+    extra, ids = [], []
+    for batch in taken:
+        ids.append(batch['id'])
+        for item in batch['items']:
+            for segment in load_segments(runtime.root, item['reference']):
+                if str(segment.get('type') or '') not in ('image', 'file', 'video', 'audio'):
+                    continue
+                resource = resource_of(segment)
+                if resource and resource in seen:
+                    continue
+                if resource:
+                    seen.add(resource)
+                extra.append(segment)
+    return extra, ids
+
+
+def batch_note(runtime, *, source, conversation, run, current_segments):
+    """A readable list of one batch's registered files, without downloading them."""
+    from .batches import file_segments
+    place = '%s:%s' % (source, conversation)
+    current = file_segments(current_segments)
+    taken = runtime.experience.batches.take(place, run=run['id'], wait_for_close=bool(current))
+    lines, ids = [], []
+    for batch in taken:
+        ids.append(batch['id'])
+        for item in batch['items']:
+            lines.append({'batch': batch['id'], 'reference': item['reference'],
+                          'resource': item['resource'], 'received': item['received'],
+                          'window': [batch['opens'], batch['closes']]})
+    return lines, ids
