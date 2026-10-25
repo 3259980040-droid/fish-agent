@@ -240,7 +240,7 @@ class BatchTurnTests(unittest.TestCase):
                                           'request_id': uuid.uuid4().hex})
         settled = self.wait_job(wb, first['job_id'])
         self.assertEqual(settled['status'], 'complete', settled)
-        batches = wb.dispatch('attachments.batches', {'id': cid})['batches']
+        batches = self.wait_batch(wb, cid)
         self.assertEqual(len(batches), 1)
         self.assertEqual(batches[0]['state'], 'consumed')
         view = wb.dispatch('turn.view', {'execution': settled['execution']})
@@ -256,7 +256,7 @@ class BatchTurnTests(unittest.TestCase):
         self.assertEqual(runs[1]['error'], '')  # it ran, rather than being merged away
         # The silent turn consumed the batch; the next turn is handed no batch of its own.
         self.assertEqual(wb.dispatch('turn.view', {'execution': second_settled['execution']})['batches'], [])
-        self.assertEqual(wb.dispatch('attachments.batches', {'id': cid})['batches'][0]['state'], 'consumed')
+        self.assertEqual(self.wait_batch(wb, cid)[0]['state'], 'consumed')
 
     def test_two_files_in_one_window_are_handled_by_one_turn(self):
         fake = self.gateway([saying('收到两个文件'), final('')])
@@ -285,7 +285,7 @@ class BatchTurnTests(unittest.TestCase):
         first_request = json.dumps(fake.requests[0], ensure_ascii=False)
         self.assertIn('alpha content for the batch', first_request)
         self.assertIn('beta content for the batch', first_request)
-        batches = wb.dispatch('attachments.batches', {'id': cid})['batches']
+        batches = self.wait_batch(wb, cid)
         self.assertEqual(len(batches), 1)
         self.assertEqual(len(batches[0]['items']), 2)
         with database(self.root / 'data/qq/desktop-chat.db') as db:
