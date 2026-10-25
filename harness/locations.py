@@ -279,7 +279,10 @@ class InstanceCatalog:
             context = self.resolve(record['id'])
             from social_context import SocialContext
             persona = SocialContext(context.root).active_persona('qq')
-            rows.append({**record, 'persona_configured': bool(persona.get('body')),
+            from fish_agent.bootstrap import get_runtime
+            runtime = get_runtime(context)
+            rows.append({**record, 'enabled': bool(record.get('running', True)),
+                         'running': runtime.started, 'persona_configured': bool(persona.get('body')),
                          'persona_name': str(persona.get('name') or '')})
         return {'initial_instance_id': raw['initial_instance_id'], 'instances': rows}
 
