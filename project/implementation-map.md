@@ -387,14 +387,14 @@ E:/Program Files/DSH/source/fish/
 
 ## 12．2026-10-26 验收修复源码映射
 
-此节只负责代码落点与退出对象，行为以唯一规格§8为准。当前运行版本后端008731f、前端d93de44f52；规格/工单发布不代表已修代码。全局模块/插件协作原则适用于每一行，不只适用于研究模块。
+此节只负责代码落点与退出对象，行为以唯一规格§8为准。当前运行版本后端008731f、前端d93de44f52；规格/工单发布不代表已修代码。当前Fish基础设施保持整体，不以未来插件方向拆分现有结构；这些修复可按必要的完整调用路径改动。
 
 | 修复票 | 需核查和修改的现有Implementation | 退出对象与交付边界 |
 |---|---|---|
 | R01（A1/C1） | 后端根内harness/fish_agent/execution/state.py:AgentState.claim_next、execution/__init__.py:submit/_execute；experience.py:ExperienceTurn.prepare/requested/received/finish、was_considered；desktop_context.py:DesktopContext.history；fish_agent/experience/context.py各材料入口；fish_agent/plans:dispatch/_payload/record_result | 退出跨场所越序合并、独立plan被最后一个payload替代、背景covered越过认领范围。复用agent_inputs/agent_runs和既有经历，不重建消息队列 |
 | R02（A4/A5） | harness/fish_agent/execution/__init__.py:_finish_clock/_stored_place/_due_wake；fish_agent/experience/context.py:self_wake_materials；qq_agent_loop.py:_submit_group/watch_turn/_watch_turn、_fault/_recovered/_fault_notice与_maintenance；governance.py现有fault/audit记录；owner_private.py:故障通知调用者；ui-fish既有回合/维护显示 | 共同结束计时已有，不再加计划timer；修plan触发和场所交接；退出未await/未创建任务的监听调用。技术诊断归管理员日志，普通聊天不自动推故障通知，需同时核既有周期故障通知入口，不能只改一个回合场景 |
 | R03（B1/B2） | harness/fish_agent/execution/runner.py:run_model_loop工具列表和offered检查；fish_agent/tools工具目录/执行；tool_host.py:fish_tool_list、/catalog；plugin_registry.py:save/discover/set_enabled/catalog/execute；ui-fish/src/client/pages/FishExtensionsPage.tsx与相应contract/parsers | 退出本轮初始清单阻断已发现工具；按需目录覆盖实际启用内置/扩展能力，初始公布裁剪不变成调用缺失。补CLI/HTTP工具schema交接，不另建代理；现有连接不擅自删除 |
-| R04（C2/C3） | harness/memory_curation.py:submit/_collect/_groups/_learn/execute/tick/_last_end/_finish；memory_maintenance.py读取原库及既有游标；memory_store.py:learning_jobs/enqueue/extract/apply_extraction；memory_digest.py:build；daily_curate.py适配入口；tool_host.py:fish_memory_curate、workbench.py:memory.curate.run/status；现有整理进度页面 | 沿memory_curate_runs与learning_jobs，固定本次范围/截止后由程序自动分批调用提炼器，正常批结束继续下一批直到范围处理完。退出rows[:400]后整体推进、deferred仍done、每日只取新04:00短范围；原文保留，不建立另一套整理队列 |
+| R04（C2/C3） | harness/memory_curation.py:submit/_collect/_groups/_learn/execute/tick/_last_end/_finish；memory_maintenance.py读取原库及既有游标；memory_store.py:learning_jobs/enqueue/extract/apply_extraction；memory_digest.py:build；daily_curate.py适配入口；tool_host.py:fish_memory_curate、workbench.py:memory.curate.run/status；现有整理进度页面 | 沿memory_curate_runs与learning_jobs，选择程序自动续批这一方案：固定范围/截止，按材料大小分批调用现有qq内容提炼，程序自动继续直至完成，最后生成/更新小结；FTS5不替代模型内容提炼。退出rows[:400]后整体推进、deferred仍done、每日只取新04:00短范围；原文保留，不建立另一套整理队列 |
 | R05（C4） | harness/knowledge.py:_document_hits和open相关分发；tool_host.py:library/fish_doc_search/fish_doc_read；doc_store.py:search/doc_detail的真实过滤；workbench.py统一检索及ui-fish的KnowledgeSearch/FishLibraryPage | 退出阻断已确定统一读取的owner+本群默认硬过滤；保留显式资料来源、原件/分块/修订关联和实际检索模式，不复制资料库 |
 
 ### 12.1 研究用途的现状与暂存
@@ -407,3 +407,11 @@ tool_host.py:ToolHost.__init__直接导入并创建ResearchWorker、serve组装�
 
 本轮实际源码位置只在本节维护，子票不复制行号。各票可以复用现有最高层入口独立复核；共享文件的改动统一整合。五票完成后接续原09-10的一次客户端＋主人私聊使用，不另设第二张验收票。原21票记录和原父Issue正文/状态保留。
 
+
+### 12.3 不调用聊天API时的现有程序边界（只读核实）
+
+- memory_curation.py:submit的steps支持选择既有步骤，默认包含range/learn/tidy/digest/emoji/index；这不是已接通的“纯程序完成所有记忆理解”。
+- memory_curation.py:_learn→memory_store.py:extract调用gateway.json，默认role为qq；memory_digest.py:build有材料时调用ModelGateway(root,'qq').json。它们与B3的research用途不同。
+- memory_curation.py:_groups/tidy_memories负责明确去重与已有记忆状态维护，不调用聊天模型；fts5_index.py、history_index.py、memory_store.py:sync_index、doc_store.py:sync_index、memory_digest.py:sync_index负责词法索引与原文/结果回查，不进行语义归纳。
+- 当前_index还并列调用MemoryEngine.backfill/doc_store.maintain的向量路径，是否使用本地或远端嵌入配置需另按实际连接核实，不能把“不调用聊天API”泛称“所有阶段零模型/零网络”。
+- 技术依据：SQLite官方FTS5文档明确其为全文检索虚拟表模块，提供分词索引、查询、排序及片段；snippet是命中摘录，不是语义摘要：https://www.sqlite.org/fts5.html 。
