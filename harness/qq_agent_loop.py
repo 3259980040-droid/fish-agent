@@ -642,9 +642,11 @@ class QQAgentLoop:
         bubbles = data.get('bubbles') or []
         if not chat.startswith('group:') or not isinstance(bubbles, list) or not bubbles:
             return {'ok': False, 'error': '群投递目标或气泡无效'}
-        policy = GroupPolicy(self.root, audit=self.governance.audit)
+        from locations import instance_context
+        instance_root=instance_context(self.root,data.get('instance_id')).root
+        policy = GroupPolicy(instance_root, audit=self.governance.audit)
         direct = bool(data.get('direct'))
-        blocked = self._group_blocked(policy, chat, direct=direct)
+        blocked = self._group_blocked(policy, chat, direct=direct,instance_root=instance_root)
         if blocked:
             return {'ok': True, 'sent': False, 'state': 'blocked', 'error': blocked, 'receipt': {}}
         plan = delivery_plan(bubbles)
@@ -657,8 +659,9 @@ class QQAgentLoop:
         if reference:
             delivery(self.root, reference, sending=True)
         delivered = await self._deliver_reply(
-            chat, parts, key, validate=lambda: self._group_blocked(policy, chat, direct=direct) is None,
-            validation_error='群设置已改变，未继续发送', reply_to=reply_to, bubble_plan=plan)
+            chat, parts, key, validate=lambda: self._group_blocked(policy, chat, direct=direct,instance_root=instance_root) is None,
+            validation_error='群设置已改变，未继续发送', reply_to=reply_to, bubble_plan=plan,
+            instance_root=instance_root,source_tools=data.get('source_tools',[]))
         sent = bool(delivered.get('ok'))
         error = delivered.get('error') or {}
         interrupted = bool(error.get('validation_failed') or error.get('cancelled'))
@@ -678,7 +681,7 @@ class QQAgentLoop:
                 'receipt': {'message_id': str((delivered.get('payload') or {}).get('message_id') or ''),
                             'message_ids': (delivered.get('payload') or {}).get('message_ids') or []}}
 
-    def _group_blocked(self, policy, chat: str, *, direct: bool = False):
+    def _group_blocked(self, policy, chat: str, *, direct: bool = False, instance_root=None):
         """The real reason this group cannot receive a reply now, or None."""
         try:
             if self.governance.config()['paused']:
@@ -686,12 +689,9 @@ class QQAgentLoop:
             config = policy.config(chat)
         except Exception as exc:  # noqa: BLE001 - an unreadable policy refuses, never guesses
             return '群设置无法读取：' + type(exc).__name__
-        if not config.get('listen'):
-            return '这个群没有开启接收'
-        if not config.get('reply'):
-            return '这个群没有开启 Fish 回复'
-        if str(config.get('engine')) != 'fish':
-            return '这个群当前不是 Fish 回复引擎'
+        from fish_agent.settings.tools import ToolSettings
+        capability=ToolSettings(instance_root or self.root).effective_capability(target=chat)
+        if not capability['enabled']:return capability['reason']
         if float(config.get('dive_until') or 0) > time.time():
             return '潜水期间不发送'
         try:
@@ -731,7 +731,8 @@ class QQAgentLoop:
         self.private_cancel = threading.Event()
         self.cancel_event = self.private_cancel
         item = {'conversation': self.conversation, 'payload': {'chat_id': target},
-                'message_id': int(data.get('message_id') or 0), 'text': '', 'space_id': ''}
+                'message_id': int(data.get('message_id') or 0), 'text': '', 'space_id': '',
+                'instance_id':data.get('instance_id'),'source_tools':data.get('source_tools',[])}
         try:
             result = await reply(self, item, bubbles, str(data.get('key') or ''),
                                  turn=str(data.get('turn') or ''))
@@ -769,9 +770,10 @@ class QQAgentLoop:
         return {"ok": False, "error": "no active turn"}
 
     async def _deliver_reply(self, chat_id, segments, key, cancelled=None, validate=None, reply_to=None, *,
-                             validation_error='群配置、人格发布或频率已改变，未继续发送', bubble_plan=None):
-        if chat_id == 'private:' + self.owner and not self.governance.config()['send_policy']['owner_private']['owner_reply']:
-            raise PermissionError('主人已关闭私聊自动回复发送')
+                             validation_error='群配置、人格发布或频率已改变，未继续发送', bubble_plan=None, instance_root=None, source_tools=()):
+        from fish_agent.settings.tools import ToolSettings
+        capabilities=ToolSettings(instance_root or self.root)
+        capabilities.require_delivery(str(chat_id),source_tools)
         from chat_output import transport_parts
         group = str(chat_id).startswith('group:')
         plan = bubble_plan if bubble_plan is not None else [{'segments': segments, 'delay': 0.}]
@@ -787,8 +789,10 @@ class QQAgentLoop:
             cfg = self.governance.config()
             if cfg['paused'] or (cancelled and cancelled.is_set()):
                 return {'code': f'已暂停或取消，已发送 {len(sent)}/{len(parts)} 段', 'cancelled': True}
-            if chat_id == 'private:' + self.owner and not cfg['send_policy']['owner_private']['owner_reply']:
-                return {'code': '主人已关闭私聊自动回复发送', 'blocked': True}
+            try:
+                capabilities.require_delivery(str(chat_id),source_tools)
+            except PermissionError as error:
+                return {'code':str(error),'blocked':True}
             return None
 
         def failed(part, detail):
