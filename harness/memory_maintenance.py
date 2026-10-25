@@ -233,7 +233,8 @@ def _qq_bot_id(root: Path) -> str:
         return ''
 
 
-def read_qq_messages(root: Path, role: str, start: float, after_id=0) -> list:
+def read_qq_messages(root: Path, role: str, start: float, after_id=0, *,
+                     end=None, through_id=None, limit=READ_LIMIT, strict=False) -> list:
     """Inbound user messages of the qq store with ``ts >= start``.
 
     ``start`` (epoch seconds) bounds the scan as ``ts >= start`` so it never
@@ -251,11 +252,24 @@ def read_qq_messages(root: Path, role: str, start: float, after_id=0) -> list:
     with closing(sqlite3.connect(path, timeout=5)) as db:
         db.row_factory = sqlite3.Row
         try:
+            bounds, values = '', [_strftime(float(start)), int(after_id)]
+            if end is not None:
+                bounds += ' AND ts<=?'
+                values.append(_strftime(float(end)))
+            if through_id is not None:
+                bounds += ' AND id<=?'
+                values.append(int(through_id))
+            if limit is not None:
+                bounds += ' ORDER BY id LIMIT ?'
+                values.append(int(limit))
+            else:
+                bounds += ' ORDER BY id'
             rows = db.execute(
                 "SELECT id,ts,chat_id,user_id,text,conversation_id,sender_id,direction,channel_message_id,status "
-                "FROM messages WHERE direction='inbound' AND ts>=? AND id>? ORDER BY id LIMIT ?",
-                (_strftime(float(start)), int(after_id), READ_LIMIT)).fetchall()
+                "FROM messages WHERE direction='inbound' AND ts>=? AND id>?" + bounds, values).fetchall()
         except sqlite3.Error:
+            if strict:
+                raise
             return []
         normal = []
         for row in rows:
@@ -297,7 +311,8 @@ def _matched_group(root: Path, group: str) -> bool:
         return False
 
 
-def read_desktop_messages(root: Path, role: str, start: float, after_id=0) -> list:
+def read_desktop_messages(root: Path, role: str, start: float, after_id=0, *,
+                          end=None, through_id=None, limit=READ_LIMIT, strict=False) -> list:
     """Inbound user desktop chat messages of one role with ``ts >= start``.
 
     Ordinary chats and work chats share the owner scope; owner private test
@@ -313,12 +328,25 @@ def read_desktop_messages(root: Path, role: str, start: float, after_id=0) -> li
     with closing(sqlite3.connect(path, timeout=5)) as db:
         db.row_factory = sqlite3.Row
         try:
+            bounds, values = '', [_strftime(float(start)), int(after_id)]
+            if end is not None:
+                bounds += ' AND m.created_at<=?'
+                values.append(_strftime(float(end)))
+            if through_id is not None:
+                bounds += ' AND m.id<=?'
+                values.append(int(through_id))
+            if limit is not None:
+                bounds += ' ORDER BY m.id LIMIT ?'
+                values.append(int(limit))
+            else:
+                bounds += ' ORDER BY m.id'
             rows = db.execute(
                 'SELECT m.id,m.conversation_id,m.direction,m.text,m.status,m.created_at,c.mode,c.space_id '
                 'FROM messages m LEFT JOIN conversations c ON c.id=m.conversation_id '
-                "WHERE m.direction='inbound' AND m.created_at>=? AND m.id>? ORDER BY m.id LIMIT ?",
-                (_strftime(float(start)), int(after_id), READ_LIMIT)).fetchall()
+                "WHERE m.direction='inbound' AND m.created_at>=? AND m.id>?" + bounds, values).fetchall()
         except sqlite3.Error:
+            if strict:
+                raise
             return []
     for row in rows:
         text = str(row['text'] or '').strip()
@@ -745,6 +773,8 @@ def start_background(host, root=None, *, interval: float = 60.0, embed_interval:
     stop = getattr(host, 'stop', None)
     if stop is None:
         stop = threading.Event()
+    from memory_curation import ensure_worker
+    ensure_worker(root, stop=stop)
     last_embed = 0.0
 
     def warm_embeddings():
