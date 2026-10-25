@@ -21,6 +21,7 @@ class ExperienceTurn:
         self.id = uuid.uuid4().hex
         self.positions = {}
         self.covered = set()
+        self.claimed_references = frozenset()
         self.surface = []
         self.ledger = project_path(self.root, 'data/social/experience.db')
         with database(self.ledger) as db:
@@ -29,7 +30,9 @@ class ExperienceTurn:
 
     def prepare(self, cancelled=None):
         self.context = DesktopContext(self.root, self.path, channel=self.channel)
-        history, source = self.context.history(self.conversation, self.message, None, None, cancelled, event=self.event)
+        history, source = self.context.history(
+            self.conversation, self.message, None, None, cancelled, event=self.event,
+            claimed_references=self.claimed_references)
         self.positions = source['positions']
         # The ordered original material of this place: compression selects complete older
         # ranges from exactly this order, and each entry keeps its own source and id.
@@ -99,7 +102,9 @@ class ExperienceTurn:
         self.compaction_request = queued
 
     def received(self, first_output_at=None):
-        self.covered.update(self.pending)
+        # A budget report describes what was visible, including background and
+        # late arrivals. Only the fixed claim is eligible to settle input work.
+        self.covered.update(self.pending.intersection(self.claimed_references))
         self.covered.add(self.reference)
         if first_output_at is not None:
             with database(self.ledger) as db:
@@ -109,8 +114,9 @@ class ExperienceTurn:
         with database(self.ledger) as db:
             db.execute('UPDATE experience_turns SET outcome=CASE WHEN receipt IS NULL THEN ? ELSE outcome END,error=CASE WHEN ?=\'\' THEN error ELSE ? END WHERE id=?', (outcome,str(error)[:500],str(error)[:500],self.id))
             if outcome in ('considered', 'silent'):
+                actual = self.covered.intersection(self.claimed_references | {getattr(self, 'reference', '')})
                 db.executemany('INSERT OR REPLACE INTO considered VALUES(?,?,?,?)',
-                               [(ref, self.id, time.time(), outcome) for ref in self.covered])
+                               [(ref, self.id, time.time(), outcome) for ref in actual])
 
 
 def was_considered(root, reference, *, session=None):

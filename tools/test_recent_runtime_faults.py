@@ -32,6 +32,8 @@ class RuntimeFaultTests(unittest.TestCase):
             db.execute('INSERT INTO experience_turns VALUES(?,?,?,?,?,?,?,?,?,?)',
                        (e.id,session,current,'2026-10-24 20:00:00',1,None,None,None,'running',''))
         e.covered={current,covered}
+        e.reference=current
+        e.claimed_references=frozenset({current,covered})
         e.finish('considered')
 
     def test_group_background_does_not_skip_private_worker(self):
