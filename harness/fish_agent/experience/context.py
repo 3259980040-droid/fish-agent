@@ -24,6 +24,21 @@ LIBRARY_LIMIT = 3
 LIBRARY_HEAD = '[资料库检索结果；引用时必须写出处：文档名 + 第几块]'
 
 
+def prepare_turn(experience_turn, run, cancelled):
+    """Keep the claim fixed even when context/file preparation sees later records."""
+    experience_turn.claimed_references = frozenset(run.get('inputs') or ())
+    return experience_turn.prepare(cancelled)
+
+
+def unread_segments(runtime, reference, segments):
+    """A previously read file batch does not settle the message's new text."""
+    if not runtime.experience.batches.covered([reference]):
+        return segments
+    from .batches import file_segments
+    files = file_segments(segments)
+    return [item for item in segments if item not in files]
+
+
 def current_text(current):
     """The owner's own words of this turn, out of the assembled content parts."""
     parts = []
@@ -129,6 +144,7 @@ def desktop_materials(runtime, run, inputs, cancelled=None):
         raise ValueError('已接收的原始消息不存在，未重复建立消息')
     text = str(row['text'] or '')
     imported = json.loads(row['segments'] or '[]')
+    unread = unread_segments(runtime, 'desktop:' + message, imported)
     space = client.conversation_context(conversation)
     scope = space['scope'] if space else 'owner'
     persona = runtime.settings.snapshot(role)['persona']
@@ -143,11 +159,11 @@ def desktop_materials(runtime, run, inputs, cancelled=None):
         media.directory = SocialContext(root).directory(space['id']) / 'media'
     extra, batch_ids = batch_materials(runtime, source='desktop', conversation=conversation,
                                        run=run, current_segments=imported)
-    content = media.prepare_content([*imported, *extra], text or '请查看附件。', local=True,
+    content = media.prepare_content([*unread, *extra], text or '请查看附件。', local=True,
                                     cancelled=cancelled, include_sources=True,
                                     source_reference='desktop:' + message)
     from owner_private import note_media_gaps
-    note_media_gaps(imported, content, Governance(root, role))
+    note_media_gaps(unread, content, Governance(root, role))
     context = DesktopContext(root, client.path, channel='desktop')
     context.remember_input(message, content)
     client.update_segments(message, imported)
@@ -163,7 +179,7 @@ def desktop_materials(runtime, run, inputs, cancelled=None):
     experience_turn.session = session
     experience_turn.persona_revision = persona['id']
     try:
-        history, source = experience_turn.prepare(cancelled)
+        history, source = prepare_turn(experience_turn, run, cancelled)
     except Exception as exc:
         experience_turn.finish('failed', str(exc))
         raise
@@ -222,7 +238,7 @@ def group_materials(runtime, run, inputs, cancelled=None):
     experience_turn.session = session
     experience_turn.persona_revision = persona['id']
     try:
-        history, source = experience_turn.prepare(cancelled)
+        history, source = prepare_turn(experience_turn, run, cancelled)
     except Exception as exc:
         experience_turn.finish('failed', str(exc))
         raise
@@ -278,6 +294,7 @@ def qq_private_materials(runtime, run, inputs, cancelled=None):
         raise PermissionError('主人私聊来源不匹配')
     text = str(row['text'] or '')
     segments = json.loads(row['segments'] or '[]')
+    unread = unread_segments(runtime, 'qq:' + message, segments)
     scope, tool_context = 'owner', 'owner-private'
     session = 'qq-private:' + conversation
     persona = runtime.settings.snapshot(role)['persona']
@@ -289,10 +306,10 @@ def qq_private_materials(runtime, run, inputs, cancelled=None):
     media = MediaService(root, role)
     extra, batch_ids = batch_materials(runtime, source='qq-private', conversation=conversation,
                                        run=run, current_segments=segments)
-    content = media.prepare_content([*segments, *extra], text, cancelled=cancelled,
+    content = media.prepare_content([*unread, *extra], text, cancelled=cancelled,
                                     include_sources=True, source_reference='qq:' + message)
     from owner_private import note_media_gaps
-    note_media_gaps(segments, content, governance)
+    note_media_gaps(unread, content, governance)
     client.update_segments(message, segments)
     context = DesktopContext(root, client.path, channel='qq')
     context.remember_input(int(message), content)
@@ -308,7 +325,7 @@ def qq_private_materials(runtime, run, inputs, cancelled=None):
     experience_turn.session = session
     experience_turn.persona_revision = persona['id']
     try:
-        history, source = experience_turn.prepare(cancelled)
+        history, source = prepare_turn(experience_turn, run, cancelled)
     except Exception as exc:
         experience_turn.finish('failed', str(exc))
         raise
@@ -370,7 +387,7 @@ def self_wake_materials(runtime, run, inputs, cancelled=None):
         # The self-wake uses the same prepared common experience as every other turn
         # (layered budget, compression checkpoints, references) instead of a fixed
         # 12-message slice that bypassed both.
-        history, source_info = experience_turn.prepare(cancelled)
+        history, source_info = prepare_turn(experience_turn, run, cancelled)
         return {'persona': persona, 'history': history, 'history_source': source_info,
                 'memory': _group_memory(root, chat, note), 'scope': 'chat:' + chat,
                 'references': '', 'current': [{'type': 'text', 'text': note}], 'session': session,
@@ -389,7 +406,7 @@ def self_wake_materials(runtime, run, inputs, cancelled=None):
         experience_turn = ExperienceTurn(root, path, conversation, None, channel='qq', event=event)
         experience_turn.session = session
         experience_turn.persona_revision = persona['id']
-        history, source_info = experience_turn.prepare(cancelled)
+        history, source_info = prepare_turn(experience_turn, run, cancelled)
         references = library_references(root, private_context(root, '', conversation=conversation),
                                        'owner-private', [])
         return {'persona': persona, 'history': history, 'history_source': source_info,
@@ -407,7 +424,7 @@ def self_wake_materials(runtime, run, inputs, cancelled=None):
         experience_turn = ExperienceTurn(root, path, conversation, None, channel='desktop', event=event)
         experience_turn.session = session
         experience_turn.persona_revision = persona['id']
-        history, source_info = experience_turn.prepare(cancelled)
+        history, source_info = prepare_turn(experience_turn, run, cancelled)
         references = library_references(root, private_context(root, '', conversation=conversation, desktop=True),
                                        'owner-desktop', [])
         return {'persona': persona, 'history': history, 'history_source': source_info,
@@ -467,7 +484,7 @@ def plan_materials(runtime, run, inputs, cancelled=None):
     experience_turn.persona_revision = persona['id']
     plans._bind_occurrence(session, row, slot)
     try:
-        history, source = experience_turn.prepare(cancelled)
+        history, source = prepare_turn(experience_turn, run, cancelled)
     except Exception as exc:
         experience_turn.finish('failed', str(exc))
         raise

@@ -51,7 +51,8 @@ class DesktopContext:
         with database(self.path) as db:
             db.execute('INSERT OR REPLACE INTO chat_inputs VALUES(?,?)', (mid, json.dumps(cached, ensure_ascii=False)))
 
-    def history(self, cid, current_mid, media, gateway, cancelled, *, after=None, event=None):
+    def history(self, cid, current_mid, media, gateway, cancelled, *, after=None, event=None,
+                claimed_references=()):
         """One view over existing QQ/desktop records; originals stay in their own stores.
 
         The message adapter knows schemas. The one request budget owns size and
@@ -63,6 +64,7 @@ class DesktopContext:
         from governance import Governance
 
         virtual_event = event
+        claimed_references = frozenset(claimed_references)
         self.recent_window = int((virtual_event or {}).get('recent_window') or 1800)
         from contextlib import contextmanager
 
@@ -177,7 +179,8 @@ class DesktopContext:
             relevant = any(word in event['text'].casefold() for word in words)
             summarized = bool(continuation and continuation.get('summary') and event['current_conversation'] and
                               int(event['reference'].split(':')[1]) <= int(continuation['through']))
-            if after is None and summarized and not relevant:
+            claimed = event['reference'] in claimed_references
+            if after is None and summarized and not relevant and not claimed:
                 continue
             if after is None and not event['current_conversation'] and not (relevant or age <= self.recent_window):
                 continue
@@ -205,7 +208,7 @@ class DesktopContext:
             # insert an incomplete assistant envelope into a thinking/tool request.
             role = 'user'
             picked.append((event['time'], event['reference'],
-                           {'role': role, 'content': body, '_fish_layer': 1 if event['current_conversation'] else 2,
+                           {'role': role, 'content': body, '_fish_layer': 0 if claimed else 1 if event['current_conversation'] else 2,
                             '_fish_refs': [event['reference']], '_fish_bundle': event['bundle']},
                            {'source': event['store'], 'conversation': event['conversation'],
                             'id': int(event['id'])}))
@@ -247,6 +250,7 @@ class DesktopContext:
                          'stores': [p.name for p in paths], 'current_place': current_place,
                          'current_reference': reference, 'current_event': current_event, 'positions': positions,
                          'surface': surface, 'continuation': (continuation or {}).get('kind', ''),
+                         'claimed_references': list(claimed_references),
                          'material_count': len(history), 'budget': 'shared actual-model token budget'}
 
     def period_material(self, question, words):

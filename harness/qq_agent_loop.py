@@ -221,7 +221,6 @@ class QQAgentLoop:
         self.maintenance_task = None
         self.private_cancel = threading.Event()
         self.delivery_task = None
-        self._notice_tasks: set[asyncio.Task] = set()
         # 群里有人说话时立刻叫醒维护循环里的回合：要不要开口仍由回合自己的闸门判定，
         # 这个事件只负责"现在去看一眼"，不等十几秒的切片。
 
@@ -246,45 +245,14 @@ class QQAgentLoop:
         self.governance.fault_outcome(source, 'silent', stage=stage, reason='她想过了，但选择不开口；不算故障')
 
     async def _fault(self, source, error, *, stage='model', uncertain=False):
-        row = self.governance.fault(source, error, stage=stage, uncertain=uncertain)
-        if row is not None:
-            await self._fault_notice(row)
-        return row
+        return self.governance.fault(source, error, stage=stage, uncertain=uncertain)
 
     async def _recovered(self, source, *, stage='model'):
-        rows = self.governance.fault_recovered(source, stage=stage)
-        for row in rows:
-            await self._fault_notice(row, recovered=True)
-
-    async def _fault_notice(self, row, *, recovered=False):
-        # System receipts use owner_private.reply, not fish_say or a group sender.
-        # An unavailable channel is shown in the UI; reconnect never replays a notice.
-        if not self.owner or self.governance.config()['paused'] or getattr(self.channel, 'ws', None) is None:
-            return
-        token = self.governance.claim_fault_notice(row['source'], row['code'], stage=row['stage'], recovered=recovered)
-        if not token:
-            return
-        result = {'sent': False, 'uncertain': False}
-        try:
-            from owner_private import fault_notice
-            result = await fault_notice(self, row, token, recovered=recovered)
-        except Exception as exc:
-            # A storage error after delivery can lose the receipt too. Only a
-            # definite local denial/cancellation proves the notice was not sent.
-            result['uncertain'] = not isinstance(exc, (PermissionError, InterruptedError))
-            log('system fault notice unavailable: ' + type(exc).__name__)
-        finally:
-            self.governance.finish_fault_notice(token, sent=bool(result.get('sent')),
-                                                uncertain=bool(result.get('uncertain')))
+        return self.governance.fault_recovered(source, stage=stage)
 
     async def _channel_health(self, stage, error):
         if error is None:
-            rows = self.governance.fault_recovered('qq-channel', stage=stage)
-            # The websocket reader must resume before a notice can await its ACK.
-            for row in rows:
-                task = asyncio.create_task(self._fault_notice(row, recovered=True), name='qq-system-recovery')
-                self._notice_tasks.add(task)
-                task.add_done_callback(self._notice_tasks.discard)
+            self.governance.fault_recovered('qq-channel', stage=stage)
         else:
             await self._fault('qq-channel', error, stage=stage)
 
@@ -298,9 +266,6 @@ class QQAgentLoop:
         if self.maintenance_task:
             self.maintenance_task.cancel()
             await asyncio.gather(self.maintenance_task,return_exceptions=True)
-        tasks = list(self._notice_tasks)
-        for task in tasks: task.cancel()
-        if tasks: await asyncio.gather(*tasks, return_exceptions=True)
         if self.control_server is not None:
             self.control_server.close()
             await self.control_server.wait_closed()
@@ -337,10 +302,8 @@ class QQAgentLoop:
             # 每日记忆整理也不再从这里启动：宿主后台的唯一 curation.tick
             # 与 Fish 工具、客户端按钮共用同一整理程序和同一条执行记录。
             # All reminders and autonomous opportunities are owned by AgentScheduler.
-            # This maintenance pass only handles non-social housekeeping and fault notices.
-            for fault in self.governance.fault_snapshot()['items']:
-                if fault['consecutive'] > 0:
-                    await self._fault_notice(fault)
+            # This pass only handles non-social housekeeping. Technical failures
+            # remain in the administrator's original log and never trigger chat.
             try:
                 await asyncio.wait_for(self._stop.wait(), self._maintenance_seconds())
             except TimeoutError:
@@ -468,41 +431,63 @@ class QQAgentLoop:
         # accepted this group's input, so the old permission refusal is no longer the
         # current state. Without this the stale binding record stayed "active" forever.
         await self._recovered('group-fish:' + chat, stage='binding')
-        self._watch_turn(submission.get('execution', ''), source='group-fish:' + chat, chat=chat)
+        self.watch_turn(submission.get('execution', ''), source='group-fish:' + chat, chat=chat)
 
     def _group_conversation(self, chat: str) -> str:
         return str(self.store.get_or_create_conversation(chat, 'qq')['id'])
 
-    def watch_turn(self, execution: str, *, source: str, chat: str = '') -> None:
+    def watch_turn(self, execution: str, *, source: str, chat: str = '', instance=None):
+        """Schedule a watcher bound to the submitting InstanceContext and execution.
+
+        Call on the QQ event loop. W03 may pass runtime.context (or its instance
+        root); neither later UI selection nor this adapter's default root changes
+        the status request or administrator log this watcher uses. stop() joins it.
+        """
         if not execution:
             return
-        task = asyncio.create_task(self._watch_turn(execution, source=source, chat=chat),
-                                   name='fish-turn:' + str(execution))
+        from locations import instance_context
+        context = instance_context(instance if instance is not None else self.root)
+        task = asyncio.create_task(self._watch_turn(execution, source=source, chat=chat, instance=context),
+                                   name='fish-turn:' + context.instance_id + ':' + str(execution))
         self._private_watches.add(task)
         task.add_done_callback(self._private_watches.discard)
+        return task
 
-    async def _watch_turn(self, execution: str, *, source: str, chat: str = '') -> None:
+    async def _watch_turn(self, execution: str, *, source: str, chat: str = '', instance=None) -> None:
         """Report what actually happened to one submitted turn; never invent a result.
 
         The turn, its tools and its reply run in the background host. This watcher
         only reads the real ledger, so silence, failure and an unconfirmed send stay
-        distinguishable and still reach the owner through the existing fault notices.
+        distinguishable in the administrator's existing log. It never sends chat.
         """
+        from locations import instance_context
+        context = instance_context(instance if instance is not None else self.root)
+        governance = Governance(context.root, self.agent_id)
+        default_instance = context == instance_context(self.root)
         row: dict[str, Any] = {}
+        read_error = ''
         deadline = time.monotonic() + 900
-        self.active_turn = execution
-        while not self._stop.is_set() and time.monotonic() < deadline:
-            try:
-                row = await self._turn_row(execution)
-            except Exception as exc:  # noqa: BLE001 - a transient read never invents a state
-                self.governance.audit('owner_turn_status_unavailable', type(exc).__name__)
-                await asyncio.sleep(1)
-                continue
-            if str(row.get('status') or '') not in ('queued', 'running'):
-                break
-            await asyncio.sleep(0.5)
-        if self.active_turn == execution:
-            self.active_turn = None
+        if default_instance:
+            self.active_turn = execution
+        try:
+            while not self._stop.is_set() and time.monotonic() < deadline:
+                try:
+                    row = await self._turn_row(execution, instance=context)
+                    read_error = ''
+                except Exception as exc:  # noqa: BLE001 - a transient read never invents a state
+                    read_error = type(exc).__name__ + ': ' + str(exc)
+                    governance.audit('turn_status_unavailable', str(execution) + ' ' + read_error)
+                    await asyncio.sleep(1)
+                    continue
+                if str(row.get('status') or '') not in ('queued', 'running'):
+                    break
+                await asyncio.sleep(0.5)
+        finally:
+            if default_instance and self.active_turn == execution:
+                self.active_turn = None
+        if self._stop.is_set():
+            governance.audit('turn_watch_stopped', str(execution) + '；停止监听，执行结果仍以原记录为准')
+            return
         status = str(row.get('status') or '')
         result = row.get('result') or ''
         if isinstance(result, str):
@@ -512,24 +497,27 @@ class QQAgentLoop:
                 result = {}
         result = result if isinstance(result, dict) else {}
         delivery = result.get('delivery') if isinstance(result.get('delivery'), dict) else {}
+        governance.audit('turn_observed', json.dumps({'instance_id': context.instance_id,
+            'execution': execution, 'status': status, 'started': row.get('started'),
+            'finished': row.get('finished'), 'delivery': delivery.get('state', '')}, ensure_ascii=False))
         if status == 'complete':
-            await self._recovered(source, stage='model')
-            state = str(delivery.get('state') or '')
-            if state == 'uncertain':
-                await self._fault(source, {'code': delivery.get('error') or '投递结果未确认',
-                                           'may_have_sent': True}, stage='delivery', uncertain=True)
+            governance.fault_recovered(source, stage='model')
+            state = str(delivery.get('state') or '').lower()
+            if state in ('uncertain', 'unknown'):
+                governance.fault(source, {'code': delivery.get('error') or '投递结果未确认',
+                                         'may_have_sent': True}, stage='delivery', uncertain=True)
             elif state in ('failed', 'blocked'):
-                await self._fault(source, delivery.get('error') or '投递失败', stage='delivery')
-            else:
-                await self._recovered(source, stage='delivery')
+                governance.fault(source, delivery.get('error') or '投递失败', stage='delivery')
+            elif delivery.get('sent') or state in ('sent', 'succeeded'):
+                governance.fault_recovered(source, stage='delivery')
         elif status == 'silent':
-            self._silent(source)
+            governance.fault_outcome(source, 'silent', stage='model', reason='她想过了，但选择不开口；不算故障')
         elif status == 'failed':
-            await self._fault(source, row.get('error') or '这一轮没有完成', stage='model')
+            governance.fault(source, row.get('error') or '这一轮没有完成', stage='model')
         elif status == 'cancelled':
-            self.governance.audit('turn_cancelled', str(row.get('error') or '') + ' ' + chat)
+            governance.audit('turn_cancelled', execution + ' ' + str(row.get('error') or '') + ' ' + chat)
         else:
-            await self._fault(source, '等待本轮结果超时，记录保留，未冒充完成', stage='model')
+            governance.fault(source, read_error or '等待本轮结果超时，记录保留，未冒充完成', stage='status')
 
     def _fish_record(self, chat, payload, *, text, direction, status, remote='', reply_to=''):
         """What came in and what the channel accepted, in the group's own ledger.
@@ -623,69 +611,22 @@ class QQAgentLoop:
         return outcome
 
     # ------------------------------------------------------- owner private wiring
-    def watch_private(self, execution: str, item: dict[str, Any]) -> None:
+    def watch_private(self, execution: str, item: dict[str, Any], *, instance=None):
         """Follow one submitted turn to its real outcome; the host owns the turn."""
-        if not execution:
-            return
-        task = asyncio.create_task(self._watch_private(str(execution), item),
-                                   name='qq-private-turn:' + str(execution))
-        self._private_watches.add(task)
-        task.add_done_callback(self._private_watches.discard)
+        return self.watch_turn(execution, source='owner-private',
+                               chat=str((item.get('payload') or {}).get('chat_id') or ''),
+                               instance=instance)
 
-    async def _turn_row(self, execution: str) -> dict[str, Any]:
+    async def _turn_row(self, execution: str, *, instance=None) -> dict[str, Any]:
         from tool_host import request
-        return await asyncio.to_thread(request, self.root, '/turn/status',
+        root = instance.root if instance is not None else self.root
+        return await asyncio.to_thread(request, root, '/turn/status',
                                        {'execution': execution}, role='qq', admin=True, timeout=20)
 
     async def _watch_private(self, execution: str, item: dict[str, Any]) -> None:
-        """Report what actually happened to one private turn; never invent a result.
-
-        The turn, its tools and its reply run in the background host. This watcher
-        only reads the real ledger, so silence, failure and an unconfirmed send stay
-        distinguishable and still reach the owner through the existing fault notices.
-        """
-        row: dict[str, Any] = {}
-        deadline = time.monotonic() + 900
-        self.active_turn = execution
-        while not self._stop.is_set() and time.monotonic() < deadline:
-            try:
-                row = await self._turn_row(execution)
-            except Exception as exc:  # noqa: BLE001 - a transient read never invents a state
-                self.governance.audit('owner_turn_status_unavailable', type(exc).__name__)
-                await asyncio.sleep(1)
-                continue
-            if str(row.get('status') or '') not in ('queued', 'running'):
-                break
-            await asyncio.sleep(0.5)
-        if self.active_turn == execution:
-            self.active_turn = None
-        status = str(row.get('status') or '')
-        result = row.get('result') or ''
-        if isinstance(result, str):
-            try:
-                result = json.loads(result or '{}')
-            except ValueError:
-                result = {}
-        result = result if isinstance(result, dict) else {}
-        delivery = result.get('delivery') if isinstance(result.get('delivery'), dict) else {}
-        if status == 'complete':
-            await self._recovered('owner-private', stage='model')
-            state = str(delivery.get('state') or '')
-            if state == 'uncertain':
-                await self._fault('owner-private', {'code': delivery.get('error') or '私聊投递结果未确认',
-                                                    'may_have_sent': True}, stage='delivery', uncertain=True)
-            elif state in ('failed', 'blocked'):
-                await self._fault('owner-private', delivery.get('error') or '私聊投递失败', stage='delivery')
-            else:
-                await self._recovered('owner-private', stage='delivery')
-        elif status == 'silent':
-            self._silent('owner-private')
-        elif status == 'failed':
-            await self._fault('owner-private', row.get('error') or '这一轮没有完成', stage='model')
-        elif status == 'cancelled':
-            self.governance.audit('owner_turn_cancelled', str(row.get('error') or ''))
-        else:
-            await self._fault('owner-private', '等待本轮结果超时，记录保留，未冒充完成', stage='model')
+        """Compatibility for callers awaiting a private watcher directly."""
+        await self._watch_turn(execution, source='owner-private',
+                               chat=str((item.get('payload') or {}).get('chat_id') or ''))
 
     async def group_deliver(self, data: dict[str, Any]) -> dict[str, Any]:
         """Send decided bubbles into one group; the group's own settings own the gate.
@@ -911,31 +852,18 @@ class QQAgentLoop:
                           'may_have_sent': True}
                 if emoji_failed(part, detail):
                     continue
-                if not stopped():
-                    await self._delivery_notice(chat_id,key,index+1,len(parts),len(sent),reply_to,uncertain=True)
                 return failed(part, detail)
             if not result.get('ok'):
                 detail = result.get('error') or {}
                 code = f"第 {index+1}/{len(parts)} 段发送失败：{detail.get('code','未知')}；已发送 {len(sent)} 段，未自动重试"
                 if emoji_failed(part, {**detail, 'code': code}):
                     continue
-                if not stopped():
-                    await self._delivery_notice(chat_id,key,index+1,len(parts),len(sent),reply_to,uncertain=bool(detail.get('may_have_sent')))
                 return failed(part, {**detail, 'code': code})
             sent.append(str((result.get('payload') or {}).get('message_id', '')))
             bubble = bubbles[part['bubble']]
             bubble['message_ids'].append(sent[-1])
             bubble['state'] = 'sent' if part['last'] else 'partial'
         return {'ok': True, 'payload': {'message_id': sent[-1], 'message_ids': sent, 'bubbles': bubbles}}
-
-    async def _delivery_notice(self, chat, key, part, total, sent, quote, *, uncertain=False):
-        message = (f'第{part}/{total}段没有取得发送回执' if uncertain else f'第{part}/{total}段发送失败')
-        message += f'，已确认送达{sent}段。原回复已保留，没有自动重发整条。'
-        try:
-            await self.channel.action('send_message', {'chat_id':chat,'segments':[{'type':'text','text':message}],
-                **({'reply_to':str(quote)} if quote else {}), 'idempotency_key':key+':delivery-notice'},timeout=10)
-        except Exception as exc:
-            log('delivery notice unavailable: ' + type(exc).__name__)
 
     async def _failure_notice(self, item, error, key='', *, validate=None):
         if isinstance(error, InterruptedError) or self.cancel_event.is_set():

@@ -173,35 +173,69 @@ class AgentState:
         return dict(row) if row else None
 
     def claim_next(self):
-        """Start the oldest queued turn and merge same-place turns waiting behind it.
+        """Claim the next eligible turn and only its adjacent ordinary materials.
 
-        Returns ``(run, inputs)`` or ``None``. The claim records the turn as running
-        and takes every input already registered for that place in one commit; inputs
-        registered after this commit stay for the next turn (the snapshot rule).
+        Returns ``(run, inputs)`` or ``None``. The claim records the turn as running.
+        Trigger references retain reception order, including when submitters finish
+        registering their wakes in a different order. Untriggered group chatter does
+        not block an immediate wake. A different queued place or an independent plan
+        ends a merge; later input remains for its own turn.
         """
         now = time.time()
         with database(self.path) as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute("SELECT * FROM agent_runs WHERE status='queued' ORDER BY created,rowid LIMIT 1").fetchone()
-            if row is None:
+            queued = [dict(row) for row in db.execute(
+                "SELECT * FROM agent_runs WHERE status='queued' ORDER BY created,rowid")]
+            if not queued:
                 return None
-            run = dict(row)
+            pending = [dict(row) for row in db.execute(
+                "SELECT * FROM agent_inputs WHERE run='' AND cancelled=0 ORDER BY seq")]
+            by_reference = {item['reference']: item for item in pending}
+            next_seq = max((item['seq'] for item in pending), default=0) + 1
+
+            def trigger(item):
+                references = json.loads(item['inputs'] or '[]')
+                return by_reference.get(references[0]) if references else None
+
+            def arrival_order(item):
+                event = trigger(item)
+                if event:
+                    return event['seq'], item['created']
+                # A clock has no input reference; retain its actual position among
+                # arrivals rather than moving every later message ahead of it.
+                before = max((event['seq'] for event in pending if event['received'] <= item['created']), default=0)
+                return before + .5, item['created']
+
+            queued.sort(key=arrival_order)
+            run = queued[0]
+            selected = [run]
+            boundary = next_seq
+            ordinary = run['kind'] == 'message' and trigger(run) is not None
+            if ordinary:
+                for other in queued[1:]:
+                    if (other['kind'] != 'message' or other['source'] != run['source']
+                            or other['conversation'] != run['conversation']):
+                        boundary = arrival_order(other)[0]
+                        break
+                    selected.append(other)
+            if ordinary:
+                inputs = [item for item in pending if item['kind'] == 'message'
+                          and item['source'] == run['source']
+                          and item['conversation'] == run['conversation'] and item['seq'] < boundary]
+            else:
+                # An occurrence is its own commission. Never let the last plan
+                # payload replace other commissions addressed to the same target.
+                references = set(json.loads(run['inputs'] or '[]'))
+                inputs = [item for item in pending if item['reference'] in references]
             db.execute("UPDATE agent_runs SET status=?,started=? WHERE id=? AND status='queued'",
                        (RUNNING, now, run['id']))
-            others = [dict(item) for item in db.execute(
-                "SELECT id FROM agent_runs WHERE status='queued' AND source=? AND conversation=? AND id!=?"
-                " ORDER BY created,rowid", (run['source'], run['conversation'], run['id']))]
-            for other in others:
+            for other in selected[1:]:
                 db.execute("UPDATE agent_runs SET status=?,merged_into=?,finished=? WHERE id=?",
                            (MERGED, run['id'], now, other['id']))
-            inputs = [dict(item) for item in db.execute(
-                "SELECT * FROM agent_inputs WHERE run='' AND cancelled=0 AND source=? AND conversation=? ORDER BY seq",
-                (run['source'], run['conversation']))]
-            if inputs:
-                db.execute("UPDATE agent_inputs SET run=? WHERE run='' AND cancelled=0 AND source=? AND conversation=?",
-                           (run['id'], run['source'], run['conversation']))
-                db.execute('UPDATE agent_runs SET inputs=? WHERE id=?',
-                           (json.dumps([item['reference'] for item in inputs], ensure_ascii=False), run['id']))
+            db.executemany("UPDATE agent_inputs SET run=? WHERE seq=? AND run='' AND cancelled=0",
+                           [(run['id'], item['seq']) for item in inputs])
+            db.execute('UPDATE agent_runs SET inputs=? WHERE id=?',
+                       (json.dumps([item['reference'] for item in inputs], ensure_ascii=False), run['id']))
             run.update(status=RUNNING, started=now,
                        inputs=[item['reference'] for item in inputs])
         return run, inputs

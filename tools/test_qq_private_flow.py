@@ -305,9 +305,6 @@ class QQPrivateFlowTests(unittest.TestCase):
             store = self.store
             owner = OWNER
 
-            def watch_private(self, execution, item):
-                calls.append(('watch', execution, item['message_id']))
-
         with patch('tool_host.request', lambda root, route, body, **kwargs: calls.append((route, body)) or
                    {'execution': 'run-1', 'status': 'queued'}):
             submission = submit(Loop(), {'message_id': message, 'text': '交给主执行',
@@ -317,7 +314,9 @@ class QQPrivateFlowTests(unittest.TestCase):
         self.assertEqual(calls[0][0], '/submit')
         self.assertEqual(calls[0][1]['source'], 'qq-private')
         self.assertEqual(calls[0][1]['reference'], 'qq:' + str(message))
-        self.assertEqual(calls[1], ('watch', 'run-1', message))
+        # This blocking transport seam can run in a worker thread. handle() owns
+        # scheduling the result watcher after returning to the QQ event loop.
+        self.assertEqual(len(calls), 1)
         self.assertEqual(self.qq_row(message)['status'], 'submitted')
         self.assertEqual(self.qq_row(message)['runtime_turn_id'], 'run-1')
 
