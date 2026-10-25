@@ -20,6 +20,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / 'harness'), str(ROOT / 'vendor/python')]
 from fish_agent import get_runtime, reset_runtime
 from fish_agent.execution import state as st
 from fish_agent.experience.batches import BatchLog
+from locations import project_path
 from governance import Governance
 from model_gateway import ChatOptions, ChatResult
 from social_context import SocialContext
@@ -250,7 +251,7 @@ class BatchTurnTests(unittest.TestCase):
                                            'request_id': uuid.uuid4().hex})
         second_settled = self.wait_job(wb, second['job_id'])
         self.assertEqual(second_settled['status'], 'complete')
-        with database(self.root / 'data/social/experience.db') as db:
+        with database(project_path(self.root, 'data/social/experience.db')) as db:
             runs = [dict(row) for row in db.execute('SELECT * FROM agent_runs ORDER BY created')]
         self.assertEqual(runs[1]['status'], st.COMPLETE)
         self.assertEqual(runs[1]['error'], '')  # it ran, rather than being merged away
@@ -258,8 +259,8 @@ class BatchTurnTests(unittest.TestCase):
         self.assertEqual(wb.dispatch('turn.view', {'execution': second_settled['execution']})['batches'], [])
         self.assertEqual(self.wait_batch(wb, cid)[0]['state'], 'consumed')
 
-    def test_two_files_in_one_window_are_handled_by_one_turn(self):
-        fake = self.gateway([saying('收到两个文件'), final('')])
+    def test_files_share_a_window_while_late_text_keeps_its_next_turn(self):
+        fake = self.gateway([saying('收到两个文件'), final(''), final('')])
         wb = Workbench(self.root)
         cid = wb.dispatch('chat.new', {'title': '批次测试'})['id']
         first_file = self.root / 'first.txt'
@@ -275,20 +276,22 @@ class BatchTurnTests(unittest.TestCase):
                                            'request_id': uuid.uuid4().hex})
         self.assertEqual(self.wait_job(wb, first['job_id'])['status'], 'complete')
         self.assertEqual(self.wait_job(wb, second['job_id'])['status'], 'complete')
-        with database(self.root / 'data/social/experience.db') as db:
+        with database(project_path(self.root, 'data/social/experience.db')) as db:
             runs = [dict(row) for row in db.execute('SELECT * FROM agent_runs ORDER BY created')]
         self.assertEqual(len(runs), 2)
         self.assertEqual(runs[0]['status'], st.COMPLETE)
         self.assertEqual(runs[1]['status'], st.SILENT)
-        self.assertTrue(json.loads(runs[1]['result'])['merged'])
-        self.assertEqual(len(fake.requests), 2)  # one fish_say + one final, only for the batch turn
+        self.assertFalse(json.loads(runs[1]['result']).get('merged', False))
+        # The shared file batch is read once; the later message still gets its own
+        # opportunity to think, and may normally choose not to send.
+        self.assertEqual(len(fake.requests), 3)
         first_request = json.dumps(fake.requests[0], ensure_ascii=False)
         self.assertIn('alpha content for the batch', first_request)
         self.assertIn('beta content for the batch', first_request)
         batches = self.wait_batch(wb, cid)
         self.assertEqual(len(batches), 1)
         self.assertEqual(len(batches[0]['items']), 2)
-        with database(self.root / 'data/qq/desktop-chat.db') as db:
+        with database(project_path(self.root, 'data/qq/desktop-chat.db')) as db:
             inbound = [dict(row) for row in db.execute(
                 "SELECT id,segments FROM messages WHERE direction='inbound' ORDER BY id")]
         file_refs = ['desktop:' + str(row['id']) for row in inbound

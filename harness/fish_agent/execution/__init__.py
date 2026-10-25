@@ -162,7 +162,7 @@ class ExecutionModule:
             inputs = json.loads(row.get('inputs') or '[]')
         except (TypeError, ValueError):
             inputs = []
-        reference = str(inputs[0]) if inputs else ('self:' + str(row['id']))
+        reference = str(inputs[-1]) if inputs else ('self:' + str(row['id']))
         kind = str(row.get('kind') or '')
         plan_payload = self.runtime.plans._payload(row) if str(row.get('source')) == 'plan' else {}
         schedule_id, slot = str(plan_payload.get('schedule_id') or ''), str(plan_payload.get('slot') or '')
@@ -181,6 +181,21 @@ class ExecutionModule:
                             'reference': reference},
                 'started': row['started'], 'finished': row['finished'], 'elapsed_ms': row['elapsed_ms'],
                 'inputs': inputs, 'reference': reference}
+        view['materials'] = [{**item, 'payload': json.loads(item.get('payload') or '{}'),
+                              'considered': bool(item['considered']), 'cancelled': bool(item['cancelled'])}
+                             for item in self.state.inputs_for(row['id'])]
+        for material in view['materials']:
+            if material['source'] == 'desktop':
+                original = self.runtime.client.inbound(material['conversation'], material['message'])
+            elif material['source'] in ('qq-private', 'qq-group'):
+                original = self.runtime.client_qq.inbound(material['message'])
+            else:
+                continue
+            material['original'] = original
+            if original:
+                # The receive ledger keeps a short preview. The workbench reads
+                # the complete original, keeping its sender, quotes and segments.
+                material['text'] = str(original.get('text') or '')
         try:
             result = json.loads(row.get('result') or '{}')
         except (TypeError, ValueError):
@@ -412,14 +427,6 @@ class ExecutionModule:
             if self._stop.is_set():
                 self._finish(run, st.CANCELLED, error_kind='InterruptedError',
                              error='后台正在关闭，这次提交没有开始')
-                return
-            references = [str(row.get('reference') or '') for row in inputs]
-            if references and all(runtime.experience.batches.covered([ref]) for ref in references):
-                # The files of this input were already handed to the turn that owned
-                # their 3-second batch; the batch is handled once, not re-generated.
-                runtime.experience.record_result(run, st.SILENT)
-                self._finish(run, st.SILENT, result={'merged': True,
-                                                     'note': '同批文件已由上一回合统一处理'})
                 return
             def prepare():
                 materials.update(runtime.experience.prepare(run, inputs, cancel))
