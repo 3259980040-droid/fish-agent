@@ -43,7 +43,8 @@ def latest(root,role='qq'):
     path = project_path(Path(root), 'data/social/experience.db')
     if not path.is_file(): return None
     import sqlite3
-    with sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True) as db:
+    from contextlib import closing
+    with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True)) as db:
         db.row_factory = sqlite3.Row
         if not db.execute("SELECT 1 FROM sqlite_master WHERE name='turn_traces'").fetchone(): return None
         row = db.execute('SELECT * FROM turn_traces WHERE role=? AND child=0 ORDER BY updated DESC LIMIT 1',(role,)).fetchone()

@@ -118,15 +118,17 @@ class Outbox:
                 'confirmed_at': record.get('updated_at', 0),
                 'text': ''.join(str(s.get('text', '')) for s in payload.get('segments', []) if s.get('type') == 'text')[:800]}
 
-    def find_message(self, chat_id: str, message_id: str) -> dict[str, Any] | None:
+    def find_message(self, chat_id: str, message_id: str, *, instance_id=None) -> dict[str, Any] | None:
         """Public destination projection; never return execution or private request data."""
         for record in reversed(self._read()):
+            if instance_id is not None and (record.get('payload') or {}).get('instance_id', 'main') != instance_id: continue
             row = self._public_receipt(record, chat_id)
             if row and row['message_id'] == str(message_id): return row
         return None
 
-    def recent_confirmed(self, chat_id: str, *, since: float, until: float, limit: int = 6) -> list[dict[str, Any]]:
-        rows = [row for record in self._read() if (row := self._public_receipt(record, chat_id))
+    def recent_confirmed(self, chat_id: str, *, since: float, until: float, limit: int = 6, instance_id=None) -> list[dict[str, Any]]:
+        rows = [row for record in self._read() if (instance_id is None or (record.get('payload') or {}).get('instance_id', 'main') == instance_id)
+                and (row := self._public_receipt(record, chat_id))
                 and since < row['confirmed_at'] <= until]
         return sorted(rows, key=lambda row: row['confirmed_at'], reverse=True)[:max(1, min(limit, 8))]
 

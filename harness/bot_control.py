@@ -371,6 +371,7 @@ class BotControl:
         ``FISH_QQ_TRANSPORT`` (documented in RESULT.md) may name an importable factory
         ``(root) -> callable(target, text, key)`` for embeds that own a live channel client.
         """
+        from locations import instance_context
         root = self.root
         factory = os.environ.get('FISH_QQ_TRANSPORT', '').strip()
         if factory:
@@ -397,7 +398,8 @@ class BotControl:
                 await ws.send(json.dumps({'v': 1, 'type': 'action', 'id': action_id, 'action': 'send_message', 'ts': '',
                     'payload': {'chat_id': target, 'segments': segments or [{'type': 'text', 'text': text}],
                                 **({'reply_to': str(reply_to)} if reply_to else {}),
-                                'idempotency_key': 'scheduled:' + request_id}}))
+                                'instance_id': instance_context(root).instance_id,
+                                'source_tools': list(source_tools), 'idempotency_key': 'scheduled:' + request_id}}))
                 while True:
                     frame = json.loads(await asyncio.wait_for(ws.recv(), 30))
                     if frame.get('type') == 'action.result' and frame.get('id') == action_id:

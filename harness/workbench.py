@@ -311,9 +311,8 @@ class Workbench:
         return project_path(self.root, 'data', self.chat().role, name)
 
     def _group_ids(self):
-        from storage import read_json
-        config = read_json(project_path(self.root, 'channels/fish_qq/config.json'), {})
-        return [str(value) for value in config.get('allowlist', {}).get('group_ids', [])]
+        from fish_agent.settings.channels import ChannelSettings
+        return ChannelSettings(self.root).group_ids()
 
     @staticmethod
     def _group_conversation_id(group_id):
@@ -798,69 +797,48 @@ class Workbench:
             if action == 'language.list': return language.list(**params)
             if action == 'language.save': return language.save(**params, owner=Governance(self.root).owner_id())
             if action == 'language.manage': return language.manage(params['id'], params['status'])
-        if action == 'channels.status':
-            import requests
-            from core import HarnessConfig
-            from governance import control_token
+        if action in ('channels.status', 'channels.update'):
+            from fish_agent.settings.channels import ChannelSettings
+            from fish_agent.settings.tools import ToolSettings
             from group_policy import GroupPolicy
+            from conversation_policy import community
+            import requests
+            from governance import control_token
             from storage import read_json
+            participation = ChannelSettings(self.root)
+            if action == 'channels.update': participation.save(params)
+            value = participation.get()
             config = read_json(project_path(self.root, 'channels/fish_qq/config.json'), {})
-            headers = {'x-fish-token': control_token(self.root)}
             loop = {}
             try:
-                loop = requests.get('http://127.0.0.1:3102/status', headers=headers, timeout=2,
-                                    proxies={'http': None, 'https': None, 'all': None}).json()
-            except (requests.RequestException, ValueError):
-                pass
-            ready = False
-            try:
-                port = HarnessConfig(self.root).runtime_port('qq')
-                ready = bool(requests.get(f'http://127.0.0.1:{port}/fish/status', headers=headers, timeout=2,
-                                         proxies={'http': None, 'https': None, 'all': None}).json().get('ok'))
-            except (requests.RequestException, ValueError):
-                pass
-            groups = []
-            for group_id in config.get('allowlist', {}).get('group_ids', []):
-                from group_tests import GroupTests
-                from conversation_policy import community
-                # The switches that actually decide whether this group hears and answers live
-                # in the main policy: engine=fish reads it on every message. A group-test
-                # window keeps its own copy and used to be what this page showed, so the
-                # toggles wrote to a policy nobody was reading and appeared to do nothing.
-                value = GroupPolicy(self.root).config('group:' + str(group_id))
-                trial = GroupTests(self.root).current(str(group_id))
-                groups.append({'id': str(group_id), 'listen': bool(value.get('listen')), 'reply': bool(value.get('reply')),
-                    'topic': community(self.root, str(group_id)).get('topic',''),
-                    'route': 'normal', 'window': trial['id'] if trial else '',
-                    'engine': str(value.get('engine') or ''), 'learn': bool(value.get('learn')),
-                    'read': bool(value.get('read'))})
+                loop = requests.get('http://127.0.0.1:3102/status', headers={'x-fish-token': control_token(self.root)},
+                                    timeout=2, proxies={'http': None, 'https': None, 'all': None}).json()
+            except (requests.RequestException, ValueError): pass
             bot = loop.get('bot') or config.get('bot') or {}
-            return {'owner': Governance(self.root).owner_id(), 'bot': str(bot.get('id', 'unknown')),
-                    'private_route': 'private:' + Governance(self.root).owner_id(), 'groups': groups,
-                    'services': [{'name': '主人消息处理', 'ready': bool(loop), 'detail': '已连接' if loop else '未连接'},
-                                 {'name': '原生 DSH 工作环境', 'ready': ready, 'detail': '可用' if ready else '未启动'},
-                                 {'name': '工具与记忆', 'ready': True, 'detail': '已连接'}],
-                    'note': '主人交办的单次群发送与群聊自动参与分开设置。'}
-        if action == 'channels.update':
-            from group_policy import GroupPolicy
-            from storage import read_json
-            group_id = str(params.get('group_id', ''))
-            config = read_json(project_path(self.root, 'channels/fish_qq/config.json'), {})
-            allowed = {str(value) for value in config.get('allowlist', {}).get('group_ids', [])}
-            if group_id not in allowed:
-                raise ValueError('只能修改白名单群')
-            changes = {key: params[key] for key in ('listen', 'read', 'reply') if key in params}
-            if not changes and 'topic' not in params:
-                raise ValueError('没有要保存的群设置')
-            if any(type(value) is not bool for value in changes.values()):
-                raise ValueError('群设置必须是开关值')
-            from group_tests import GroupTests
-            from conversation_policy import set_community
-            if 'topic' in params: set_community(self.root, group_id, params['topic'])
-            # Always the main policy: writing into a test window changed a copy that the
-            # fish engine never reads, which is why the switch looked broken.
-            policy = GroupPolicy(self.root)
-            return policy.configure('group:' + group_id, changes) if changes else policy.config('group:' + group_id)
+            connected = loop.get('connected') is True
+            native_ready = False
+            try:
+                from core import HarnessConfig
+                port = HarnessConfig(self.root).runtime_port('qq')
+                native_ready = requests.get(f'http://127.0.0.1:{port}/fish/status',
+                    headers={'x-fish-token': control_token(self.root)}, timeout=2,
+                    proxies={'http': None, 'https': None, 'all': None}).json().get('ok') is True
+            except (requests.RequestException, ValueError): pass
+            capabilities = ToolSettings(self.root)
+            groups = []
+            for group in participation.group_ids():
+                policy = GroupPolicy(self.root).config('group:' + group)
+                groups.append({'id': group, 'listen': policy['listen'],
+                    'reply': capabilities.effective_capability(target='group:' + group)['enabled'],
+                    'topic': community(self.root, group).get('topic', ''),
+                    'route': 'normal', 'window': '', 'engine': 'fish', 'learn': policy['learn'], 'read': policy['read']})
+            return {**value, 'instance_id': self.instance_id,
+                'connections': [{'id': 'qq', 'name': '现有QQ连接', 'bot': str(bot.get('id', 'unknown')), 'connected': connected}],
+                'owner': Governance(self.root).owner_id(), 'bot': str(bot.get('id', 'unknown')),
+                'private_route': 'private:' + Governance(self.root).owner_id(), 'groups': groups,
+                'services': [{'name': '共用QQ连接', 'ready': connected, 'detail': '已连接' if connected else '未连接'},
+                             {'name': '原生 DSH 工作环境', 'ready': native_ready, 'detail': '可用' if native_ready else '未启动'}],
+                'note': '群号是本窗口参与设置，不代表账号已经入群；接收与发送分别生效。'}
         if action == 'personas.list':
             contexts = SocialContext(self.root)
             return [{**row, 'body': contexts.persona(row['id'])['body']} for row in PersonaLibrary(self.root).list()]
@@ -1093,7 +1071,7 @@ class Workbench:
             from tool_host import builtins, skill_tool
             settings=ToolSettings(self.root)
             value=settings.save(params.get('patch',{})) if action.endswith('.save') else settings.get()
-            groups=read_json(project_path(self.root,'channels/fish_qq/config.json'),{}).get('allowlist',{}).get('group_ids',[])
+            groups=self._group_ids()
             return {'instance_id':self.instance_id,'settings':value,
                     'tools':[dict(name=item['name'],description=item.get('description',''),
                                   **settings.effective_capability(item['name'])) for item in builtins('qq')+[skill_tool(self.root)]],
@@ -1439,7 +1417,10 @@ class Workbench:
                 if any(type(value) is not bool for value in changes.values()):
                     raise ValueError('群开关必须是开关值')
                 from group_policy import GroupPolicy
-                GroupPolicy(self.root).configure(chat, changes)
+                if 'reply' in changes:
+                    from fish_agent.settings.tools import ToolSettings
+                    ToolSettings(self.root).save({'send': {'groups': {chat.removeprefix('group:'): changes.pop('reply')}}})
+                if changes: GroupPolicy(self.root).configure(chat, changes)
                 return self.life_status()
             if action == 'life.dive':
                 from group_policy import DIVE_MINUTES_RANGE, GroupPolicy
@@ -1474,7 +1455,10 @@ class Workbench:
                     changes['wake_probability'] = float(value)
                 if not changes:
                     raise ValueError('没有要保存的习惯设置')
-                GroupPolicy(self.root).configure(chat, changes)
+                if 'reply' in changes:
+                    from fish_agent.settings.tools import ToolSettings
+                    ToolSettings(self.root).save({'send': {'groups': {chat.removeprefix('group:'): changes.pop('reply')}}})
+                if changes: GroupPolicy(self.root).configure(chat, changes)
                 return self.life_status()
             if action == 'life.events':
                 return self.life_events(params)
@@ -1530,9 +1514,7 @@ class Workbench:
 
     # ---------------------------------------------------------------- life page
     def _life_allowlist(self):
-        from storage import read_json
-        config = read_json(project_path(self.root, 'channels/fish_qq/config.json'), {})
-        return [str(value) for value in config.get('allowlist', {}).get('group_ids', [])]
+        return self._group_ids()
 
     def _life_chat(self, params):
         allowed = self._life_allowlist()
@@ -1561,8 +1543,9 @@ class Workbench:
                 conn.close()
         config = {**DEFAULTS, **stored}
         allowed = self._life_allowlist()
+        from fish_agent.settings.tools import ToolSettings
         return {'chat': chat, 'engine': str(config['engine']), 'listen': bool(config['listen']),
-                'reply': bool(config['reply']), 'learn': bool(config['learn']), 'read': bool(config['read']),
+                'reply': ToolSettings(self.root).effective_capability(target=chat)['enabled'], 'learn': bool(config['learn']), 'read': bool(config['read']),
                 'dive_until': float(config['dive_until'] or 0),
                 'wake_probability': float(config['wake_probability']),
                 'active_cooldown_s': int(config['active_cooldown_s']),

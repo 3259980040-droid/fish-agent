@@ -381,7 +381,7 @@ def builtins(role):
                                    'doc_id': {'type': 'string',
                                               'description': 'fish_doc_save 返回的真实资料编号，只有 move 需要'}},
                                   ['action'])},
-            {'name': 'fish_group_send', 'description': '主人私聊里替主人往某个已授权的白名单群真实说一句，返回真实消息编号。只对 scope=owner 的主人私聊开放：群聊、独立窗口、群测试、子任务和定时会话都不能调用。chat_id 形如 group:群号，必须取自 fish_group_list 且该群 reply 为真；text 为 1 到 2000 字正文；reply_to 可填该群真实消息编号以引用那条消息。发送前会重新核对群设置：群暂停或 listen/reply 任一关闭都会拒绝。同一群 10 分钟内最多 5 条（与定时发送共用同一本发送台账，达到上限就拒绝）。该群正在生成本群回复（有活动的 reservation）时也会拒绝，避免和自动回复抢发。同一群、同一段正文在同一分钟内重复调用返回既有回执，不会重复发送。只报真实回执：没有拿到消息编号时返回 uncertain，并且不自动重发。',
+            {'name': 'fish_group_send', 'description': '沿本窗口的主人授权向已配置群发送实际正文，返回真实回执。chat_id取自本窗口群列表；接收群消息和发送分别控制，关闭接收不会代替发送开关。发送前读取本窗口的暂停、工具、群发送总开关及此群发送值。外部仍以实际QQ账号发送，委托来源不改变发言身份。原调用ID由程序记录，未确认不自动重发。',
              'parameters': schema({'chat_id': string,
                                    'text': {'type': 'string', 'minLength': 1, 'maxLength': 2000},
                                    'reply_to': {'type': 'string', 'description': '该群真实消息编号，用于引用'}},
@@ -929,7 +929,7 @@ class ToolHost:
             return control.execute(arguments['action'],arguments.get('params',{}),identity) if name=='fish_owner_admin' else control.send(identity,arguments['text'],arguments['request_id'])
         if name == 'fish_group_send':
             require('bot.manage')
-            return self.group_send(identity,arguments)
+            return self.group_send(identity,{**arguments,'request_id':'owner-send:'+session+':'+call_id})
         if name == 'fish_self_control':
             # Her own account switch: the owner's private chat may take the whole
             # account offline, a bound group may only dive itself. self_control
@@ -1532,7 +1532,7 @@ class ToolHost:
         text=str(arguments['text'])
         if not text.strip():raise ValueError('请输入要发送的内容')
         return control.deliver_bubbles(target,[{'kind':'text','text':text}],arguments['request_id'],
-            source='owner-request',context='owner')
+            source='owner-request',context='owner',source_tools=['fish_group_send'])
 
     def unread(self, chat):
         """(unread, readable) for one group: cursor minus handled, read only.
