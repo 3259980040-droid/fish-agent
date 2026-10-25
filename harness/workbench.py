@@ -599,6 +599,7 @@ class Workbench:
                 wanted.append(value)
         chat = self.chat()
         removed = {'conversations': 0, 'messages': 0, 'conversation_ids': []}
+        removed_messages = []
         # The main execution owns the running turn; ask it, not a page-local flag.
         active = self.runtime().execution.active_conversation() or chat.active_cid
         if active and active in wanted:
@@ -611,6 +612,8 @@ class Workbench:
                         raise ValueError('群聊记录属于 QQ 侧，这里只能删除私人会话')
                     if conn.execute('SELECT 1 FROM conversations WHERE id=?', (cid,)).fetchone() is None:
                         continue
+                    removed_messages.extend(row[0] for row in conn.execute(
+                        'SELECT id FROM messages WHERE conversation_id=?', (cid,)))
                     removed['messages'] += conn.execute('DELETE FROM messages WHERE conversation_id=?', (cid,)).rowcount
                     conn.execute('DELETE FROM conversations WHERE id=?', (cid,))
                     removed['conversations'] += 1
@@ -618,6 +621,10 @@ class Workbench:
                 conn.commit()
             finally:
                 conn.close()
+        if removed_messages:
+            # The FTS index is derived: forget these originals in the same delete path.
+            from history_index import forget_messages
+            forget_messages(self.root, 'desktop-chat.db', removed_messages)
         if self._selected_conversation in removed['conversation_ids']:
             self._selected_conversation = ''
         return {'ok': True, **removed}
@@ -895,14 +902,19 @@ class Workbench:
         if action == 'memory.overview':
             from memory_digest import overview
             from daily_curate import latest
-            # 最近一次每日整理：清了哪几条、收了哪几张图、各自什么理由。
+            # 最近一次整理：每日、工具和这个按钮共用同一条执行记录；
+            # 升级前旧表行只在没有新记录时作为迁移读取。
             return {**overview(self.root), 'daily_curate': latest(self.root)}
         if action == 'memory.curate.run':
-            from daily_curate import run
+            from memory_curation import submit
             force = params.get('force', False)
             if type(force) is not bool:
                 raise ValueError('重做标记需为开关值')
-            return run(self.root, params.get('day'), force=force)
+            return submit(self.root, day=params.get('day'), start=params.get('start'),
+                          end=params.get('end'), force=force, requested_by='client')
+        if action == 'memory.curate.status':
+            from memory_curation import status as curation_status
+            return curation_status(self.root, params.get('run_id'), limit=10)
         if action.startswith('memory.digest.'):
             from memory_digest import build, list_digests, revise
             if action == 'memory.digest.list':
@@ -956,6 +968,18 @@ class Workbench:
             # The page reads the one memory; each row keeps its source scope.
             return MemoryStore(self.root, 'qq').search(params.get('query', ''), scope=None, limit=60,
                                                       include_candidates=True)
+        if action in ('knowledge.search', 'knowledge.open'):
+            from knowledge import open as knowledge_open
+            from knowledge import search as knowledge_search
+            if action == 'knowledge.search':
+                limit = params.get('limit', 12)
+                if type(limit) is not int or not 1 <= limit <= 50:
+                    raise ValueError('检索条数需为 1 到 50 的整数')
+                return knowledge_search(self.root, params.get('query', ''), limit=limit,
+                                        scope=params.get('scope') or None)
+            return knowledge_open(self.root, str(params.get('reference') or ''),
+                                  level=params.get('level', 'original'),
+                                  page=params.get('page', 1), count=params.get('count', 5))
         if action == 'memory.save':
             store = MemoryStore(self.root, 'qq')
             memory_id = params.get('id')

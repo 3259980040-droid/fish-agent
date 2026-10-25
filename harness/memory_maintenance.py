@@ -1,24 +1,10 @@
-"""Scheduled memory maintenance: daily/weekly jobs in Asia/Shanghai (UTC+8).
+"""Scheduled-state readers for the one memory curation program.
 
-``MemoryMaintenance(root).tick(now)`` is cheap and idempotent and is meant to
-be called from the ToolHost background worker; it catches up a missed daily
-04:00 or weekly Sunday 04:30 window once, then only processes *new* source
-messages (per-role incremental cursors). ``run(kind, now=...)`` executes one
-job on demand.
-
-Sources are the real private/local histories already on disk: inbound QQ
-messages in ``data/qq/qq.db`` and inbound desktop chats in
-``data/<role>/desktop-chat.db``. Only user messages are read -- never the
-bot's own replies or model-written summaries -- and every stored fact keeps
-its ``source`` reference. A job with no new eligible message makes no model
-request (the call itself is refused in that case).
-
-Weekly maintenance does not delete memory files: it deduplicates automatic
-facts, evaluates expiry/inactivity with the upstream A_memorix lifecycle policy
-(via ``memory_source``) and only moves inactive automatic facts to the
-``candidate`` status so they are no longer recalled as active facts. Owner
-(newest copy of an auto fact) writes are never touched. No user notification
-is produced by any run; failures are recorded in the maintenance state.
+The daily actual work lives in :mod:`memory_curation`: its automatic 04:00
+window, the Fish tool and the client button all submit the same run. This module
+keeps the historical readers (QQ/desktop messages), the persisted schedule
+status and the compatibility entry points; it no longer owns a second learning
+loop, a second daily tick or an independent dedup pass.
 """
 from __future__ import annotations
 
@@ -635,13 +621,9 @@ class MemoryMaintenance:
         return result
 
     def tick(self, now=None):
-        """Cheap, idempotent: run each due job once; never raises for a job."""
-        now = to_timestamp(now)
-        with self.lock:
-            for role in self._roles():
-                # First use: rows existing now are history, not backlog.
-                self.history.initialize(role, now)
-            return self._tick(now)
+        """Compatibility entry into the one curation program's daily window."""
+        from memory_curation import tick as curation_tick
+        return curation_tick(self.root, now)
 
     def _tick(self, now):
         summary = {'now': _iso(now), 'ran': [], 'errors': [], 'status': 'ok'}
@@ -729,11 +711,11 @@ class MemoryMaintenance:
         return record['status'], summary
 
     def run(self, kind, now=None, *, role='qq', gateway_factory=None):
-        """Execute 'daily' or 'weekly' once for a role and persist the result.
+        """Compatibility entry into the one curation program.
 
-        If the previous window was missed, the messages since the last run are
-        collected once (``caught_up``) before the current window runs, so a
-        long downtime never silently drops history.
+        Daily learning/digest/emoji and the duplicate/expiry pass are no longer
+        executed here; this class keeps status readers and the historical
+        readers, while every write goes through ``memory_curation``.
         """
         if kind not in ('daily', 'weekly'):
             raise ValueError('维护任务只能是 daily 或 weekly')
@@ -741,39 +723,18 @@ class MemoryMaintenance:
             raise ValueError('未知角色')
         now = to_timestamp(now)
         window = due_windows(now)[kind]
-        with self.lock:
-            state = self._state(role)
-            # First real use of this role's state: without a baseline the whole
-            # pre-existing history (and the live queue built from it) looked
-            # "new". Record the current rows as history; only later messages
-            # are learned (`collect()` applies the same rule as a backstop).
-            record = self._job(state, kind)
-            self.history.initialize(role, now)
-            if float(record.get('last_window') or 0) >= window:
-                return {'kind': kind, 'role': role, 'window': _iso(window), 'status': 'already-done',
-                        'summary': record.get('summary') or {}}
-            caught_up = None
-            if kind == 'daily' and self._missed(record, kind, window):
-                # Fish was off over at least one window: replay what arrived
-                # since the last successful run, once. (A run already done for
-                # today is not repeated by the normal run below.)
-                status, caught_up = self._run_once(kind, now, role, gateway_factory, True)
-                return {'kind': kind, 'role': role, 'window': _iso(window), 'status': status,
-                        'summary': caught_up, 'caught_up': caught_up}
-            if (record.get('status') != 'error' and float(record.get('attempted_window') or 0) >= window
-                    and not caught_up):
-                return {'kind': kind, 'role': role, 'window': _iso(window), 'status': 'already-done',
-                        'summary': record.get('summary') or {}}
-            status, summary = self._run_once(kind, now, role, gateway_factory, False)
-            try:
-                from memory_engine import enqueue_warm
-                enqueue_warm(self.root, role)
-            except Exception:  # noqa: BLE001 - backfill is best effort
-                pass
-            result = {'kind': kind, 'role': role, 'window': _iso(window), 'status': status, 'summary': summary}
-            if caught_up is not None:
-                result['caught_up'] = caught_up
-            return result
+        if kind == 'weekly':
+            from memory_curation import tidy_memories
+            summary = tidy_memories(self.root, role, now)
+            return {'kind': kind, 'role': role, 'window': _iso(window), 'status': 'done',
+                    'summary': summary}
+        from memory_curation import run_now
+        gateway = gateway_factory(role) if gateway_factory is not None else None
+        record = run_now(self.root, role=role, gateway=gateway, requested_by='daily',
+                         start=self._earlier_window(kind, window), end=now,
+                         day=_iso(window)[:10])
+        return {'kind': kind, 'role': role, 'window': _iso(window),
+                'status': record.get('status'), 'summary': record.get('result') or {}}
 
     # -- daily --------------------------------------------------------------
     def _gateway(self, role, factory):
@@ -1068,7 +1029,6 @@ def start_background(host, root=None, *, interval: float = 60.0, embed_interval:
     stop = getattr(host, 'stop', None)
     if stop is None:
         stop = threading.Event()
-    maintenance = MemoryMaintenance(root)
     last_embed = 0.0
 
     def warm_embeddings():
@@ -1096,8 +1056,11 @@ def start_background(host, root=None, *, interval: float = 60.0, embed_interval:
             if stop.is_set():
                 break
             try:
-                maintenance.tick()
-            except Exception:  # noqa: BLE001 - persisted in the job record
+                # The one automatic daily trigger: it submits the same curation
+                # program the tool and the client button use, then returns.
+                from memory_curation import tick as curation_tick
+                curation_tick(root)
+            except Exception:  # noqa: BLE001 - persisted in the curation run record
                 pass
             if time.time() - last_embed >= embed_interval:
                 last_embed = time.time()
