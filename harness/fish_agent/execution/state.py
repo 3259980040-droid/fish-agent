@@ -147,12 +147,12 @@ class AgentState:
             row = db.execute('SELECT source,conversation,place FROM agent_inputs ORDER BY seq DESC LIMIT 1').fetchone()
         return dict(row) if row is not None else None
 
-    def run(self, run_id):
+    def run(self, run_id, *, resolve_merged=True):
         """The real state of one turn; a merged turn answers with the run that covered it."""
         with database(self.path) as db:
             row = db.execute('SELECT * FROM agent_runs WHERE id=?', (str(run_id),)).fetchone()
             seen = set()
-            while row is not None and row['status'] == MERGED and row['merged_into'] and row['id'] not in seen:
+            while resolve_merged and row is not None and row['status'] == MERGED and row['merged_into'] and row['id'] not in seen:
                 seen.add(row['id'])
                 row = db.execute('SELECT * FROM agent_runs WHERE id=?', (row['merged_into'],)).fetchone()
         if row is None:
@@ -160,6 +160,30 @@ class AgentState:
         result = dict(row)
         result['elapsed_ms'] = max(0, int(((result['finished'] or time.time()) - (result['started'] or result['created'])) * 1000))
         return result
+
+    def list_runs(self, *, limit=20, cursor=''):
+        """Stable pages of the original ledger, including quiet and merged rows."""
+        import base64
+        import math
+        limit = max(1, min(50, int(limit)))
+        where, args = '', []
+        if cursor:
+            try:
+                created, identifier = json.loads(base64.urlsafe_b64decode(str(cursor)).decode())
+                if isinstance(created, bool) or not isinstance(created, (float, int)) or not math.isfinite(created) \
+                        or not isinstance(identifier, str) or not identifier:
+                    raise ValueError('invalid cursor')
+            except Exception as exc:
+                raise ValueError('回合分页位置无效') from exc
+            where, args = ' WHERE (created<? OR (created=? AND id<?))', [created, created, identifier]
+        with database(self.path) as db:
+            rows = [dict(row) for row in db.execute('SELECT * FROM agent_runs' + where +
+                    ' ORDER BY created DESC,id DESC LIMIT ?', (*args, limit + 1))]
+        page, following = rows[:limit], None
+        if len(rows) > limit:
+            last = page[-1]
+            following = base64.urlsafe_b64encode(json.dumps([last['created'], last['id']]).encode()).decode()
+        return page, following
 
     def queued_run(self, *, source=None, conversation=None):
         clauses, values = ["status='queued'"], []

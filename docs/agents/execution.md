@@ -36,3 +36,11 @@ W03逐实例保存原消息、提交后，用对应runtime.context和execution�
 instances.list/create/rename/set_running/presets为宿主管理动作。create的persona可以是明确{name,body}或{instance_id,revision}；不填创建暂停且未配置的窗口。其余窗口动作由固定instance_id交给同一宿主的对应Workbench/ToolHost上下文，不能改self.root临时执行，也不能从前端选中对象推断QQ等外部入口。
 
 set_running与旧settings.save.paused共用本实例Governance值；每实例有一个主消费者、自己的停止Event和原计划检测调度、每日整理/索引维护，后台启动和关闭遍历真实实例。ToolHost只建一个server/ResearchWorker；按实例代理共用实现并持有各自工具身份/队列。窗口停止不改宿主连接，未配置人格不能启动，状态照实返回。
+
+## W04回合工作台读面
+
+`turns.list({cursor?,limit?})`按当前实例agent_runs的(created,id)稳定降序分页，返回runs/next_cursor及本实例stats。每行复用turn_view的实际认领材料、原件缺失态、简洁工具行动与投递；不按reasoning非空筛选。合并等待记录保留merged_into，不重复计为思考。`turn.view({execution})`读取选中回合完整reasoning/events、五时间点及单轮usage；原chat.reasoning同样返回全文，不再静默截20000字。读取失败不等于缺失记录，原件删除不从预览恢复。
+
+新请求沿原context_requests.turn_id关联原trace.id，trace.execution事件保留主执行引用；累计和单轮只统计可可靠关联的主执行请求，旧未关联记录留coverage，不能按时间/session猜账。闭合步骤由原usage字段从空串变为JSON的完成事实计数（失败及未回传tokens也可闭合），有闭合步骤的distinct execution才计轮。原model-usage账本不与context_requests相加；缺缓存字段为null。现有首输出含reasoning/工具且没有正文末时间和对应正文tokens，output_speed据实null并说明原因。
+
+outputs从同trace的final_content和同call_id发送工具/真实投递结果读取：generated不等于发言，staged仅queued，实际sent/uncertain/failed按原回执；没有增加生成或发送流程。前端以(instance_id,execution)固定查询归属，累计不随当前分页变化，历史选择不自动变成最新轮。

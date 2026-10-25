@@ -149,7 +149,14 @@ class ExecutionModule:
                 'elapsed_ms': row['elapsed_ms'], 'trigger': row.get('kind', ''),
                 'reason': row.get('reason', ''), 'place': row.get('place', '')}
 
-    def turn_view(self, run_id):
+    def turns_list(self, *, limit=20, cursor=''):
+        from .reads import usage
+        rows, following = self.state.list_runs(limit=limit, cursor=cursor)
+        return {'instance_id': self.runtime.context.instance_id,
+                'runs': [self.turn_view(row['id'], summary=True, resolve_merged=False) for row in rows],
+                'next_cursor': following, 'stats': usage(self.root)}
+
+    def turn_view(self, run_id, *, summary=False, resolve_merged=True):
         """One turn's real record, linked by references instead of a second status.
 
         The client can follow a submission to what actually happened: its trigger
@@ -157,7 +164,7 @@ class ExecutionModule:
         that belonged to its batches, the plan occurrence it served, and the real
         delivery receipt, all by the same execution reference.
         """
-        row = self.state.run(run_id)
+        row = self.state.run(run_id, resolve_merged=resolve_merged)
         if row is None:
             return None
         try:
@@ -176,7 +183,11 @@ class ExecutionModule:
             # The plan turn's record is written under wake:<plan>:<slot> (the virtual
             # event), while its input reference is plan:<plan>:<slot>.
             reference = 'wake:%s:%s' % (schedule_id, slot)
-        view = {'execution': row['id'], 'status': _JOB_STATUS.get(row['status'], 'failed'),
+        view = {'instance_id': self.runtime.context.instance_id,
+                'execution': row['id'], 'requested_execution': str(run_id),
+                'merged_into': row.get('merged_into') or (row['id'] if str(run_id) != row['id'] else ''),
+                'created': row['created'],
+                'status': 'merged' if row['status'] == st.MERGED else _JOB_STATUS.get(row['status'], 'failed'),
                 'raw_status': row['status'], 'error': row['error'], 'error_kind': row['error_kind'],
                 'trigger': {'kind': row.get('kind', ''), 'reason': row.get('reason', ''),
                             'place': row.get('place', ''), 'source': row.get('source', ''),
@@ -187,6 +198,8 @@ class ExecutionModule:
                               'considered': bool(item['considered']), 'cancelled': bool(item['cancelled'])}
                              for item in self.state.inputs_for(row['id'])]
         for material in view['materials']:
+            material['preview'] = material['text']
+            material['original_state'] = 'not_applicable'
             if material['source'] == 'desktop':
                 original = self.runtime.client.inbound(material['conversation'], material['message'])
             elif material['source'] in ('qq-private', 'qq-group'):
@@ -194,10 +207,8 @@ class ExecutionModule:
             else:
                 continue
             material['original'] = original
-            if original:
-                # The receive ledger keeps a short preview. The workbench reads
-                # the complete original, keeping its sender, quotes and segments.
-                material['text'] = str(original.get('text') or '')
+            material['original_state'] = 'available' if original is not None else 'missing'
+            material['text'] = str(original.get('text') or '') if original is not None else ''
         try:
             result = json.loads(row.get('result') or '{}')
         except (TypeError, ValueError):
@@ -206,32 +217,24 @@ class ExecutionModule:
         view['silent'] = bool(result.get('silent')) if isinstance(result, dict) else False
         view['merged'] = bool(result.get('merged')) if isinstance(result, dict) else False
         view['trace'] = self._turn_trace(reference)
+        from .reads import actions, outputs, output_speed, usage
+        view['actions'] = actions(view['trace']['events'])
+        view['outputs'] = outputs(view['trace']['events'], view['delivery'], view['trigger']['place'])
+        view['materials_count'] = len(view['materials'])
         view['batches'] = self._turn_batches(row['id'])
         view['delivery_times'] = self._delivery_times(reference)
         view['plan'] = self._plan_occurrence(row, plan_payload)
+        if summary:
+            view['trace'] = {key: view['trace'][key] for key in
+                             ('id', 'reference', 'phase', 'state', 'has_reasoning')}
+        else:
+            view['usage'] = usage(self.root, trace_id=view['trace']['id'])
+            view['output_speed'] = output_speed()
         return view
 
     def _turn_trace(self, reference):
-        import sqlite3
-        from contextlib import closing
-        path = project_path(self.root, 'data/social/experience.db')
-        if not reference or not path.is_file():
-            return {'reference': reference, 'phase': '', 'reasoning': '', 'events': []}
-        with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
-            db.row_factory = sqlite3.Row
-            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='turn_traces'").fetchone():
-                return {'reference': reference, 'phase': '', 'reasoning': '', 'events': []}
-            row = db.execute('SELECT phase,reasoning,events,error FROM turn_traces WHERE reference=? '
-                             'ORDER BY updated DESC LIMIT 1', (reference,)).fetchone()
-        if row is None:
-            return {'reference': reference, 'phase': '', 'reasoning': '', 'events': []}
-        try:
-            events = json.loads(row['events'] or '[]')
-        except (TypeError, ValueError):
-            events = []
-        return {'reference': reference, 'phase': str(row['phase'] or ''),
-                'reasoning': str(row['reasoning'] or ''), 'error': str(row['error'] or ''),
-                'events': events}
+        from .reads import read_trace
+        return read_trace(self.root, reference)
 
     def _turn_batches(self, run_id):
         from storage import database
@@ -445,6 +448,7 @@ class ExecutionModule:
                 return
             def prepare():
                 materials.update(runtime.experience.prepare(run, inputs, cancel))
+                materials['execution'] = run['id']
                 return materials
 
             source = str(run['source'])
