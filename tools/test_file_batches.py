@@ -217,6 +217,16 @@ class BatchTurnTests(unittest.TestCase):
             row = wb.dispatch('chat.job', {'job_id': job_id})
         return row
 
+    def wait_batch(self, wb, cid, *, state='consumed', timeout=8):
+        deadline = time.time() + timeout
+        batches = []
+        while time.time() < deadline:
+            batches = wb.dispatch('attachments.batches', {'id': cid})['batches']
+            if batches and batches[0]['state'] == state:
+                return batches
+            time.sleep(0.05)
+        return batches
+
     def test_a_deliberate_silent_file_turn_still_consumes_its_batch(self):
         # The model reads the file and chooses not to speak: that turn already used the
         # batch, so a later text turn must not receive the same file again.
