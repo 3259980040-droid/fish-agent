@@ -1,7 +1,5 @@
 """One Fish wake queue for reliable plans and discretionary social opportunities."""
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 from storage import database
 
@@ -22,9 +20,13 @@ class AgentScheduler:
         self.root, self.stop = root, stop
         self.control = BotControl(root)
         self.plans = self.control.plans
-        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='fish-wake')
-        self.pending = set()
-        self.lock = threading.Lock()
+        self.runtime = None
+
+    def _runtime(self):
+        if self.runtime is None:
+            from fish_agent import get_runtime
+            self.runtime = get_runtime(self.root)
+        return self.runtime
 
     def initialise(self):
         # A terminated execution might have acted before its final write. Never replay it.
@@ -53,6 +55,11 @@ class AgentScheduler:
             db.execute("INSERT OR IGNORE INTO automation_bootstrap VALUES('unified-wakes-v1',?)", (time.time(),))
 
     def loop(self):
+        """One time wheel: detect due occurrences and submit them to the one execution.
+
+        It never calls a model, never delivers, and never keeps a second queue: the
+        occurrence reference is the deduplication key of the submitted turn.
+        """
         from governance import Governance
         policy = Governance(self.root, 'qq')
         try:
@@ -63,28 +70,10 @@ class AgentScheduler:
                         from memory_reminder import discover
                         discover(self.control)
                         self.control.detect()
-                        for occurrence in self.control.plans.pending():
-                            key = occurrence['id'], occurrence['slot']
-                            with self.lock:
-                                if key in self.pending:
-                                    continue
-                                self.pending.add(key)
-                            self.pool.submit(self._run, key)
+                        self._runtime().plans.dispatch()
                 except Exception as exc:
                     policy.fault('fish-scheduler', exc, stage='scheduler')
                 self.stop.wait(2)
         except Exception as exc:
             policy.fault('fish-scheduler', exc, stage='scheduler')
-        finally:
-            self.pool.shutdown(wait=True, cancel_futures=True)
-
-    def _run(self, key):
-        try:
-            if not self.stop.is_set(): self.control.plans.run(*key,cancelled=self.stop)
-        except Exception as exc:
-            from governance import Governance
-            Governance(self.root, 'qq').fault('schedule:' + key[0], exc, stage='scheduler')
-        finally:
-            with self.lock:
-                self.pending.discard(key)
 

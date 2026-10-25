@@ -414,3 +414,72 @@ def self_wake_materials(runtime, run, inputs, cancelled=None):
                 'trace_reference': source_info['current_reference'],
                 'conversation': conversation, 'message': ''}
     raise ValueError('自主回合没有可思考的场所：' + (source or '(空)'))
+
+
+def plan_materials(runtime, run, inputs, cancelled=None):
+    """A due occurrence: the plan record the task page shows, run by the one execution.
+
+    The occurrence is claimed here so the task page sees it running; the reminder
+    prompt is the owner's accepted commission, and a reminder may not choose to stay
+    silent. Delivery happens after the turn, back on this same occurrence.
+    """
+    from datetime import datetime, timezone
+
+    from bot_control import BotControl
+    from experience import ExperienceTurn
+    from qq_store import QQStore
+    from social_context import SocialContext
+    from tool_host import bind_session
+
+    root, role = runtime.root, 'qq'
+    payload = {}
+    if inputs:
+        try:
+            payload = json.loads(inputs[-1].get('payload') or '{}')
+        except (TypeError, ValueError):
+            payload = {}
+    schedule_id, slot = str(payload.get('schedule_id') or ''), str(payload.get('slot') or '')
+    if not schedule_id or not slot:
+        raise ValueError('计划回合缺少实例引用')
+    plans = BotControl(root).plans
+    row = plans.get(schedule_id)
+    if not plans.claim(schedule_id, slot):
+        raise ValueError('这次计划实例已经不可执行（已暂停、取消或已被认领）')
+    prompt = plans.prompt(row, slot)
+    authority = json.loads(row.get('request') or '{}').get('_authority') or {'owner': True}
+    scope = 'owner' if authority.get('owner') else str(authority.get('scope') or 'owner')
+    owner = SocialContext(root).owner()
+    sender = owner if authority.get('owner') else str(authority.get('sender') or '')
+    session = str(row.get('session') or ('fish-schedule:' + schedule_id))
+    store = QQStore(root)
+    conversation = store.get_or_create_conversation(str(row.get('target') or ''), 'qq')['id']
+    channel = 'qq' if str(row.get('target') or '').startswith('private:') else str(row.get('target') or '')
+    reference = 'wake:' + schedule_id + ':' + slot
+    event = {'reference': reference, 'ts': datetime.now(timezone.utc).isoformat(),
+             'text': str(row.get('prompt') or ''), 'recent_window': 7200}
+    experience_turn = ExperienceTurn(root, store.db_path, conversation, channel=channel, event=event)
+    experience_turn.session = session
+    persona = runtime.settings.snapshot(role)['persona']
+    experience_turn.persona_revision = persona['id']
+    plans._bind_occurrence(session, row, slot)
+    try:
+        history, source = experience_turn.prepare(cancelled)
+    except Exception as exc:
+        experience_turn.finish('failed', str(exc))
+        raise
+    bind_session(root, role, session, scope, sender)
+    from memory_store import MemoryStore
+    event_body = dict(source['current_event'])
+    event_body.pop('quote', None)
+    current = [{'type': 'text', 'text': '[本轮来信] ' + json.dumps(event_body, ensure_ascii=False)},
+               {'type': 'text', 'text': prompt}]
+    return {'persona': persona, 'history': history, 'history_source': source,
+            'memory': MemoryStore(root, role).context(str(row.get('prompt') or ''), scope),
+            'scope': scope, 'references': '', 'current': current, 'session': session,
+            'emoji_state': {'previewed': set(), 'tools': []},
+            'tool_context': 'owner-private' if authority.get('owner') else 'group',
+            'delivery_required': str(row.get('purpose')) == 'reminder',
+            'experience': experience_turn, 'trace_reference': reference,
+            'conversation': str(run.get('conversation') or conversation), 'message': '',
+            'plan': {'schedule_id': schedule_id, 'slot': slot,
+                     'target': str(row.get('target') or ''), 'purpose': str(row.get('purpose') or '')}}

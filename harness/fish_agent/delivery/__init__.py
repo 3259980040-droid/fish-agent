@@ -106,6 +106,29 @@ class DeliveryModule:
                 'sent': bool(receipt.get('sent')), 'receipt': receipt.get('receipt') or {},
                 'error': str(receipt.get('error') or ''), 'unknown': str(receipt.get('state') or '') == 'uncertain'}
 
+    def submit_plan(self, run, answer, *, schedule_id, slot, target, purpose, cancelled=None):
+        """Deliver a due occurrence's output on the plan's own target and keep the receipt."""
+        from bot_control import BotControl
+        from experience import delivery as stamp
+        bubbles = self._bubbles(answer)
+        if cancelled is not None and cancelled.is_set():
+            raise InterruptedError('后台正在关闭，未继续发送本次结果')
+        reference = 'wake:%s:%s' % (schedule_id, slot)
+        stamp(self.root, reference, sending=True)
+        result = BotControl(self.root).deliver_bubbles(
+            target, bubbles, 'sched:%s:%s' % (schedule_id, slot),
+            source='fish-autonomous' if str(purpose) == 'autonomy' else 'owner-reminder',
+            scheduled=str(purpose) == 'reminder',
+            context='owner:schedule' if str(purpose) == 'reminder' else 'fish:autonomous')
+        receipt = result.get('receipt') or {}
+        error = receipt.get('error') or ''
+        if isinstance(error, dict):
+            error = str(error.get('message') or error.get('code') or '')
+        stamp(self.root, reference, outcome=str(result.get('state') or '').lower(), error=str(error))
+        return {'state': result.get('state'), 'target': target, 'sent': result.get('state') == 'SUCCEEDED',
+                'unknown': result.get('state') == 'UNKNOWN', 'error': str(error),
+                'receipt': {'id': result.get('request_id', ''), 'message_id': str((receipt.get('payload') or {}).get('message_id') or '')}}
+
     def submit_self(self, run, answer, *, previewed=(), cancelled=None):
         """Deliver a clock or follow-up turn's own decision to the place it thought about."""
         from experience import delivery as stamp

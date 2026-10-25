@@ -72,7 +72,7 @@ class ExecutionModule:
 
     # -------------------------------------------------------- public Interface
     def submit(self, *, source, conversation='', message='', text='', request='', kind='message',
-               place='', reference='', payload=None):
+               place='', reference='', payload=None, reason=''):
         """Register one received event and, when it triggers, its turn.
 
         Returns the stable execution reference for this submission. Submitting the
@@ -90,7 +90,7 @@ class ExecutionModule:
             return {'execution': existing, 'input': event['reference'], 'status': 'queued'}
         run_id = self.state.create_run(kind=kind, source=source, conversation=conversation,
                                        request=request, input_reference=event['reference'],
-                                       place=place or source)
+                                       place=place or source, reason=reason)
         self.start()
         with self._cv:
             self._cv.notify_all()
@@ -294,12 +294,12 @@ class ExecutionModule:
         try:
             if not inputs and not self_run:
                 runtime.experience.record_result(run, st.CANCELLED)
-                self.state.finish_run(run['id'], st.CANCELLED, error_kind='InterruptedError',
-                                      error='这次提交附带的输入已取消，没有开始生成')
+                self._finish(run, st.CANCELLED, error_kind='InterruptedError',
+                             error='这次提交附带的输入已取消，没有开始生成')
                 return
             if self._stop.is_set():
-                self.state.finish_run(run['id'], st.CANCELLED, error_kind='InterruptedError',
-                                      error='后台正在关闭，这次提交没有开始')
+                self._finish(run, st.CANCELLED, error_kind='InterruptedError',
+                             error='后台正在关闭，这次提交没有开始')
                 return
             materials = {}
 
@@ -317,6 +317,9 @@ class ExecutionModule:
             elif source == 'qq-group':
                 payload = json.loads((inputs[-1].get('payload') or '{}'))
                 origin = 'group-fish:' + str(payload.get('chat_id') or '')
+            elif source == 'plan':
+                payload = json.loads((inputs[-1].get('payload') or '{}'))
+                origin = 'fish-schedule:' + str(payload.get('schedule_id') or '')
             else:
                 raise ValueError('未知输入来源，未生成内容：' + source)
             answer = execute(self.root, 'qq', prepare=prepare, origin=origin,
@@ -328,6 +331,12 @@ class ExecutionModule:
                 delivered = runtime.delivery.submit_desktop(run, answer,
                                                             message_id=str(inputs[-1]['message']),
                                                             cancelled=cancel)
+            elif source == 'plan':
+                payload = json.loads((inputs[-1].get('payload') or '{}'))
+                delivered = runtime.delivery.submit_plan(
+                    run, answer, schedule_id=str(payload.get('schedule_id') or ''),
+                    slot=str(payload.get('slot') or ''), target=str(payload.get('target') or ''),
+                    purpose=str(payload.get('purpose') or ''), cancelled=cancel)
             elif source == 'qq-group':
                 payload = json.loads((inputs[-1].get('payload') or '{}'))
                 delivered = runtime.delivery.submit_group(
@@ -340,32 +349,49 @@ class ExecutionModule:
                 delivered = runtime.delivery.submit_qq(run, answer, message_id=str(inputs[-1]['message']),
                                                        previewed=previewed, cancelled=cancel)
             runtime.experience.record_result(run, st.COMPLETE)
-            self.state.finish_run(run['id'], st.COMPLETE, result={'delivery': delivered})
+            self._finish(run, st.COMPLETE, result={'delivery': delivered}, delivered=delivered)
         except TurnSilent as exc:
             try:
                 runtime.experience.record_result(run, st.SILENT)
             except Exception:
                 pass
-            self.state.finish_run(run['id'], st.SILENT, result={'silent': True, 'note': str(exc)})
+            self._finish(run, st.SILENT, result={'silent': True, 'note': str(exc)})
         except InterruptedError as exc:
             error = str(exc) or '本轮已取消'
             try:
                 runtime.experience.record_result(run, st.CANCELLED, error)
             except Exception:
                 pass
-            self.state.finish_run(run['id'], st.CANCELLED, error=error, error_kind='InterruptedError')
+            self._finish(run, st.CANCELLED, error=error, error_kind='InterruptedError')
         except Exception as exc:
             error = str(exc) or type(exc).__name__
             try:
                 runtime.experience.record_result(run, st.FAILED, error)
             except Exception:
                 pass
-            self.state.finish_run(run['id'], st.FAILED, error=error, error_kind=type(exc).__name__)
+            self._finish(run, st.FAILED, error=error, error_kind=type(exc).__name__)
         finally:
             self._finish_clock(run)
             self._active = ''
             with self._cancels_lock:
                 self._cancels.pop(run['id'], None)
+
+    def _finish(self, run, status, *, error='', error_kind='', result=None, delivered=None):
+        """Write the turn's real outcome, then let its own place record it.
+
+        A plan occurrence is closed from the delivery receipts and this same status,
+        so the task page reads one result instead of a page-local guess.
+        """
+        self.state.finish_run(run['id'], status, error=error, error_kind=error_kind, result=result)
+        if str(run.get('source')) == 'plan':
+            try:
+                self.runtime.plans.record_result(run, status, error=error, delivered=delivered or {})
+            except Exception as exc:  # noqa: BLE001 - the turn's own record stays readable
+                try:
+                    from governance import Governance
+                    Governance(self.root, 'qq').audit('plan_result_failed', type(exc).__name__ + ': ' + str(exc)[:200])
+                except Exception:
+                    pass
 
     def _finish_clock(self, run):
         """A turn ending restarts the 45-minute clock and arms an accepted follow-up."""
