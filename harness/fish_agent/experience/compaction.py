@@ -586,6 +586,13 @@ def drain(root, *, role='qq', gateway=None, cancelled=None, automatic=True, only
         committed.update(context_key=_key(job['source'], job['conversation']),
                          chained=(committed['previous_id'] is not None),
                          remaining=int(job['through']) - int(committed['through']))
+        # A committed checkpoint is the real recovery of the summary fault: the stage
+        # now works again, so the aggregate must stop saying it is still failing.
+        try:
+            from governance import Governance
+            Governance(Path(root)).fault_recovered('context-compaction', stage='summary')
+        except Exception:  # noqa: BLE001 - the checkpoint is already committed
+            pass
         return {'committed': True, **committed}
     except Exception as exc:
         _fail(root, job, exc)
