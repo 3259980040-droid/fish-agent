@@ -53,6 +53,10 @@ class PlansModule:
                          'purpose': str(row.get('purpose') or 'reminder')})
             submitted.append({'schedule_id': schedule_id, 'slot': slot,
                               'execution': result.get('execution', ''), 'status': result.get('status', '')})
+            try:
+                plans.attach_execution(schedule_id, slot, result.get('execution', ''))
+            except Exception:  # noqa: BLE001 - the turn exists; the link is bookkeeping
+                pass
         return submitted
 
     def record_result(self, run, status, *, error='', delivered=None):

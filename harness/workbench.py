@@ -1020,42 +1020,75 @@ class Workbench:
                                   {'path': str(target), 'text': str(params.get('text', '')),
                                    **({'expected_mtime_ns': params['expected_mtime_ns']} if 'expected_mtime_ns' in params else {})},
                                   identity, 'workspace-write-' + uuid.uuid4().hex[:8])
-        if action == 'models.preflight':
-            # Prove the registry can drive a gateway *before* switching her live one.
-            import json as _json, os as _os, urllib.request as _url
-            path = self.root / 'harness/models.json'
-            if not path.is_file():
-                return {'ok': False, 'reason': '还没有模型连接清单'}
-            data = _json.loads(path.read_text(encoding='utf-8') or '{}')
-            chosen = next((c for c in data.get('connections', []) if c.get('id') == data.get('active')), None)
-            if chosen is None:
-                return {'ok': False, 'reason': 'active 指向的连接不存在'}
-            key = _os.environ.get(str(chosen.get('key_ref', '')), '')
-            if not key:
+        if action.startswith('models.'):
+            import model_connections
+            if action == 'models.connections':
+                return model_connections.describe(self.root)
+            if action == 'models.list':
+                return model_connections.describe(self.root)
+            if action == 'models.current':
+                described = model_connections.describe(self.root)
+                from model_gateway import ModelGateway
                 try:
-                    from secrets_store import SecretStore
-                    key = SecretStore(self.root).get('channel-core', str(chosen.get('key_ref', ''))) or ''
-                except Exception:
-                    key = ''
-            if not key:
-                return {'ok': False, 'connection': chosen, 'reason': '清单里的密钥引用取不到值'}
-            req = _url.Request(str(chosen.get('base', '')).rstrip('/') + '/models',
-                               headers={'Authorization': 'Bearer ' + key})
-            try:
-                with _url.urlopen(req, timeout=20) as reply:
-                    body = reply.read().decode('utf-8', 'replace')
-                return {'ok': True, 'connection': chosen, 'models_seen': body.count('"id"'),
-                        'note': '清单能驱动网关；切换前的一切条件已满足'}
-            except Exception as exc:
-                return {'ok': False, 'connection': chosen, 'reason': type(exc).__name__ + ': ' + str(exc)[:160]}
-        if action == 'models.list':
-            # The registry, not the live gateway: one place lists what exists.
-            import json as _json
-            path = self.root / 'harness/models.json'
-            if not path.is_file():
-                return {'connections': [], 'active': '', 'note': '还没有模型连接清单'}
-            data = _json.loads(path.read_text(encoding='utf-8') or '{}')
-            return {'connections': data.get('connections', []), 'active': data.get('active', '')}
+                    gateway = ModelGateway(self.root, 'qq')
+                    current = {'base': gateway.base, 'model': gateway.model, 'has_key': bool(gateway.key)}
+                except Exception as exc:  # noqa: BLE001 - the page shows why it is not configured
+                    current = {'error': str(exc)[:200]}
+                return {**described, 'gateway': current}
+            if action == 'models.save':
+                return model_connections.save(self.root, role=str(params.get('role') or 'qq'),
+                                              base=str(params.get('base') or ''), model=str(params.get('model') or ''),
+                                              key=str(params.get('key') or ''), name=str(params.get('name') or ''))
+            if action == 'models.test':
+                return model_connections.test(self.root, role=str(params.get('role') or 'qq'),
+                                              base=str(params.get('base') or ''), model=str(params.get('model') or ''),
+                                              key=str(params.get('key') or ''))
+            if action == 'models.discover':
+                return model_connections.discover(self.root, role=str(params.get('role') or 'qq'),
+                                                  base=str(params.get('base') or ''),
+                                                  key=str(params.get('key') or ''))
+            if action == 'models.remove':
+                return model_connections.remove(self.root, role=str(params.get('role') or 'qq'))
+            raise ValueError('未知模型操作')
+        if action.startswith('plugins.'):
+            from plugin_registry import PluginRegistry
+            registry = PluginRegistry(self.root)
+            if action == 'plugins.list':
+                return registry.snapshot()
+            if action == 'plugins.save':
+                manifest = params.get('manifest')
+                if not isinstance(manifest, dict):
+                    raise ValueError('缺少插件配置对象')
+                return registry.save(manifest)
+            if action == 'plugins.remove':
+                return registry.remove(str(params.get('id') or ''))
+            if action == 'plugins.enable':
+                return registry.toggle(str(params.get('id') or ''), bool(params.get('enabled', True)),
+                                       params.get('role'))
+            if action == 'plugins.test':
+                return registry.discover(str(params.get('id') or ''), str(params.get('role') or 'research'))
+            raise ValueError('未知插件操作')
+        if action.startswith('skills.'):
+            import skills_store
+            if action == 'skills.list':
+                return {'skills': skills_store.list_skills(self.root),
+                        'note': '技能是做法资料；停用只影响是否列出与加载，不改变人格或权限'}
+            if action == 'skills.save':
+                return skills_store.save(self.root, name=params.get('name', ''),
+                                         description=params.get('description', ''),
+                                         body=params.get('body', ''),
+                                         enabled=bool(params.get('enabled', True)))
+            if action == 'skills.import':
+                return skills_store.import_path(self.root, params.get('path', ''),
+                                                enabled=bool(params.get('enabled', True)))
+            if action == 'skills.enable':
+                return skills_store.set_enabled(self.root, params.get('name', ''),
+                                                bool(params.get('enabled', True)))
+            if action == 'skills.read':
+                return skills_store.read(self.root, params.get('name', ''))
+            if action == 'skills.delete':
+                return skills_store.delete(self.root, params.get('name', ''))
+            raise ValueError('未知技能操作')
         if action == 'system.storage':
             # Read-only map of where the disk goes, so cleanup is decided on numbers
             # instead of worry. Nothing here deletes anything.
@@ -1080,27 +1113,6 @@ class Workbench:
                 'archived_for_owner': {'bytes_mb': _dir(root / '需要清理'), 'what': '已归档、等主人处理' },
             }
             return {'layers': layers, 'note': '这里只统计，不删除；清理由 data_retention 按保留期处理可重建的部分'}
-        if action in ('models.current', 'models.test'):
-            # Read-only view of what she actually talks to. Switching the model is a
-            # behaviour change and needs its own decision, so this only reports and probes.
-            from model_gateway import ModelGateway
-            gateway = ModelGateway(self.root, 'qq')
-            current = {'base': str(getattr(gateway, 'base', '')), 'model': str(getattr(gateway, 'model', '')),
-                       'has_key': bool(getattr(gateway, 'key', ''))}
-            if action == 'models.current':
-                return current
-            if not current['has_key']:
-                return {**current, 'ok': False, 'reason': '没有可用的密钥，无法测试连接'}
-            import urllib.request as _url
-            request_url = current['base'].rstrip('/') + '/models'
-            req = _url.Request(request_url, headers={'Authorization': 'Bearer ' + gateway.key})
-            try:
-                with _url.urlopen(req, timeout=20) as reply:
-                    body = reply.read().decode('utf-8', 'replace')
-                count = body.count('"id"')
-                return {**current, 'ok': True, 'status': 200, 'models_seen': count}
-            except Exception as exc:
-                return {**current, 'ok': False, 'reason': type(exc).__name__ + ': ' + str(exc)[:160]}
         if action in ('workspace.list', 'workspace.read'):
             # Read-only view of Fish's own workspace. Writes stay with the tool path,
             # which already has its own permission story; a second writer would be a
@@ -1279,6 +1291,11 @@ class Workbench:
                 result['execution'] = live.get('execution') or execution
                 result['elapsed_ms'] = live.get('elapsed_ms', 0)
             return result
+        if action == 'turn.view':
+            view = self.runtime().execution.turn_view(str(params.get('execution') or ''))
+            if view is None:
+                raise ValueError('执行记录不存在')
+            return view
         if action == 'chat.cancel':
             cid = str(params['id'])
             info = self.runtime().execution.cancel(cid)

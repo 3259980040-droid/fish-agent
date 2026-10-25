@@ -102,13 +102,21 @@ class FishSchedules:
             receipt['messageId'] = str(payload.get('message_id') or next(iter(payload.get('message_ids') or []), ''))
             receipt['receipt'] = ('OK msg=' + receipt['messageId'] if receipt['state'] == 'SUCCEEDED'
                                   else json.dumps(raw.get('error') or receipt['state'], ensure_ascii=False))
-        row['occurrences'] = [{**r, 'display': send_policy.display(r['slot'])} for r in occurrences]
+        row['occurrences'] = [{**r, 'display': send_policy.display(r['slot']),
+                               'execution': r.get('execution') or ''}
+                              for r in occurrences]
         row['sendReceipts'] = receipts
         if occurrences:
             row['occurrenceState'] = occurrences[0]['state']
             row['result'] = occurrences[0]['note'] or ''
             row['receipt_id'] = occurrences[0]['receipt_id'] or ''
         return row
+
+    def attach_execution(self, schedule_id, slot, execution):
+        """Remember which main-execution turn served this instance."""
+        with database(self.path) as db:
+            db.execute('UPDATE occurrences SET execution=? WHERE schedule_id=? AND slot=?',
+                       (str(execution), str(schedule_id), str(slot)))
 
     def create(self, params, *, session=None):
         target = self.control.validate_target(params.get('target') or 'owner')

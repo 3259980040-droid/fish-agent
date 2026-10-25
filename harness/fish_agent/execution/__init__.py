@@ -146,6 +146,105 @@ class ExecutionModule:
                 'elapsed_ms': row['elapsed_ms'], 'trigger': row.get('kind', ''),
                 'reason': row.get('reason', ''), 'place': row.get('place', '')}
 
+    def turn_view(self, run_id):
+        """One turn's real record, linked by references instead of a second status.
+
+        The client can follow a submission to what actually happened: its trigger
+        (kind/reason/place), the stored provider thought and tool events, the files
+        that belonged to its batches, the plan occurrence it served, and the real
+        delivery receipt, all by the same execution reference.
+        """
+        row = self.state.run(run_id)
+        if row is None:
+            return None
+        reference = ''
+        try:
+            inputs = json.loads(row.get('inputs') or '[]')
+        except (TypeError, ValueError):
+            inputs = []
+        reference = str(inputs[0]) if inputs else ('self:' + str(row['id']))
+        view = {'execution': row['id'], 'status': _JOB_STATUS.get(row['status'], 'failed'),
+                'raw_status': row['status'], 'error': row['error'], 'error_kind': row['error_kind'],
+                'trigger': {'kind': row.get('kind', ''), 'reason': row.get('reason', ''),
+                            'place': row.get('place', ''), 'source': row.get('source', ''),
+                            'reference': reference},
+                'started': row['started'], 'finished': row['finished'], 'elapsed_ms': row['elapsed_ms'],
+                'inputs': inputs, 'reference': reference}
+        try:
+            result = json.loads(row.get('result') or '{}')
+        except (TypeError, ValueError):
+            result = {}
+        view['delivery'] = result.get('delivery') if isinstance(result, dict) else None
+        view['silent'] = bool(result.get('silent')) if isinstance(result, dict) else False
+        view['merged'] = bool(result.get('merged')) if isinstance(result, dict) else False
+        view['trace'] = self._turn_trace(reference)
+        view['batches'] = self._turn_batches(row['id'])
+        view['delivery_times'] = self._delivery_times(reference)
+        view['plan'] = self._plan_occurrence(row)
+        return view
+
+    def _turn_trace(self, reference):
+        import sqlite3
+        from contextlib import closing
+        path = self.root / 'data/social/experience.db'
+        if not reference or not path.is_file():
+            return {'reference': reference, 'phase': '', 'reasoning': '', 'events': []}
+        with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='turn_traces'").fetchone():
+                return {'reference': reference, 'phase': '', 'reasoning': '', 'events': []}
+            row = db.execute('SELECT phase,reasoning,events,error FROM turn_traces WHERE reference=? '
+                             'ORDER BY updated DESC LIMIT 1', (reference,)).fetchone()
+        if row is None:
+            return {'reference': reference, 'phase': '', 'reasoning': '', 'events': []}
+        try:
+            events = json.loads(row['events'] or '[]')
+        except (TypeError, ValueError):
+            events = []
+        return {'reference': reference, 'phase': str(row['phase'] or ''),
+                'reasoning': str(row['reasoning'] or ''), 'error': str(row['error'] or ''),
+                'events': events}
+
+    def _turn_batches(self, run_id):
+        from storage import database
+        with database(self.state.path) as db:
+            rows = [dict(row) for row in db.execute(
+                'SELECT id,place,opens,closes,state FROM agent_batches WHERE run=? ORDER BY opens', (str(run_id),))]
+            for batch in rows:
+                batch['items'] = [dict(item) for item in db.execute(
+                    'SELECT seq,reference,resource,received FROM agent_batch_items WHERE batch=? ORDER BY seq',
+                    (batch['id'],))]
+        return rows
+
+    def _delivery_times(self, reference):
+        import sqlite3
+        from contextlib import closing
+        path = self.root / 'data/social/experience.db'
+        if not reference or not path.is_file():
+            return None
+        with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='experience_turns'").fetchone():
+                return None
+            row = db.execute('SELECT arrival,started,first_output,sending,receipt,outcome,error '
+                             'FROM experience_turns WHERE reference=? ORDER BY rowid DESC LIMIT 1',
+                             (reference,)).fetchone()
+        return dict(row) if row else None
+
+    def _plan_occurrence(self, row):
+        if str(row.get('source')) != 'plan':
+            return None
+        payload = self.runtime.plans._payload(row)
+        schedule_id, slot = str(payload.get('schedule_id') or ''), str(payload.get('slot') or '')
+        if not schedule_id or not slot:
+            return None
+        try:
+            plans = self.runtime.plans.store()
+            return {'schedule_id': schedule_id, 'slot': slot,
+                    'occurrence': plans.occurrence(schedule_id, slot)}
+        except Exception:  # noqa: BLE001 - a plan read miss leaves the turn view readable
+            return {'schedule_id': schedule_id, 'slot': slot, 'occurrence': None}
+
     def cancel(self, conversation=None):
         """Cancel this conversation's queued submissions and the turn it is running.
 
