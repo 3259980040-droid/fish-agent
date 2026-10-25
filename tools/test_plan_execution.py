@@ -190,7 +190,7 @@ class PlanExecutionTests(unittest.TestCase):
         execution = submitted[0]['execution']
         settled = self.wait_run(execution)
         self.assertEqual(settled['status'], st.COMPLETE, settled)
-        occurrence = self.occurrence(plan, slot)
+        occurrence = self.wait_occurrence(plan, slot)
         self.assertEqual(occurrence['state'], 'sent', occurrence)
         self.assertTrue(occurrence['receipt_id'].startswith('sched:' + plan['id']))
         self.assertEqual([item['text'] for item in FakeTransport.sent], ['该喝水了'])
