@@ -7,8 +7,9 @@ runs, new inputs are only registered: they stay pending for the next turn instea
 of interrupting or being appended to the running one.
 """
 
-# Sources whose new message starts thinking at once.
-IMMEDIATE_SOURCES = ('desktop',)
+# Sources whose new message starts thinking at once: the owner's client message and
+# the owner's QQ private message are explicit conversation, not background chatter.
+IMMEDIATE_SOURCES = ('desktop', 'qq-private')
 
 
 class Wakes:

@@ -177,12 +177,27 @@ class ExecutionModule:
                 self.state.finish_run(run['id'], st.CANCELLED, error_kind='InterruptedError',
                                       error='后台正在关闭，这次提交没有开始')
                 return
-            answer = execute(
-                self.root, 'qq',
-                prepare=lambda: runtime.experience.prepare(run, inputs, cancel),
-                origin='desktop-chat:' + str(run['conversation']), cancelled=cancel,
-                output='bubbles', experience=None)
-            delivered = runtime.delivery.submit_desktop(run, inputs, answer, cancelled=cancel)
+            materials = {}
+
+            def prepare():
+                materials.update(runtime.experience.prepare(run, inputs, cancel))
+                return materials
+
+            source = str(run['source'])
+            if source == 'desktop':
+                origin = 'desktop-chat:' + str(run['conversation'])
+            elif source == 'qq-private':
+                origin = 'qq-private-chat:' + str(run['conversation'])
+            else:
+                raise ValueError('未知输入来源，未生成内容：' + source)
+            answer = execute(self.root, 'qq', prepare=prepare, origin=origin,
+                             cancelled=cancel, output='bubbles', experience=None)
+            if source == 'desktop':
+                delivered = runtime.delivery.submit_desktop(run, inputs, answer, cancelled=cancel)
+            else:
+                previewed = (materials.get('emoji_state') or {}).get('previewed') or ()
+                delivered = runtime.delivery.submit_qq(run, inputs, answer, previewed=previewed,
+                                                       cancelled=cancel)
             runtime.experience.record_result(run, st.COMPLETE)
             self.state.finish_run(run['id'], st.COMPLETE, result={'delivery': delivered})
         except TurnSilent as exc:

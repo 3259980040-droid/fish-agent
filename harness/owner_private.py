@@ -1,11 +1,16 @@
-"""Owner QQ intake and result delivery for the same independent Fish Agent."""
+"""Owner QQ private input and delivery for the same independent Fish Agent.
+
+The QQ process no longer generates: it stores the inbound event, routes explicit
+commands, and hands ordinary messages to the background host's one main execution.
+Delivery of what that turn decided is a second, separate step: the channel adapter
+sends the bubbles and records the real receipt.
+"""
 import asyncio
 import threading
 import uuid
-from desktop_context import DesktopContext
+
 from governance import Governance
 from memory_store import MemoryStore
-from multimodal import MediaService
 from social_context import SocialContext
 from storage import database
 
@@ -69,47 +74,56 @@ def task_text(value):
     return text
 
 
-def generate(loop, item):
-    from model_gateway import ModelGateway
-    from conversation_style import private_context
-    from fish_chat import respond
-    contexts = SocialContext(loop.root)
-    persona = contexts.active_persona('qq')
-    item['_reply_revision'] = persona['id']
-    media = MediaService(loop.root, 'qq')
-    segments = item['payload'].get('segments', [])
-    current = media.prepare_content(segments, item['text'], cancelled=loop.private_cancel, include_sources=True, source_reference='qq:' + str(item['message_id']))
-    note_media_gaps(segments, current, loop.governance)
-    loop.store.update_message(item['message_id'], segments=segments)
-    context = DesktopContext(loop.root, loop.store.db_path, channel='qq')
-    context.remember_input(item['message_id'], current)
-    cid = item['conversation']['id']
-    from experience import ExperienceTurn
-    experience = ExperienceTurn(loop.root, loop.store.db_path, cid, item['message_id'], channel='qq')
-    references = private_context(loop.root, item['text'], conversation=cid)
-    # 网页检索交给模型用 fish_web_search / fish_web_fetch 自主决定，避免程序与模型双搜双计费。
-    memory = MemoryStore(loop.root, 'qq')
-    loop.governance.consume('calls')
-    emoji_state = {'previewed':set(),'tools':[]}
-    # The verified source is this loop's owner and the stored inbound message,
-    # never the model or the payload.
-    from tool_host import bind_session
-    session = 'qq-private:' + cid
+def submit(loop, item):
+    """Hand one stored private event to the host's one main execution.
+
+    Only the reference crosses the process boundary: the host reads the saved record
+    itself and verifies the real sender, so no payload claim can become identity.
+    """
+    from tool_host import request
+    body = {'source': 'qq-private', 'conversation': item['conversation']['id'],
+            'message': item['message_id'], 'text': item['text'],
+            'reference': 'qq:' + str(item['message_id']),
+            'payload': {'chat_id': item['payload'].get('chat_id', ''),
+                        'reply_to': item['payload'].get('reply_to') or ''}}
     try:
-        bind_session(loop.root, 'qq', session, 'owner', loop.owner, False, chat_mode='owner')
+        submission = request(loop.root, '/submit', body, role='qq', admin=True, timeout=30)
     except Exception as exc:
-        raise RuntimeError('本次主人私聊没有取得工具服务的会话身份，未生成回复：' + str(exc)) from exc
-    from chat_output import TurnSilent, decode_reply
-    try:
-        raw = respond(loop.root, 'qq', persona=persona, history=[], history_source={},
-            memory=memory.context(item['text'], 'owner'), scope='owner', references=references,
-            current=media.chat_completions_content(current), session=session,
-            cancelled=loop.private_cancel, origin='qq-private-chat:' + cid, output='bubbles',
-            emoji_state=emoji_state, tool_context='owner-private', experience=experience)
-    except TurnSilent:
-        # 她这一轮想过了但没说：思考已经落进 turn_no_send 审计，这里什么都不发。
-        return []
-    return decode_reply(loop.root, raw, previewed=emoji_state['previewed'])
+        loop.store.update_message(item['message_id'], status='failed',
+                                  error='未能提交给 Fish 主执行：' + str(exc)[:300])
+        raise
+    loop.store.update_message(item['message_id'], status='submitted',
+                              runtime_turn_id=submission.get('execution', ''))
+    loop.watch_private(submission.get('execution', ''), item)
+    return submission
+
+
+async def handle(loop, item):
+    """One owner private input: verify its stored source, route commands, submit the rest."""
+    with database(loop.store.db_path) as db:
+        source = db.execute('SELECT * FROM messages WHERE id=?', (item['message_id'],)).fetchone()
+    if (not source or source['direction'] != 'inbound' or source['chat_id'] != 'private:' + loop.owner
+            or source['conversation_id'] != item['conversation']['id'] or not loop.governance.is_owner(source['sender_id'])
+            or item['payload'].get('chat_id') != source['chat_id']):
+        raise PermissionError('主人私聊来源不匹配')
+    loop.private_cancel = threading.Event()
+    loop.cancel_event = loop.private_cancel
+    if not window_current(loop, item):
+        loop.store.update_message(item['message_id'], status='cancelled', cancelled=True, error=WINDOW_CHANGED)
+        return None
+    from owner_intent import route
+    intent = route(item['text'])
+    if intent['kind'] == 'FISH_TASK':
+        action = intent['action']
+        value = await asyncio.to_thread(task_call, loop.root, action,
+                                        {'message': item['message_id'], 'task': intent['task'],
+                                         'retry': action == 'deliver'})
+        await reply(loop, item, '系统任务状态：\n' + task_text(value), 'owner-task-control:' + str(item['message_id']))
+        return None
+    if intent['kind'] == 'CLARIFY':
+        await reply(loop, item, intent['text'], 'owner-task-clarify:' + str(item['message_id']))
+        return None
+    return await asyncio.to_thread(submit, loop, item)
 
 
 async def reply(loop, item, text, key, *, turn='', inbound_status='processed', _system_fault=False):
@@ -166,7 +180,9 @@ async def reply(loop, item, text, key, *, turn='', inbound_status='processed', _
     if turn:
         loop.store.finish_turn(turn, 'done' if result.get('ok') else 'cancelled' if state == 'cancelled' else 'send_failed',
                                error=error, assistant_message_id=receipt)
-    return result.get('ok', False)
+    return {'ok': bool(result.get('ok')), 'state': state, 'error': error,
+            'receipt': {'message_id': receipt,
+                        'message_ids': [item['message_ids'] for item in receipts if item.get('message_ids')]}}
 
 
 async def fault_notice(loop, fault, token, *, recovered=False):
@@ -188,56 +204,6 @@ async def fault_notice(loop, fault, token, *, recovered=False):
             + ' 次。详情可在 Fish 设置的故障状态查看。')
     await reply(loop, item, text, 'system-fault:' + token, _system_fault=True)
     return item.get('_fault_receipt', {'sent': False, 'uncertain': False})
-
-
-async def process(loop, item):
-    # Re-check stored source, not a model-provided identity or a persona field.
-    with database(loop.store.db_path) as db:
-        source = db.execute('SELECT * FROM messages WHERE id=?', (item['message_id'],)).fetchone()
-    if (not source or source['direction'] != 'inbound' or source['chat_id'] != 'private:' + loop.owner
-            or source['conversation_id'] != item['conversation']['id'] or not loop.governance.is_owner(source['sender_id'])
-            or item['payload'].get('chat_id') != source['chat_id']):
-        raise PermissionError('主人私聊来源不匹配')
-    loop.private_cancel = threading.Event()
-    loop.cancel_event = loop.private_cancel
-    if not window_current(loop, item):
-        loop.store.update_message(item['message_id'], status='cancelled', cancelled=True, error=WINDOW_CHANGED)
-        return
-    from owner_intent import route
-    intent = route(item['text'])
-    if intent['kind']=='FISH_TASK':
-        action = intent['action']
-        value = await asyncio.to_thread(task_call,loop.root,action,{'message':item['message_id'],'task':intent['task'],'retry':action=='deliver'})
-        await reply(loop,item,'系统任务状态：\n'+task_text(value),'owner-task-control:'+str(item['message_id']))
-        return
-    if intent['kind'] == 'CLARIFY':
-        await reply(loop, item, intent['text'], 'owner-task-clarify:' + str(item['message_id']))
-        return
-    turn = 'fish-private-' + uuid.uuid4().hex
-    loop.active_turn = turn
-    loop.store.create_turn(turn, item['conversation']['id'], '', turn)
-    loop.store.update_message(item['message_id'], runtime_turn_id=turn)
-    try:
-        text = await asyncio.to_thread(generate, loop, item)
-        if not text:
-            # 沉默是她做过的一个决定，不是一次失败的生成：收下这条消息，什么都不发。
-            loop.store.update_message(item['message_id'], status='processed')
-            loop.store.finish_turn(turn, 'silent')
-            return
-        if await reply(loop, item, text, 'qq-agent:' + turn, turn=turn):
-            if item.get('space_id'):
-                SocialContext(loop.root).record_owner_reply(item['space_id'], loop.owner)
-            try:
-                MemoryStore(loop.root, 'qq').enqueue('qq:' + str(item['message_id']), item['text'], 'owner', subject='qq:' + loop.owner)
-            except Exception as exc:
-                loop.governance.audit('owner_memory_enqueue_failed', type(exc).__name__)
-    except Exception as exc:
-        if not window_current(loop, item):
-            exc = InterruptedError(WINDOW_CHANGED)
-        loop._finish_failed(item['message_id'], turn, '', exc)
-        await loop._failure_notice(item, exc, turn, validate=lambda: window_current(loop, item))
-    finally:
-        loop.active_turn = None
 
 
 async def deliveries(loop):

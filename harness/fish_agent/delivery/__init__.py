@@ -34,6 +34,47 @@ class DeliveryModule:
         stamp(root, 'desktop:' + message, outcome='sent')
         return {'bubbles': len(bubbles)}
 
+    def submit_qq(self, run, inputs, answer, *, previewed=(), cancelled=None):
+        """Hand the decided bubbles to the QQ channel adapter and keep its real receipt.
+
+        The QQ process owns the websocket, pacing and receipt; this module owns what
+        the turn decided to say. A queue entry in that process is not a delivery, and
+        an unknown receipt is recorded as unknown - it is never resent here.
+        """
+        import requests
+        from chat_output import decode_reply
+        from governance import Governance
+        root = self.root
+        message = str(inputs[-1]['message'])
+        owner = str(Governance(root, 'qq').owner_id())
+        if not owner:
+            raise ValueError('尚未配置主人账号，无法投递私聊')
+        bubbles = decode_reply(root, answer, previewed=previewed) if answer else []
+        if not bubbles:
+            raise ValueError('模型没有返回聊天内容')
+        if cancelled is not None and cancelled.is_set():
+            raise InterruptedError('本地已取消等待；晚到结果未发送')
+        client = self.runtime.client_qq
+        try:
+            receipt = client.deliver(
+                target='private:' + owner, bubbles=bubbles, key='qq-agent:' + str(run['id']),
+                turn=str(run['id']), message_id=message)
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            # The request may have reached the channel: unknown, not failed, not resent.
+            state = 'uncertain'
+            client.status(message, state, str(exc), turn=run['id'])
+            client.finish_turn(run['id'], 'send_failed', str(exc))
+            return {'bubbles': len(bubbles), 'state': state, 'sent': False,
+                    'error': str(exc)[:300], 'unknown': True}
+        except Exception as exc:
+            client.status(message, 'failed', str(exc), turn=run['id'])
+            client.finish_turn(run['id'], 'send_failed', str(exc))
+            return {'bubbles': len(bubbles), 'state': 'failed', 'sent': False,
+                    'error': str(exc)[:300], 'unknown': False}
+        return {'bubbles': len(bubbles), 'state': str(receipt.get('state') or ''),
+                'sent': bool(receipt.get('sent')), 'receipt': receipt.get('receipt') or {},
+                'error': str(receipt.get('error') or ''), 'unknown': str(receipt.get('state') or '') == 'uncertain'}
+
     def receipt(self, reference):
         """The real send/receipt times of one turn, or empty fields when absent."""
         import sqlite3

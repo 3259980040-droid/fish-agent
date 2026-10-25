@@ -1713,6 +1713,39 @@ class ToolHost:
             if admin:
                 raise PermissionError('工具执行必须使用角色令牌')
             return self.execute(role, str(body['session']), str(body['name']), body.get('arguments', {}), str(body['call_id']))
+        if route == '/submit':
+            # The QQ process stays a channel adapter: it hands one stored event to the
+            # one main execution over this local transport instead of running a turn.
+            if not admin:
+                raise PermissionError('提交输入需要本地后台身份')
+            runtime = getattr(self, 'runtime', None)
+            if runtime is None:
+                raise PermissionError('主执行尚未启动，请重载后台')
+            source = str(body.get('source') or '')
+            if source not in ('desktop', 'qq-private'):
+                raise ValueError('未知输入来源')
+            return runtime.execution.submit(
+                source=source, conversation=str(body.get('conversation') or ''),
+                message=str(body.get('message') or ''), text=str(body.get('text') or ''),
+                reference=str(body.get('reference') or ''), kind=str(body.get('kind') or 'message'),
+                payload=body.get('payload') if isinstance(body.get('payload'), dict) else {})
+        if route == '/turn/status':
+            if not admin:
+                raise PermissionError('读取执行状态需要本地后台身份')
+            runtime = getattr(self, 'runtime', None)
+            if runtime is None:
+                raise PermissionError('主执行尚未启动，请重载后台')
+            row = runtime.execution.status(str(body.get('execution') or ''))
+            if row is None:
+                raise ValueError('执行记录不存在')
+            return row
+        if route == '/turn/cancel':
+            if not admin:
+                raise PermissionError('取消回合需要本地后台身份')
+            runtime = getattr(self, 'runtime', None)
+            if runtime is None:
+                raise PermissionError('主执行尚未启动，请重载后台')
+            return runtime.execution.cancel(str(body.get('conversation') or ''))
         if route == '/cancel':
             with self.lock:
                 for key, (event, session) in self.cancelled.items():

@@ -174,3 +174,79 @@ def desktop_materials(runtime, run, inputs, cancelled=None):
             'delivery_required': False, 'experience': experience_turn,
             'trace_reference': source['current_reference'],
             'conversation': conversation, 'message': message}
+
+
+def qq_private_materials(runtime, run, inputs, cancelled=None):
+    """One owner private turn's materials, read from the QQ record that was saved on arrival.
+
+    The QQ process only stored the event and submitted it. Verification here uses the
+    stored row (owner account, private place), never the model's or payload's claim.
+    """
+    from chat_output import TurnSilent
+    from desktop_context import DesktopContext
+    from experience import ExperienceTurn, was_considered
+    from governance import Governance
+    from memory_store import MemoryStore
+    from multimodal import MediaService
+    from conversation_style import private_context
+    from tool_host import bind_session
+
+    root, role = runtime.root, 'qq'
+    client = runtime.client_qq
+    conversation = str(run['conversation'])
+    if not inputs:
+        raise ValueError('这次提交没有取到已接收的输入，未生成任何内容')
+    message = str(inputs[-1]['message'])
+    row = client.inbound(message)
+    if not row:
+        raise ValueError('已接收的私聊原始消息不存在，未重复建立消息')
+    governance = Governance(root, role)
+    owner = str(governance.owner_id())
+    if (str(row.get('direction') or '') != 'inbound' or str(row.get('chat_id') or '') != 'private:' + owner
+            or not governance.is_owner(str(row.get('sender_id') or ''))):
+        raise PermissionError('主人私聊来源不匹配')
+    text = str(row['text'] or '')
+    segments = json.loads(row['segments'] or '[]')
+    scope, tool_context = 'owner', 'owner-private'
+    session = 'qq-private:' + conversation
+    persona = runtime.settings.snapshot(role)['persona']
+    # A message this place has already actually considered is not generated twice.
+    if was_considered(root, 'qq:' + message, session=session):
+        raise TurnSilent('本消息已在上一轮实际考虑，未重复生成')
+    client.status(message, 'processing', turn=run['id'])
+    client.begin_turn(run['id'], conversation)
+    media = MediaService(root, role)
+    content = media.prepare_content(segments, text, cancelled=cancelled, include_sources=True,
+                                    source_reference='qq:' + message)
+    from owner_private import note_media_gaps
+    note_media_gaps(segments, content, governance)
+    client.update_segments(message, segments)
+    context = DesktopContext(root, client.path, channel='qq')
+    context.remember_input(int(message), content)
+    memory = MemoryStore(root, role)
+    if cancelled is not None and cancelled.is_set():
+        raise InterruptedError('已取消')
+    governance.consume('calls')
+    memory_text = memory.context(text, scope)
+    references = private_context(root, text, conversation=conversation)
+    references = library_references(root, references, tool_context, content)
+    bind_session(root, role, session, 'owner', owner, False, chat_mode='owner')
+    experience_turn = ExperienceTurn(root, client.path, conversation, int(message), channel='qq')
+    experience_turn.session = session
+    experience_turn.persona_revision = persona['id']
+    try:
+        history, source = experience_turn.prepare(cancelled)
+    except Exception as exc:
+        experience_turn.finish('failed', str(exc))
+        raise
+    event = dict(source['current_event'])
+    quote = event.pop('quote', None)
+    current = [{'type': 'text', 'text': '[本轮来信] ' + json.dumps(event, ensure_ascii=False) +
+                ('\n引用：' + json.dumps(quote, ensure_ascii=False) if quote else '')},
+               *media.chat_completions_content(content)]
+    return {'persona': persona, 'history': history, 'history_source': source, 'memory': memory_text,
+            'scope': scope, 'references': references, 'current': current, 'session': session,
+            'emoji_state': {'previewed': set(), 'tools': []}, 'tool_context': tool_context,
+            'delivery_required': False, 'experience': experience_turn,
+            'trace_reference': source['current_reference'],
+            'conversation': conversation, 'message': message}

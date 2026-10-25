@@ -18,6 +18,7 @@ class FishRuntime:
     def __init__(self, root):
         self.root = Path(root).resolve()
         from .adapters.desktop import DesktopAdapter
+        from .adapters.qq import QQAdapter
         from .delivery import DeliveryModule
         from .execution import AgentState, ExecutionModule
         from .experience import ExperienceModule
@@ -25,6 +26,7 @@ class FishRuntime:
         from .tools import ToolsModule
         self.state = AgentState(self.root)
         self.client = DesktopAdapter(self.root)
+        self.client_qq = QQAdapter(self.root)
         self.experience = ExperienceModule(self)
         self.settings = SettingsModule(self)
         self.tools = ToolsModule(self)

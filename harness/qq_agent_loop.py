@@ -199,8 +199,7 @@ class QQAgentLoop:
         self.dsh: DSHWebClient | None = None
         self.session_id: str | None = None
         self.conversation: dict[str, Any] | None = None
-        self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        self.worker: asyncio.Task | None = None
+        self._private_watches: set[asyncio.Task] = set()
         self.cancel_event = asyncio.Event()
         self.active_turn: str | None = None
         self.current_text = ""
@@ -240,7 +239,6 @@ class QQAgentLoop:
         # Owner private chat no longer resumes or mutates it.
         self.session_id = None
         await self.channel.start()
-        self.worker = asyncio.create_task(self._worker(), name="qq-agent-worker")
         self.maintenance_task = asyncio.create_task(self._maintenance(), name='qq-local-data-maintenance')
         from owner_private import deliveries
         self.delivery_task = asyncio.create_task(deliveries(self), name='qq-owner-task-deliveries')
@@ -308,12 +306,11 @@ class QQAgentLoop:
         if self.control_server is not None:
             self.control_server.close()
             await self.control_server.wait_closed()
-        if self.worker is not None:
-            self.worker.cancel()
-            try:
-                await self.worker
-            except (asyncio.CancelledError, Exception):
-                pass
+        watches = list(self._private_watches)
+        for task in watches:
+            task.cancel()
+        if watches:
+            await asyncio.gather(*watches, return_exceptions=True)
         await self.channel.stop()
         self.runtime.stop(self.agent_id)
 
@@ -411,9 +408,23 @@ class QQAgentLoop:
             self.store.update_message(message_id, error="主人已暂停回复，消息已跳过")
             log(f"owner inbound skipped while paused message_id={message_id}")
             return
-        await self.queue.put({"message_id": message_id, "payload": payload, "text": text,
-                              'space_id': '', 'conversation': conversation})
-        log(f"owner inbound queued message_id={message_id} text_len={len(text)}")
+        item = {"message_id": message_id, "payload": payload, "text": text,
+                'space_id': '', 'conversation': conversation}
+        # The stored event is all that crosses to the host: commands stay here, an
+        # ordinary message is handed to the one main execution and watched for its
+        # real outcome (delivery itself happens over the channel adapter).
+        try:
+            from owner_private import handle
+            await handle(self, item)
+        except Exception as exc:  # noqa: BLE001 - one intake failure never breaks intake
+            log(f"owner private submit failed: {type(exc).__name__}: {exc}")
+            from dsh_web import safe_runtime_error
+            from owner_private import window_current
+            self.store.update_message(message_id, status='blocked' if isinstance(exc, PermissionError) else 'failed',
+                                      error=safe_runtime_error(str(exc) or type(exc).__name__))
+            await self._failure_notice(item, exc, validate=lambda: window_current(self, item))
+            return
+        log(f"owner inbound submitted message_id={message_id} text_len={len(text)}")
 
     async def _on_group(self, payload: dict[str, Any]) -> None:
         from group_policy import GroupPolicy
@@ -752,72 +763,118 @@ class QQAgentLoop:
             await self._fault(source, exc, stage=stage)
             audit('group_fish_failed', type(exc).__name__ + ': ' + str(exc)[:200]); return outcome()
 
-    async def _worker(self) -> None:
-        while not self._stop.is_set():
-            item = await self.queue.get()
-            try:
-                from experience import was_considered
-                if was_considered(self.root, 'qq:' + str(item['message_id']), session='qq-private:' + item['conversation']['id']):
-                    self.store.update_message(item['message_id'], status='considered')
-                    continue
-                await self._process(item)
-            except Exception as exc:  # noqa: BLE001
-                log(f"turn error: {type(exc).__name__}: {exc}")
-                from dsh_web import safe_runtime_error
-                self.store.update_message(item['message_id'], status='blocked' if isinstance(exc, PermissionError) else 'failed',
-                                          error=safe_runtime_error(str(exc) or type(exc).__name__))
-                from owner_private import window_current
-                await self._failure_notice(item, exc, validate=lambda: window_current(self, item))
-            finally:
-                self.queue.task_done()
-
-    async def _process(self, item: dict[str, Any]) -> None:
-        if self.governance.config()["paused"]:
-            self.store.update_message(item["message_id"], status="paused", error="主人已暂停回复")
+    # ------------------------------------------------------- owner private wiring
+    def watch_private(self, execution: str, item: dict[str, Any]) -> None:
+        """Follow one submitted turn to its real outcome; the host owns the turn."""
+        if not execution:
             return
-        from owner_private import process
-        await process(self, item)
-        from storage import database
-        with database(self.store.db_path) as db:
-            row = db.execute('SELECT status,error,runtime_turn_id FROM messages WHERE id=?', (item['message_id'],)).fetchone()
-            turn = db.execute('SELECT status FROM runtime_turns WHERE id=?', (row['runtime_turn_id'],)).fetchone() if row and row['runtime_turn_id'] else None
-        if turn and turn['status'] == 'silent':
+        task = asyncio.create_task(self._watch_private(str(execution), item),
+                                   name='qq-private-turn:' + str(execution))
+        self._private_watches.add(task)
+        task.add_done_callback(self._private_watches.discard)
+
+    async def _turn_row(self, execution: str) -> dict[str, Any]:
+        from tool_host import request
+        return await asyncio.to_thread(request, self.root, '/turn/status',
+                                       {'execution': execution}, role='qq', admin=True, timeout=20)
+
+    async def _watch_private(self, execution: str, item: dict[str, Any]) -> None:
+        """Report what actually happened to one private turn; never invent a result.
+
+        The turn, its tools and its reply run in the background host. This watcher
+        only reads the real ledger, so silence, failure and an unconfirmed send stay
+        distinguishable and still reach the owner through the existing fault notices.
+        """
+        row: dict[str, Any] = {}
+        deadline = time.monotonic() + 900
+        self.active_turn = execution
+        while not self._stop.is_set() and time.monotonic() < deadline:
+            try:
+                row = await self._turn_row(execution)
+            except Exception as exc:  # noqa: BLE001 - a transient read never invents a state
+                self.governance.audit('owner_turn_status_unavailable', type(exc).__name__)
+                await asyncio.sleep(1)
+                continue
+            if str(row.get('status') or '') not in ('queued', 'running'):
+                break
+            await asyncio.sleep(0.5)
+        if self.active_turn == execution:
+            self.active_turn = None
+        status = str(row.get('status') or '')
+        result = row.get('result') or ''
+        if isinstance(result, str):
+            try:
+                result = json.loads(result or '{}')
+            except ValueError:
+                result = {}
+        result = result if isinstance(result, dict) else {}
+        delivery = result.get('delivery') if isinstance(result.get('delivery'), dict) else {}
+        if status == 'complete':
+            await self._recovered('owner-private', stage='model')
+            state = str(delivery.get('state') or '')
+            if state == 'uncertain':
+                await self._fault('owner-private', {'code': delivery.get('error') or '私聊投递结果未确认',
+                                                    'may_have_sent': True}, stage='delivery', uncertain=True)
+            elif state in ('failed', 'blocked'):
+                await self._fault('owner-private', delivery.get('error') or '私聊投递失败', stage='delivery')
+            else:
+                await self._recovered('owner-private', stage='delivery')
+        elif status == 'silent':
             self._silent('owner-private')
-        elif row and row['status'] in ('processed', 'delegated'):
-            if turn and turn['status'] == 'done':
-                await self._recovered('owner-private', stage='model')
-            await self._recovered('owner-private', stage='delivery')
-        elif row and row['status'] == 'uncertain':
-            await self._fault('owner-private', {'code': row['error'], 'may_have_sent': True}, stage='delivery', uncertain=True)
-        elif row and row['status'] in ('failed', 'blocked'):
-            # Generation failures have already passed _failure_notice. A completed
-            # model turn with send_failed is the ordinary sender's own receipt.
-            if turn and turn['status'] == 'send_failed':
-                await self._fault('owner-private', row['error'], stage='delivery')
+        elif status == 'failed':
+            await self._fault('owner-private', row.get('error') or '这一轮没有完成', stage='model')
+        elif status == 'cancelled':
+            self.governance.audit('owner_turn_cancelled', str(row.get('error') or ''))
+        else:
+            await self._fault('owner-private', '等待本轮结果超时，记录保留，未冒充完成', stage='model')
 
-    def _finish_cancelled(self, message_id, turn_id, session, error):
-        self.store.update_message(message_id, status="cancelled", cancelled=True,
-                                  runtime_session_id=session or '', runtime_turn_id=turn_id)
-        self.store.finish_turn(turn_id, "cancelled", error=error)
-        self.active_turn = None
+    async def private_deliver(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Send what the host's turn decided to say; the channel owns the receipt.
 
-    def _finish_failed(self, message_id, turn_id, session, exc):
-        from dsh_web import safe_runtime_error
-        status = 'cancelled' if isinstance(exc, InterruptedError) or self.cancel_event.is_set() else 'failed'
-        error = safe_runtime_error(str(exc) or type(exc).__name__)
-        self.store.update_message(message_id, status=status, error=error, cancelled=status == 'cancelled',
-                                  runtime_session_id=session or '', runtime_turn_id=turn_id)
-        self.store.finish_turn(turn_id, status, error=error)
-        self.active_turn = None
-        log(f"owner turn {turn_id} {status}: {error}")
+        This is the transport end of the delivery module: it accepts only the
+        verified owner's private chat and reports exactly what the websocket said.
+        """
+        target = str(data.get('target') or '')
+        bubbles = data.get('bubbles') or []
+        if not self.owner or target != 'private:' + self.owner:
+            return {'ok': False, 'error': '私聊投递目标不是已核验的主人私聊'}
+        if not isinstance(bubbles, list) or not bubbles:
+            return {'ok': False, 'error': '没有要投递的气泡'}
+        from owner_private import reply
+        self.private_cancel = threading.Event()
+        self.cancel_event = self.private_cancel
+        item = {'conversation': self.conversation, 'payload': {'chat_id': target},
+                'message_id': int(data.get('message_id') or 0), 'text': '', 'space_id': ''}
+        try:
+            result = await reply(self, item, bubbles, str(data.get('key') or ''),
+                                 turn=str(data.get('turn') or ''))
+        except InterruptedError as exc:
+            return {'ok': True, 'sent': False, 'state': 'cancelled', 'error': str(exc)[:300], 'receipt': {}}
+        except Exception as exc:  # noqa: BLE001 - the caller keeps the real reason
+            return {'ok': True, 'sent': False,
+                    'state': 'failed' if isinstance(exc, (PermissionError, ValueError)) else 'uncertain',
+                    'error': str(exc)[:300], 'receipt': {}}
+        return {'ok': True, 'sent': bool(result.get('ok')), 'state': str(result.get('state') or ''),
+                'error': str(result.get('error') or ''), 'receipt': result.get('receipt') or {}}
 
     async def cancel(self) -> dict[str, Any]:
         self.cancel_event.set()
         self.private_cancel.set()
         for task in list(self.group_tasks):
             task.cancel()
+        info: dict[str, Any] = {}
+        if self.conversation:
+            try:
+                from tool_host import request
+                info = await asyncio.to_thread(request, self.root, '/turn/cancel',
+                                               {'conversation': self.conversation['id']},
+                                               role='qq', admin=True, timeout=20)
+            except Exception as exc:  # noqa: BLE001 - report the real failure below
+                self.governance.audit('owner_turn_cancel_unavailable', type(exc).__name__)
         if self.active_turn and self.active_turn.startswith("fish-private-"):
             return {"ok": True, "turn": self.active_turn, "note": "本地已取消等待；不保证服务商立即停止计算"}
+        if info:
+            return {"ok": True, "turn": self.active_turn or '', **info}
         if self.active_turn:
             result = await asyncio.to_thread(self.runtime.cancel, self.agent_id, self.active_test_session or self.session_id)
             log(f"cancel requested turn={self.active_turn} result={result.get('ok')}")
@@ -989,10 +1046,6 @@ class QQAgentLoop:
         if capability in ("pause", "resume"):
             self.governance.save({"paused": capability == "pause"})
             if capability == "pause":
-                while not self.queue.empty():
-                    item = self.queue.get_nowait()
-                    self.store.update_message(item['message_id'], status='paused', error='主人已暂停回复，消息已跳过')
-                    self.queue.task_done()
                 await self.cancel()
             response = "已暂停回复。发 /继续 恢复。" if capability == "pause" else "已恢复回复。"
         elif capability == "cancel":
@@ -1001,7 +1054,7 @@ class QQAgentLoop:
         else:
             cfg = self.governance.snapshot()
             permissions = "、".join(self.governance.owner_capabilities().values()) or "无"
-            response = f"主人权限已核验。当前 Fish 管理权限：{permissions}。{'已暂停' if cfg['config']['paused'] else '可回复'}；等待任务 {self.queue.qsize()}；今日处理轮数 {cfg['usage'].get('calls', 0)}。"
+            response = f"主人权限已核验。当前 Fish 管理权限：{permissions}。{'已暂停' if cfg['config']['paused'] else '可回复'}；等待回合 {len(self._private_watches)}；今日处理轮数 {cfg['usage'].get('calls', 0)}。"
         self.governance.audit("owner_command", capability)
         await self.channel.action("send_message", {"chat_id": f"private:{self.owner}",
             "segments": [{"type": "text", "text": response}], "idempotency_key": "admin:" + str(payload.get("message_id", uuid.uuid4().hex))})
@@ -1009,27 +1062,49 @@ class QQAgentLoop:
 
     async def _control(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
-            raw = await asyncio.wait_for(reader.read(4096), 5)
-            request_line = raw.split(b"\r\n", 1)[0].decode("latin-1", errors="replace")
+            raw = b''
+            while b"\r\n\r\n" not in raw and len(raw) < 262144:
+                chunk = await asyncio.wait_for(reader.read(65536), 5)
+                if not chunk:
+                    break
+                raw += chunk
+            head, _, body = raw.partition(b"\r\n\r\n")
+            request_line = head.split(b"\r\n", 1)[0].decode("latin-1", errors="replace")
             method, path = (request_line.split(" ") + ["", ""])[:2]
             headers = {}
-            for line in raw.split(b"\r\n")[1:]:
+            for line in head.split(b"\r\n")[1:]:
                 if b":" in line:
                     key, value = line.split(b":", 1)
                     headers[key.strip().lower()] = value.strip().decode("latin-1")
+            length = int(headers.get("content-length", "0") or 0)
+            while len(body) < length:
+                chunk = await asyncio.wait_for(reader.read(65536), 5)
+                if not chunk:
+                    break
+                body += chunk
             import hmac
             if not hmac.compare_digest(headers.get(b"x-fish-token", ""), self.control_token):
                 body, status = b'{"ok":false,"error":"unauthorized"}', "401 Unauthorized"
             elif path == "/cancel" and method == "POST":
                 body = json.dumps(await self.cancel(), ensure_ascii=False).encode()
                 status = "200 OK"
+            elif path == "/deliver" and method == "POST":
+                try:
+                    payload = json.loads(body or b'{}')
+                except ValueError:
+                    payload = None
+                if not isinstance(payload, dict):
+                    body, status = b'{"ok":false,"error":"deliver body is not JSON"}', "400 Bad Request"
+                else:
+                    body = json.dumps(await self.private_deliver(payload), ensure_ascii=False).encode()
+                    status = "200 OK"
             elif path == "/status":
                 body = json.dumps({
                     "conversation": self.conversation["id"] if self.conversation else None,
                     "session_id": self.session_id,
                     "active_turn": self.active_turn,
                     "owner_mode": self.owner_mode().get(),
-                    "queue": self.queue.qsize(),
+                    "private_turns": len(self._private_watches),
                     "group_tasks": sum(not task.done() for task in self.group_tasks),
                     "source_mode": not getattr(sys, 'frozen', False),
                     "language_layer_version": 1,
