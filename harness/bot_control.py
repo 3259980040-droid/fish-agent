@@ -307,7 +307,7 @@ class BotControl:
             raise ValueError('没有可发送的内容')
         return result
 
-    def _deliver(self, target, text, request_id, *, source='', scheduled=False, context='', transport=None, segments=None):
+    def _deliver(self, target, text, request_id, *, source='', scheduled=False, context='', transport=None, segments=None, source_tools=()):
         # No validate_target here: callers decide the target (owner route or the schedule's bound group).
         if not isinstance(text, str) or (not text.strip() and not segments): raise ValueError('消息不能为空')
         if not isinstance(request_id, str) or not request_id.strip(): raise ValueError('需要本次执行的唯一发送编号')
@@ -337,11 +337,16 @@ class BotControl:
         else:
             try:
                 sender = transport or self.transport
-                receipt = (sender(target, text, request_id, segments=segments)
-                           if segments is not None and sender == self._channel_transport else sender(target, text, request_id))
+                from fish_agent.settings.tools import ToolSettings
+                ToolSettings(self.root).require_delivery(target,source_tools)
+                receipt = (sender(target, text, request_id, segments=segments,source_tools=source_tools)
+                           if sender == self._channel_transport else sender(target, text, request_id))
                 payload, error = receipt.get('payload') or {}, receipt.get('error') or {}
                 confirmed = bool(receipt.get('ok') and (payload.get('message_id') or payload.get('message_ids')))
                 state = ('SUCCEEDED' if confirmed else 'UNKNOWN' if receipt.get('ok') or error.get('may_have_sent') else 'FAILED')
+            except PermissionError as exc:
+                receipt={'ok':False,'error':{'code':'capability_closed','message':str(exc),'may_have_sent':False}}
+                state='BLOCKED'
             except Exception as exc:
                 import traceback as _tb
                 receipt = {'ok': False, 'error': {'code': type(exc).__name__, 'message': str(exc), 'may_have_sent': True,
@@ -357,8 +362,7 @@ class BotControl:
                                 receipt=receipt, source=source or action, target_label=target)
         return {'state': state, 'target': target, 'request_id': request_id, 'receipt': receipt, **({} if ok else {'error': reason})}
 
-    @staticmethod
-    def _channel_transport(target, text, request_id, reply_to='', *, segments=None):
+    def _channel_transport(self, target, text, request_id, reply_to='', *, segments=None, source_tools=()):
         """One-shot send over the fish-qq channel (same protocol/token source as the QQ loop).
 
         Connects once; on failure the outcome is UNKNOWN and the caller must not blind-retry.
@@ -367,7 +371,7 @@ class BotControl:
         ``FISH_QQ_TRANSPORT`` (documented in RESULT.md) may name an importable factory
         ``(root) -> callable(target, text, key)`` for embeds that own a live channel client.
         """
-        root = Path(__file__).resolve().parent.parent
+        root = self.root
         factory = os.environ.get('FISH_QQ_TRANSPORT', '').strip()
         if factory:
             module, _, name = factory.partition(':')
@@ -387,6 +391,8 @@ class BotControl:
                 hello = json.loads(await asyncio.wait_for(ws.recv(), 10))
                 if hello.get('type') != 'hello.ok':
                     return {'ok': False, 'error': {'code': 'channel_hello_failed', 'may_have_sent': False}}
+                from fish_agent.settings.tools import ToolSettings
+                ToolSettings(root).require_delivery(target,source_tools)
                 action_id = 'core-' + uuid.uuid4().hex[:12]
                 await ws.send(json.dumps({'v': 1, 'type': 'action', 'id': action_id, 'action': 'send_message', 'ts': '',
                     'payload': {'chat_id': target, 'segments': segments or [{'type': 'text', 'text': text}],

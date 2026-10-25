@@ -1,24 +1,9 @@
-"""One sending boundary for every Fish-authored outbound: owner reply, timer result, manual send.
+"""Transport eligibility, per-instance sending capability and real send receipts.
 
-The channel (channels/fish_qq/server.py) already enforces the hard floor: owner
-private or a whitelisted group, no arbitrary recipients, output guard rules.
-``channel_allows`` mirrors exactly those checks so callers fail fast with a
-readable reason, and the channel stays the final gate. This module adds the
-owner-editable *sending settings* that sit between "who may receive" and
-"what was sent", acting per destination and per action:
-
-* ``owner_reply``               -- program's own final reply in the owner's private chat
-* ``owner_private.scheduled``  -- a scheduled task result sent to ``private:<owner>``
-* ``group_reply``              -- public (non-owner) auto-participation in a whitelisted group
-* ``group_owner_request``      -- owner's explicit one-off / scheduled send to a group
-
-Defaults: owner reply and owner private scheduled result allowed; group relay
-only on the owner's explicit request; public auto-reply off and not exposed as
-a setting here (it stays in GroupPolicy listen/reply).
-
-Message transport uses the fish-qq WebSocket channel. Real file uploads use
-owner_files, and Qzone drafts/publishing use social_publish with its explicit
-runtime switch. No mass-send transport is configured.
+ToolSettings owns private/group/per-group choices. The legacy send_policy wire
+fields are projections of those same values; action names no longer add another
+private/task-result/owner-request toggle. Group listening stays an input concern.
+The channel still checks its configured owner and authorized QQ destinations.
 """
 from __future__ import annotations
 from locations import project_path
@@ -126,40 +111,11 @@ def channel_allows(root, chat_id: str) -> tuple[bool, str]:
 def policy_check(root, chat_id: str, *, action: str, scheduled: bool = False, context: str = '') -> tuple[bool, str]:
     """Policy decision for one Fish outbound (not a transport). Returns (allowed, reason)."""
     from governance import Governance
-    cfg = Governance(root).config()
-    if cfg.get('paused'):
+    from fish_agent.settings.tools import ToolSettings
+    if Governance(root).config().get('paused'):
         return False, '主人已暂停'
-    policy = cfg['send_policy']
-    owner = owner_private_chat(root)
-    if action == 'fish_autonomous':
-        if chat_id == owner:
-            return (True, '') if policy['owner_private']['owner_reply'] else (False, '主人关闭了私聊发送')
-        if str(chat_id).startswith('group:'):
-            from group_policy import GroupPolicy
-            group = GroupPolicy(root).config(chat_id)
-            if not group['listen'] or not group['reply']:
-                return False, '此群的旁听或回复已关闭'
-            if float(group.get('dive_until') or 0) > time.time():
-                return False, 'Fish 当前选择在此群潜水'
-            return True, ''
-    if chat_id == owner:
-        if action == 'owner_reply':
-            ok = policy['owner_private']['owner_reply']
-            return (True, '') if ok else (False, '发送设置关闭了主人私聊回复（定时结果与主人明确交办通知不受影响）')
-        if action == 'scheduled_result' and scheduled:
-            ok = policy['owner_private']['scheduled_result']
-            return (True, '') if ok else (False, '发送设置关闭了主人私聊定时结果')
-        return True, ''
-    if str(chat_id).startswith('group:'):
-        if action in ('group_send', 'scheduled_result'):
-            if not policy['group']['owner_request']:
-                return False, '发送设置关闭了主人在群聊的明确交办发送'
-            if not (str(context).startswith('owner') or str(context).startswith('control:')
-                    or (str(context).startswith('chat:') and not str(context).startswith('chat:group:'))):
-                return False, '跨群发送只接受主人在当前会话的明确要求'
-            return True, ''
-        return False, '公开群自动回复不走此发送边界；请在群聊设置中控制'
-    return False, '不支持的目标'
+    result=ToolSettings(root).effective_capability(target=chat_id)
+    return result['enabled'],result['reason']
 
 
 def decide(root, chat_id: str, *, action: str, scheduled: bool = False, context: str = '') -> tuple[bool, str]:

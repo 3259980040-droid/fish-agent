@@ -60,17 +60,21 @@ class ExperienceModule:
 
     def prepare(self, run, inputs, cancelled=None):
         """Assemble the materials of one claimed turn, with their real source references."""
-        if str(run.get('kind') or '') in ('timer', 'followup'):
-            return context.self_wake_materials(self.runtime, run, inputs, cancelled)
-        if str(run.get('kind') or '') == 'plan':
-            return context.plan_materials(self.runtime, run, inputs, cancelled)
-        if run['source'] == 'desktop':
-            return context.desktop_materials(self.runtime, run, inputs, cancelled)
-        if run['source'] == 'qq-private':
-            return context.qq_private_materials(self.runtime, run, inputs, cancelled)
-        if run['source'] == 'qq-group':
-            return context.group_materials(self.runtime, run, inputs, cancelled)
-        raise ValueError('未知输入来源，未生成内容：' + str(run['source']))
+        if str(run.get('kind') or '') in ('timer','followup'):
+            prepared=context.self_wake_materials(self.runtime,run,inputs,cancelled)
+        elif str(run.get('kind') or '')=='plan':
+            prepared=context.plan_materials(self.runtime,run,inputs,cancelled)
+        elif run['source']=='desktop':
+            prepared=context.desktop_materials(self.runtime,run,inputs,cancelled)
+        elif run['source']=='qq-private':
+            prepared=context.qq_private_materials(self.runtime,run,inputs,cancelled)
+        elif run['source']=='qq-group':
+            prepared=context.group_materials(self.runtime,run,inputs,cancelled)
+        else:
+            raise ValueError('未知输入来源，未生成内容：'+str(run['source']))
+        result=self.runtime.tools.result_material(run)
+        if result:prepared['current']=[*prepared['current'],{'type':'text','text':result}]
+        return prepared
 
     def record_result(self, run, status, error=''):
         """Record what the turn actually covered and what happened to each input."""

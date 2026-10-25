@@ -14,6 +14,8 @@ class SettingsModule:
     def __init__(self, runtime):
         self.runtime = runtime
         self.root = Path(runtime.root)
+        from .tools import ToolSettings
+        self.tool_settings = ToolSettings(self.root)
 
     def snapshot(self, role='qq'):
         """The values the next model request reads, with where each one came from."""

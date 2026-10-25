@@ -145,7 +145,9 @@ async def reply(loop, item, text, key, *, turn='', inbound_status='processed', _
         if not _system_fault:
             delivery(loop.root, 'qq:' + str(item['message_id']), sending=True)
         result = await loop._deliver_reply(target, [], key, loop.private_cancel,
-            validate=validate, validation_error=WINDOW_CHANGED, bubble_plan=plan)
+            validate=validate, validation_error=WINDOW_CHANGED, bubble_plan=plan,
+            instance_root=__import__('locations').instance_context(loop.root,item.get('instance_id')).root,
+            source_tools=item.get('source_tools',[]))
     except Exception as exc:
         for mid in outbound:
             loop.store.update_message(mid, status='blocked' if isinstance(exc, PermissionError) else 'failed', error=str(exc))

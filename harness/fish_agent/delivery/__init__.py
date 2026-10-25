@@ -33,6 +33,8 @@ class DeliveryModule:
         bubbles = self._bubbles(answer)
         if cancelled is not None and cancelled.is_set():
             raise InterruptedError('本地已取消等待；晚到结果未保存为成功回复')
+        from ..settings.tools import ToolSettings
+        ToolSettings(root).require_delivery('desktop',self.runtime.tools.delivery_sources(run['id']))
         # Sending and commit are one boundary: once this is written the turn is delivered.
         stamp(root, 'desktop:' + message, sending=True)
         client.commit_reply(conversation, message, bubbles)
@@ -61,7 +63,8 @@ class DeliveryModule:
             receipt = client.deliver(
                 target='private:' + owner, bubbles=bubbles, key='qq-agent:' + str(run['id']),
                 turn=str(run['id']), message_id=message,
-                reference=('self:' + str(run['id'])) if not message or message == '0' else '')
+                reference=('self:' + str(run['id'])) if not message or message == '0' else '',
+                source_tools=self.runtime.tools.delivery_sources(run['id']))
         except (requests.Timeout, requests.ConnectionError) as exc:
             # The request may have reached the channel: unknown, not failed, not resent.
             state = 'uncertain'
@@ -96,7 +99,7 @@ class DeliveryModule:
             receipt = client.deliver(
                 target=str(chat), bubbles=bubbles, key='group-fish:' + str(run['id']) + ':' + str(reply_to),
                 turn=str(run['id']), message_id=str(message_id), reply_to=str(reply_to or ''),
-                reference=reference, direct=bool(direct))
+                reference=reference, direct=bool(direct),source_tools=self.runtime.tools.delivery_sources(run['id']))
         except (requests.Timeout, requests.ConnectionError) as exc:
             return {'bubbles': len(bubbles), 'state': 'uncertain', 'sent': False,
                     'error': str(exc)[:300], 'unknown': True}
@@ -116,10 +119,12 @@ class DeliveryModule:
             raise InterruptedError('后台正在关闭，未继续发送本次结果')
         reference = 'wake:%s:%s' % (schedule_id, slot)
         stamp(self.root, reference, sending=True)
+        from ..settings.tools import ToolSettings
+        ToolSettings(self.root).require_delivery(target,self.runtime.tools.delivery_sources(run['id']))
         result = BotControl(self.root).deliver_bubbles(
             target, bubbles, 'sched:%s:%s' % (schedule_id, slot),
             source='fish-autonomous' if str(purpose) == 'autonomy' else 'owner-reminder',
-            scheduled=str(purpose) == 'reminder',
+            scheduled=str(purpose) == 'reminder',source_tools=self.runtime.tools.delivery_sources(run['id']),
             context='owner:schedule' if str(purpose) == 'reminder' else 'fish:autonomous')
         receipt = result.get('receipt') or {}
         error = receipt.get('error') or ''
@@ -146,6 +151,8 @@ class DeliveryModule:
         if source == 'desktop':
             client = self.runtime.client
             reference = 'self:' + str(run['id'])
+            from ..settings.tools import ToolSettings
+            ToolSettings(self.root).require_delivery('desktop',self.runtime.tools.delivery_sources(run['id']))
             stamp(self.root, reference, sending=True)
             client.commit_reply(str(run['conversation']), None, bubbles)
             stamp(self.root, reference, outcome='sent')
