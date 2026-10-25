@@ -1,4 +1,5 @@
 """Deliver real local task files through the existing owner's QQ connection."""
+from locations import project_path
 import asyncio
 import json
 import os
@@ -14,7 +15,7 @@ import send_policy
 
 async def onebot(root, action, params):
     from websockets.asyncio.client import connect
-    config = read_json(Path(root)/'channels/fish_qq/config.json', {})['napcat']
+    config = read_json(project_path(Path(root), 'channels/fish_qq/config.json'), {})['napcat']
     name = config.get('token_env', 'NAPCAT_TOKEN')
     token = os.environ.get(name) or SecretStore(root).get('channel-napcat', name)
     echo = 'owner-file-' + uuid.uuid4().hex
@@ -33,7 +34,7 @@ def send_file(root, target, path, request_id, *, session=''):
     if not ok: raise PermissionError(reason)
     source = Path(path).expanduser().resolve()
     if not source.is_file(): raise ValueError('待发送文件不存在')
-    db_path = root/'data/social/owner-control.db'
+    db_path = project_path(root, 'data/social/owner-control.db')
     with database(db_path) as db:
         db.execute('CREATE TABLE IF NOT EXISTS file_sends(id TEXT PRIMARY KEY,target TEXT,path TEXT,state TEXT,receipt TEXT,updated REAL)')
         prior = db.execute('SELECT * FROM file_sends WHERE id=?', (request_id,)).fetchone()

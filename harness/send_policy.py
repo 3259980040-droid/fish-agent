@@ -21,6 +21,7 @@ owner_files, and Qzone drafts/publishing use social_publish with its explicit
 runtime switch. No mass-send transport is configured.
 """
 from __future__ import annotations
+from locations import project_path
 
 import re
 from datetime import datetime
@@ -111,7 +112,7 @@ def channel_allows(root, chat_id: str) -> tuple[bool, str]:
     """Mirror channels/fish_qq server ``_check_delivery`` recipient checks."""
     try:
         from storage import read_json
-        allow = read_json(Path(root) / 'channels/fish_qq/config.json', {}).get('allowlist', {})
+        allow = read_json(project_path(Path(root), 'channels/fish_qq/config.json'), {}).get('allowlist', {})
         owner = owner_private_chat(root)
         if chat_id == owner:
             return True, ''
@@ -195,7 +196,7 @@ def public_origin(row: dict) -> dict:
 def _outbound_box(root):
     from storage import read_json
     from channels.fish_qq.spool import Outbox
-    config = read_json(root / 'channels/fish_qq/config.json')
+    config = read_json(project_path(root, 'channels/fish_qq/config.json'))
     state = Path(config.get('spool_dir', 'channel-state'))
     if not state.is_absolute(): state = root / state
     return Outbox(state) if (state / 'outbox.jsonl').is_file() else None
@@ -206,7 +207,7 @@ def _owner_receipts(root, chat_id, *, limit=None):
     import json
     import sqlite3
     from contextlib import closing
-    path = root / 'data/social/owner-control.db'
+    path = project_path(root, 'data/social/owner-control.db')
     if not path.is_file(): return
     try:
         with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=1)) as db:
@@ -269,7 +270,7 @@ def record_send(root, *, request_id: str, chat_id: str, text: str, action: str, 
     """Append one row to the adaptive ledger (actual sends only; ledger failures never block a send)."""
     try:
         from storage import database
-        path = Path(root) / 'data/social/owner-control.db'
+        path = project_path(Path(root), 'data/social/owner-control.db')
         with database(path) as db:
             db.executescript('''CREATE TABLE IF NOT EXISTS send_log(id INTEGER PRIMARY KEY,request_id TEXT,slot TEXT,chat TEXT,
                 action TEXT,source TEXT,state TEXT,receipt TEXT,text_hash TEXT,created REAL);''')
@@ -287,7 +288,7 @@ def summary(root, *, limit: int = 500) -> dict:
     result = {'window': limit, 'slots': {}, 'unavailable_slots': {}}
     try:
         from storage import database
-        path = Path(root) / 'data/social/owner-control.db'
+        path = project_path(Path(root), 'data/social/owner-control.db')
         if not path.exists():
             return result
         with database(path) as db:

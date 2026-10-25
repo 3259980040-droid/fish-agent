@@ -1,5 +1,6 @@
 """Stream original attachments; doc_store owns the sole resource/text/vector index."""
 from __future__ import annotations
+from locations import project_path
 import base64
 import codecs
 import hashlib
@@ -103,8 +104,8 @@ class AttachmentStore:
     def __init__(self, root, role='qq'):
         if role not in ('qq','research'): raise ValueError('未知的 Agent')
         self.root,self.role = Path(root),role
-        self.base = self.root/'data'/role/'attachments'
-        self.db_path = self.root/'data'/role/'attachments.db'
+        self.base = project_path(self.root, 'data', role, 'attachments')
+        self.db_path = project_path(self.root, 'data', role, 'attachments.db')
         self.base.mkdir(parents=True,exist_ok=True)
         with self._connect() as db:
             db.executescript('''CREATE TABLE IF NOT EXISTS attachments(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,role TEXT NOT NULL,name TEXT,stored_name TEXT,path TEXT,type TEXT,format TEXT,size INTEGER,source TEXT,source_ref TEXT,status TEXT,error TEXT,text TEXT,dedup_of TEXT,created_at TEXT);

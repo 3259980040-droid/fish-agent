@@ -1,4 +1,5 @@
 """Local conversation history and incremental compaction; raw messages stay intact."""
+from locations import project_path
 import json
 from functools import lru_cache
 from pathlib import Path
@@ -12,7 +13,7 @@ def _tokenizer(path):
 
 
 def _tokens(root, text):
-    path = str(Path(root) / 'vendor/tokenizers/deepseek-v4/tokenizer.json')
+    path = str(project_path(Path(root), 'vendor/tokenizers/deepseek-v4/tokenizer.json'))
     return len(_tokenizer(path).encode(str(text or '')).ids)
 
 
@@ -75,7 +76,7 @@ class DesktopContext:
                 conn.close()
 
         considered = set()
-        ledger = self.root / 'data/social/experience.db'
+        ledger = project_path(self.root, 'data/social/experience.db')
         if ledger.is_file():
             with connect(ledger) as db:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='considered'").fetchone():
@@ -99,11 +100,11 @@ class DesktopContext:
         paths = [self.path]
         if self.path.parent.name == 'qq':
             for name in ('qq.db', 'desktop-chat.db'):
-                other = self.root / 'data/qq' / name
+                other = project_path(self.root, 'data/qq', name)
                 if other != self.path and other.exists():
                     paths.append(other)
         names = {}
-        roster = self.root / 'data/social/people.db'
+        roster = project_path(self.root, 'data/social/people.db')
         if roster.exists():
             with connect(roster) as db:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='members'").fetchone():
@@ -252,7 +253,7 @@ class DesktopContext:
         """Reuse existing day/week/month stores, without inventing another digest."""
         import sqlite3
         import time
-        path = self.root / 'data/qq/memory.db'
+        path = project_path(self.root, 'data/qq/memory.db')
         if not path.exists():
             return []
         result = []

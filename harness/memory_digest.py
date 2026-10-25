@@ -15,6 +15,7 @@ owner asked for that one paragraph to be rewritten, so its failure is raised to
 whoever asked.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import re
@@ -149,7 +150,7 @@ def _memory_path(root):
 
 
 def _language_path(root):
-    return Path(root) / 'data/social/group-language.db'
+    return project_path(Path(root), 'data/social/group-language.db')
 
 
 def _readonly(path):

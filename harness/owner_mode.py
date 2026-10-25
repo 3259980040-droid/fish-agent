@@ -14,6 +14,7 @@ Identity permission verification stays in owner_computer.authorized(); this
 module only answers "which working mode did the verified owner choose".
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import re
@@ -61,7 +62,7 @@ def normalise_workspace(root, workspace=None) -> str:
 class OwnerMode:
     def __init__(self, root):
         self.root = Path(root).resolve()
-        self.path = self.root / 'data/social/owner-mode.json'
+        self.path = project_path(self.root, 'data/social/owner-mode.json')
 
     def _stored(self) -> dict:
         try:
@@ -105,7 +106,7 @@ class OwnerMode:
             from owner_computer import workspace as owner_workspace
             return owner_workspace(self.root).resolve()
         except Exception:
-            path = self.root / 'qq-work/owner-files'
+            path = project_path(self.root, 'qq-work/owner-files')
             path.mkdir(parents=True, exist_ok=True)
             return path.resolve()
 

@@ -4,9 +4,36 @@
  * 不碰 QQ、不碰人格、不碰业务数据。
  */
 
-import { readFileSync, realpathSync } from 'node:fs'
+import { readFileSync, realpathSync, existsSync } from 'node:fs'
 import { createHmac, createHash, randomUUID } from 'node:crypto'
 import { resolve, isAbsolute, relative, sep, dirname, basename } from 'node:path'
+
+// The legacy native runtime consumes the same explicit instance locations; account
+// credentials and packages remain at the host. No active-tab state is consulted.
+function instanceStorage(root) {
+  if (existsSync(resolve(root, 'instance.json'))) return root
+  const catalog = resolve(root, 'data/host/instances.json')
+  if (!existsSync(catalog)) return root
+  const {initial_instance_id: id} = JSON.parse(readFileSync(catalog, 'utf8'))
+  return resolve(root, 'data/instances', id)
+}
+function sourceHost(root) {
+  const marker = resolve(root, 'instance.json')
+  return existsSync(marker) ? JSON.parse(readFileSync(marker, 'utf8')).host_root : root
+}
+function roleStorage(root, role) {
+  const storage = instanceStorage(root)
+  return storage === sourceHost(root) ? resolve(storage, 'data', role) : resolve(storage, role)
+}
+function configPath(root, name) {
+  const storage = instanceStorage(root)
+  return storage === sourceHost(root) ? resolve(storage, 'harness', name) : resolve(storage, 'config', name)
+}
+function identityPath(root, role) {
+  const storage = instanceStorage(root)
+  return storage === sourceHost(root) ? resolve(storage, 'harness/runtime/' + role + '.identities.json')
+    : resolve(storage, 'config/runtime/' + role + '.identities.json')
+}
 
 export const name = 'fish-control'
 export const inject = ['webServer', 'tools', 'connection', 'llm']
@@ -295,9 +322,11 @@ export function toolDenial(exec, settings, root, role) {
   const within = (dir, target) => { const rel = relative(dir, target); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep) }
   const deniedPath = item => {
     if (typeof item !== 'string') return true
-    const base = resolve(root, role === 'qq' ? 'qq-work' : 'knowledge')
+    const storage = instanceStorage(root)
+    const base = role === 'qq' && storage !== sourceHost(root) ? resolve(storage, 'workspace/legacy-qq')
+      : resolve(sourceHost(root), role === 'qq' ? 'qq-work' : 'knowledge')
     const target = resolve(base, item)
-    const allowed = settings.isolated ? (settings.allowed_paths ?? []) : settings.isGroup ? [resolve(base, 'public')] : [base, resolve(root, 'data', role), resolve(root, 'homes', role)]
+    const allowed = settings.isolated ? (settings.allowed_paths ?? []) : settings.isGroup ? [resolve(base, 'public')] : [base, roleStorage(root, role), resolve(sourceHost(root), 'homes', role)]
     if (/^(\.env(?:\..*)?|(?:bili_)?credentials?\.json|control\.token|auth\.json|account\.json|.*secret.*\.bin)$/i.test(target.split(/[\\/]/).pop())) return true
     return !allowed.some(dir => within(dir, target) && within(canonical(dir), canonical(target)))
   }
@@ -357,7 +386,9 @@ export function chooseCancelTarget(ids, requested = '') {
 
 export function apply(ctx, config = {}) {
   const agents = new Map()
-  const root = process.env.FISH_HARNESS_HOME
+  const contextRoot = process.env.FISH_HARNESS_HOME
+  const root = contextRoot && sourceHost(contextRoot)
+  const instanceRoot = contextRoot && instanceStorage(contextRoot)
   const role = process.env.FISH_AGENT_ID
   if (!root || !['qq', 'research'].includes(role)) throw new Error('Fish governance requires an explicit root and role')
   const counts = new WeakMap()
@@ -374,7 +405,8 @@ export function apply(ctx, config = {}) {
   async function host(path, body = {}, signal) {
     const response = await fetch(toolOrigin + path, {
       method: 'POST', headers: {'content-type': 'application/json', 'x-fish-token': toolToken},
-      body: JSON.stringify(body), signal: signal ?? AbortSignal.timeout(10000),
+      body: JSON.stringify({...body, instance_id: existsSync(resolve(instanceRoot, 'instance.json'))
+        ? JSON.parse(readFileSync(resolve(instanceRoot, 'instance.json'), 'utf8')).id : 'main'}), signal: signal ?? AbortSignal.timeout(10000),
     })
     const data = await response.json()
     if (!response.ok || !data.ok) throw new Error(data.error || 'Fish 本地服务拒绝调用')
@@ -413,8 +445,8 @@ export function apply(ctx, config = {}) {
                   if (block.type !== 'image_file') continue
                   if (!enabled) { block.type = 'text'; block.text = '本角色图片输入已关闭，插件图片没有传入模型'; continue }
                   const target = realpathSync(block.path)
-                  const allowed = [resolve(root, 'data', role, 'plugin-results')]
-                  if (definition.name === 'fish_emoji_read' && role === 'qq') allowed.push(realpathSync(resolve(root, 'data', 'qq', 'emoji')))
+                  const allowed = [resolve(instanceRoot, role, 'plugin-results')]
+                  if (definition.name === 'fish_emoji_read' && role === 'qq') allowed.push(realpathSync(resolve(instanceRoot, 'qq', 'emoji')))
                   if (!allowed.some(directory => { const rel = relative(directory, target); return !isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep) })) throw new Error('图片超出已授权的角色资源目录')
                   const attachments = ctx.get('attachments')
                   if (!attachments) throw new Error('当前运行时没有图片附件存储服务')
@@ -439,7 +471,7 @@ export function apply(ctx, config = {}) {
   })
   ctx.on('agent/pre-step', async ({agent, turn, step}, next) => {
     let identities = {}
-    try { identities = JSON.parse(readFileSync(resolve(root, 'harness/runtime/' + role + '.identities.json'), 'utf8')) }
+    try { identities = JSON.parse(readFileSync(identityPath(contextRoot, role), 'utf8')) }
     catch (error) { if (error.code !== 'ENOENT') throw error }
     const identity = identities[String(agent.id)]
     const group = role === 'qq' && identity?.scope?.startsWith('chat:group:')
@@ -534,13 +566,13 @@ export function apply(ctx, config = {}) {
     // only actual bound conversations and leave those auxiliary calls alone.
     if (options.sessionId && !options.purpose) {
       let identity
-      try { identity = JSON.parse(readFileSync(resolve(root, 'harness/runtime/' + role + '.identities.json'), 'utf8'))[String(options.sessionId)] }
+      try { identity = JSON.parse(readFileSync(identityPath(contextRoot, role), 'utf8'))[String(options.sessionId)] }
       catch (error) { if (error.code !== 'ENOENT') throw error }
       // Harness freezes admitted requests, and next() closes over that object.
       // Dispatch a projected request through the public LLM service once. The
       // inner pass owns capture/accounting; the outer pass makes no model call.
       if (role === 'qq' && identity && !projectedRequests.has(options)) {
-        const settings = JSON.parse(readFileSync(resolve(root, 'harness/control.json'), 'utf8'))
+        const settings = JSON.parse(readFileSync(configPath(contextRoot, 'control.json'), 'utf8'))
         const projected = chatRequest(options, identity, settings)
         projectedRequests.add(projected)
         try { for await (const chunk of ctx.get('llm').stream(projected)) yield chunk }
@@ -567,7 +599,7 @@ export function apply(ctx, config = {}) {
   ctx.effect(() => ctx.tools.guard(exec => {
     try {
       let settings = {}
-      try { settings = JSON.parse(readFileSync(resolve(root, 'harness/control.json'), 'utf8')) }
+      try { settings = JSON.parse(readFileSync(configPath(contextRoot, 'control.json'), 'utf8')) }
       catch (error) { if (error.code !== 'ENOENT') throw error }
       if (settings.paused_roles?.[role] ?? settings.paused) return 'Fish: 主人已暂停任务'
       if (exec.name === 'read_image') {
@@ -578,7 +610,7 @@ export function apply(ctx, config = {}) {
       }
       let identity
       if (exec.agent) {
-        const identities = JSON.parse(readFileSync(resolve(root, 'harness/runtime/' + role + '.identities.json'), 'utf8'))
+        const identities = JSON.parse(readFileSync(identityPath(contextRoot, role), 'utf8'))
         identity = identities[String(exec.agent.id)]
         if (!identity) return 'Fish: 当前会话尚未通过程序身份核验'
         if (identity.owner && !identity.desktop) {

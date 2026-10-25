@@ -1,4 +1,5 @@
 """Durable reply targets and delivery state for shared-window conversations."""
+from locations import project_path
 import json
 import re
 import time
@@ -20,7 +21,7 @@ def parse_child(scope):
 
 class GroupTaskStore:
     def __init__(self, root):
-        self.root = Path(root); self.path = self.root / 'data/social/group-replies.db'
+        self.root = Path(root); self.path = project_path(self.root, 'data/social/group-replies.db')
         with database(self.path) as db:
             db.executescript('''
             CREATE TABLE IF NOT EXISTS jobs(
@@ -98,7 +99,7 @@ class GroupTaskStore:
         if job['window']:
             from social_context import SocialContext
             base=SocialContext(self.root).directory(job['window'])
-        else:base=self.root/'data/qq/groups'/job['chat'].split(':')[1]/job['revision']
+        else:base=project_path(self.root, 'data/qq/groups', job['chat'].split(':')[1], job['revision'])
         return base/'children'/job['id']
 
     def bind(self, scope, sender, session):

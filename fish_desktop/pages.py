@@ -1,6 +1,7 @@
 """Shared desktop components, QQ message history and event views."""
 
 from __future__ import annotations
+from locations import project_path
 
 import json
 from typing import Any
@@ -384,7 +385,7 @@ class QQPage(BasePage):
                 if segment.get('asset_id'):
                     from emoji_store import EmojiStore
                     candidate = next((r['path'] for r in EmojiStore(self.services.root).list() if r['id'] == segment['asset_id']), '')
-                if candidate and Path(candidate).resolve().is_relative_to((self.services.root / 'data/qq').resolve()):
+                if candidate and Path(candidate).resolve().is_relative_to((project_path(self.services.root, 'data/qq')).resolve()):
                     pixmap = QPixmap(str(candidate))
                     if not pixmap.isNull():
                         preview = QLabel(); preview.setPixmap(pixmap.scaled(280, 180, Qt.KeepAspectRatio, Qt.SmoothTransformation)); bubble.layout().insertWidget(0, preview)
@@ -421,10 +422,10 @@ class QQPage(BasePage):
                 kind = segment.get('type')
                 if kind not in ('image', 'video', 'audio'): continue
                 path = Path(segment.get('local_path') or segment.get('path') or '')
-                if path.is_file() and path.resolve().is_relative_to((self.services.root / 'data/qq').resolve()):
+                if path.is_file() and path.resolve().is_relative_to((project_path(self.services.root, 'data/qq')).resolve()):
                     allowed = {'image': ('.jpg', '.jpeg', '.png', '.gif', '.webp'), 'video': ('.mp4', '.mkv', '.webm', '.mov'), 'audio': ('.wav', '.mp3', '.ogg', '.m4a')}
                     if path.suffix.lower() not in allowed[kind]:
-                        directory = self.services.root / 'data/qq/retry' / uuid.uuid4().hex; directory.mkdir(parents=True)
+                        directory = project_path(self.services.root, 'data/qq/retry', uuid.uuid4().hex); directory.mkdir(parents=True)
                         target = directory / ('attachment' + {'image': '.jpg', 'video': '.mp4', 'audio': '.ogg'}[kind])
                         if kind == 'image':
                             from PIL import Image
@@ -433,7 +434,7 @@ class QQPage(BasePage):
                         path = target
                     files.append(str(path)); continue
                 if segment.get('url'):
-                    directory = self.services.root / 'data/qq/retry' / uuid.uuid4().hex; directory.mkdir(parents=True)
+                    directory = project_path(self.services.root, 'data/qq/retry', uuid.uuid4().hex); directory.mkdir(parents=True)
                     try:
                         downloaded = media._download(segment['url'], directory)
                         target = directory / ('attachment' + {'image': '.jpg', 'video': '.mp4', 'audio': '.ogg'}[kind])

@@ -1,6 +1,7 @@
 """Phase 1A 验收：Fish Core 在 Runtime 缺失/错误/启动失败时仍可用。"""
 
 from __future__ import annotations
+from locations import project_path
 
 import json
 import shutil
@@ -37,11 +38,11 @@ def make_root() -> Path:
     base.mkdir(parents=True, exist_ok=True)
     root = base / "run"
     root.mkdir(parents=True, exist_ok=True)
-    (root / "harness").mkdir(parents=True, exist_ok=True)
+    (project_path(root, "harness")).mkdir(parents=True, exist_ok=True)
     (root / "homes" / "research").mkdir(parents=True, exist_ok=True)
     (root / "homes" / "qq").mkdir(parents=True, exist_ok=True)
     (root / "knowledge").mkdir(parents=True, exist_ok=True)
-    (root / "qq-work").mkdir(parents=True, exist_ok=True)
+    (project_path(root, "qq-work")).mkdir(parents=True, exist_ok=True)
     return root
 
 
@@ -83,7 +84,7 @@ def base_config(root: Path, runtime: dict | None = None) -> None:
     }
     if runtime is not None:
         data["runtime"] = runtime
-    (root / "harness" / "agents.json").write_text(
+    (project_path(root, "harness", "agents.json")).write_text(
         json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
 
@@ -123,7 +124,7 @@ def main() -> int:
         tables = {row[0] for row in conn.execute("select name from sqlite_master where type='table'")}
     check("无 runtime：research.db 可访问", {"sources", "observations", "memories"} <= tables, str(tables))
 
-    persona = root / "harness" / "agents" / "research.persona.md"
+    persona = project_path(root, "harness", "agents", "research.persona.md")
     write_text(persona, "初始人格")
     check("无 runtime：人格可写可读", read_text(persona) == "初始人格")
     save_agent_settings(config.path, "research", {"model": "deepseek-v4-pro"})
@@ -163,9 +164,9 @@ def main() -> int:
 
     # Channel 启停
     base_config(root, None)
-    raw = json.loads((root / "harness" / "agents.json").read_text(encoding="utf-8"))
+    raw = json.loads((project_path(root, "harness", "agents.json")).read_text(encoding="utf-8"))
     raw["channels"][0]["command"] = f'"{sys.executable}" -c "import time; time.sleep(30)"'
-    (root / "harness" / "agents.json").write_text(
+    (project_path(root, "harness", "agents.json")).write_text(
         json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     config = HarnessConfig(root)
@@ -178,7 +179,7 @@ def main() -> int:
     check("Channel 可停止", stopped["state"] == "stopped", stopped)
 
     # 损坏配置
-    (root / "harness" / "agents.json").write_text("{broken", encoding="utf-8")
+    (project_path(root, "harness", "agents.json")).write_text("{broken", encoding="utf-8")
     broken = HarnessConfig(root)
     check("损坏配置：不抛异常且记录 error", bool(broken.error) and broken.agents == [])
 

@@ -4,6 +4,7 @@ UI 只调用这一层；这里再调用 RuntimeManager / fish-qq / QQStore / Res
 """
 
 from __future__ import annotations
+from locations import project_path
 
 import json
 import os
@@ -42,7 +43,7 @@ if not getattr(sys, 'frozen', False) and str(_CODE_HARNESS) not in sys.path:
 
 import requests
 
-from core import HarnessConfig, RuntimeManager
+from core import HarnessConfig, RuntimeManager, resolve
 from qq_store import QQStore
 from research_store import ResearchStore
 from storage import locked_settings
@@ -126,14 +127,14 @@ def kill_port(port: int, root: Path = PROJECT) -> bool:
             arguments = [part.strip('"') for part in shlex.split(command, posix=False)]
             owns_config = (arguments[arguments.index('--backend') + 1] == 'fish-qq'
                 and arguments[arguments.index('--config') + 1]
-                == str((root / 'channels/fish_qq/config.json').resolve()).lower())
+                == str((project_path(root, 'channels/fish_qq/config.json')).resolve()).lower())
         except (ValueError, IndexError):
             pass
         owned_backend = (executable.endswith("fish.exe") and "--backend" in command
                          and (str(root.resolve()).lower() in executable or owns_config))
         owned_runtime = False
         if port in (3080, 3090) and "dsh" in command and f"--port {port}" in command:
-            token_path = root / "harness" / "runtime" / "control.token"
+            token_path = project_path(root, "harness", "runtime", "control.token")
             if token_path.exists():
                 token = token_path.read_text(encoding="utf-8").strip()
                 if token:
@@ -332,11 +333,11 @@ class FishServices:
 
     def _persona_source_path(self, source):
         if source == 'global':
-            return self.root / 'harness/global/AGENTS.md'
+            return project_path(self.root, 'harness/global/AGENTS.md')
         agent = HarnessConfig(self.root).agent(source) if source in ('qq', 'research') else None
         if agent is None:
             raise ValueError('未知的人格来源')
-        return self.root / agent.persona
+        return resolve(self.root, agent.persona)
 
     def persona_source(self, source):
         import hashlib
@@ -383,8 +384,8 @@ class FishServices:
             if not model or not name or len(model) > 150 or len(name) > 80:
                 raise ValueError("请填写有效的名称与模型")
             SecretStore(self.root).put(f"agent-{agent_id}", values.get("api_key", ""))
-            for key, path in (("persona", self.root / agent.persona),
-                              ("global", self.root / "harness" / "global" / "AGENTS.md")):
+            for key, path in (("persona", resolve(self.root, agent.persona)),
+                              ("global", project_path(self.root, "harness", "global", "AGENTS.md"))):
                 if key not in values:
                     continue
                 text = str(values[key])
@@ -424,7 +425,7 @@ class FishServices:
 
     def connection_snapshot(self) -> dict:
         from secrets_store import SecretStore
-        path = self.root / "channels/fish_qq/config.json"
+        path = project_path(self.root, "channels/fish_qq/config.json")
         channel = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         return {"napcat_url": channel.get("napcat", {}).get("url", "ws://127.0.0.1:3001"),
                 "cli": self.config.runtime.cli, "node": self.config.runtime.node,
@@ -446,7 +447,7 @@ class FishServices:
             from core import resolve
             if value and not resolve(self.root, value).is_file():
                 raise ValueError(title + "文件不存在")
-        path = self.root / "channels/fish_qq/config.json"
+        path = project_path(self.root, "channels/fish_qq/config.json")
         channel = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         channel.setdefault("napcat", {}).update(url=url, token_env="NAPCAT_TOKEN")
         channel.setdefault("listen", {}).update(host="127.0.0.1", port=3101, path="/ws", token_env="FISH_QQ_TOKEN")
@@ -455,7 +456,7 @@ class FishServices:
         write_json(path, channel)
         raw = HarnessConfig(self.root).raw
         raw.setdefault("runtime", {}).update(cli=cli, node=node)
-        write_json(self.root / "harness/agents.json", raw)
+        write_json(project_path(self.root, "harness/agents.json"), raw)
         self.config = HarnessConfig(self.root)
         self.runtime.config = self.config
         self.runtime.personas.config = self.config
@@ -501,7 +502,7 @@ class FishServices:
     def events_snapshot(self) -> dict[str, Any]:
         events = []
         try:
-            with closing(sqlite3.connect(self.root / "harness" / "harness.db")) as conn:
+            with closing(sqlite3.connect(project_path(self.root, "harness", "harness.db"))) as conn:
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute(
                     "SELECT ts, agent_id, kind, detail FROM events ORDER BY id DESC LIMIT 100"
@@ -551,9 +552,9 @@ class FishServices:
             "homes": {a.id: str(self.config.runtime_home(a.id)) for a in self.config.agents},
             "ports": {a.id: self.config.runtime_port(a.id) for a in self.config.agents},
             "db": {
-                "harness": str(self.root / "harness" / "harness.db"),
-                "research": str(self.root / "data" / "research" / "research.db"),
-                "qq": str(self.root / "data" / "qq" / "qq.db"),
+                "harness": str(project_path(self.root, "harness", "harness.db")),
+                "research": str(project_path(self.root, "data", "research", "research.db")),
+                "qq": str(project_path(self.root, "data", "qq", "qq.db")),
             },
             "napcat": "ws://127.0.0.1:3001",
             "fishqq": "ws://127.0.0.1:3101/ws",
@@ -586,10 +587,10 @@ class FishServices:
             env["FISH_HARNESS_HOME"] = str(self.root)
             if getattr(sys, "frozen", False):
                 cmd = [sys.executable, "--backend", "fish-qq",
-                       "--config", str(self.root / "channels" / "fish_qq" / "config.json")]
+                       "--config", str(project_path(self.root, "channels", "fish_qq", "config.json"))]
             else:
                 cmd = [sys.executable, str(Path(__file__).resolve().parents[1] / 'launch_fish.py'), '--backend', 'fish-qq', '--config',
-                       str(self.root / 'channels/fish_qq/config.json')]
+                       str(project_path(self.root, 'channels/fish_qq/config.json'))]
             self.fishqq_proc = subprocess.Popen(
                 cmd, cwd=str(self.root), env=env,
                 stdout=open(log, "a", encoding="utf-8"), stderr=subprocess.STDOUT,
@@ -597,7 +598,7 @@ class FishServices:
             )
             _assign_job(self.job, self.fishqq_proc)
         if not tcp_open("127.0.0.1", 3102):
-            log = self.root / "harness" / "qq-agent-loop.log"
+            log = project_path(self.root, "harness", "qq-agent-loop.log")
             log.parent.mkdir(parents=True, exist_ok=True)
             env = os.environ.copy()
             env["FISH_HARNESS_HOME"] = str(self.root)

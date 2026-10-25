@@ -7,6 +7,7 @@ claims a success the transport did not report, and it never resends an unknown
 result.
 """
 from __future__ import annotations
+from locations import project_path
 
 from pathlib import Path
 
@@ -154,7 +155,7 @@ class DeliveryModule:
     def receipt(self, reference):
         """The real send/receipt times of one turn, or empty fields when absent."""
         import sqlite3
-        path = self.root / 'data/social/experience.db'
+        path = project_path(self.root, 'data/social/experience.db')
         if not path.is_file():
             return {'reference': reference, 'sending': None, 'receipt': None, 'outcome': ''}
         with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as db:

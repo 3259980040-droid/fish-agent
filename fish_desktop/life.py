@@ -1,6 +1,7 @@
 """生活页：她的群开关、潜水、习惯、记住了什么、待办事件与彩排。"""
 
 from __future__ import annotations
+from locations import project_path
 
 import json
 import os
@@ -418,7 +419,7 @@ class LifePage(BasePage):
         env = dict(os.environ)
         env["FISH_HARNESS_HOME"] = str(root)
         env["PYTHONIOENCODING"] = "utf-8"
-        parts = [str(root), str(root / "harness"), str(root / "vendor" / "python")]
+        parts = [str(root), str(project_path(root, "harness")), str(project_path(root, "vendor", "python"))]
         for part in env.get("PYTHONPATH", "").split(os.pathsep):
             if part and part not in parts:
                 parts.append(part)

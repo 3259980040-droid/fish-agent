@@ -1,6 +1,7 @@
 """QQ Domain persistence：Fish conversation / messages / runtime turns。"""
 
 from __future__ import annotations
+from locations import project_path
 
 import json
 import sqlite3
@@ -17,7 +18,7 @@ def now_text() -> str:
 class QQStore:
     def __init__(self, root: Path, db_path: Path | None = None):
         self.root = root
-        self.db_path = db_path or (root / "data" / "qq" / "qq.db")
+        self.db_path = db_path or (project_path(root, "data", "qq", "qq.db"))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.migrate()
 

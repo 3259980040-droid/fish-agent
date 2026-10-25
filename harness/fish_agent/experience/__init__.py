@@ -5,6 +5,7 @@ where it came from, what the turn actually used) and get back references and mod
 materials. They never read another module's tables to assemble a prompt.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 from pathlib import Path
@@ -110,7 +111,7 @@ class ExperienceModule:
         """The inputs this Fish has actually recorded, newest first, with their state."""
         limit = max(1, min(200, int(limit)))
         from storage import database
-        with database(self.root / 'data/social/experience.db') as db:
+        with database(project_path(self.root, 'data/social/experience.db')) as db:
             if conversation is None:
                 rows = db.execute('SELECT * FROM agent_inputs ORDER BY seq DESC LIMIT ?', (limit,)).fetchall()
             else:

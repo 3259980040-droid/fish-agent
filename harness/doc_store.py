@@ -5,6 +5,7 @@ sections/child chunks and genuine local vectors are derived data in the same DB.
 No newest-first coarse shortlist or query-tail truncation precedes ranking.
 """
 from __future__ import annotations
+from locations import project_path
 import hashlib
 import json
 import math
@@ -162,7 +163,7 @@ def _fts_candidates(root, query):
 
 
 def library_root(root, scope='owner'):
-    base = Path(root) / 'data/qq/library'
+    base = project_path(Path(root), 'data/qq/library')
     if scope != 'owner':
         if not re.fullmatch(r'chat:group:[0-9]{5,15}', scope):
             raise ValueError('资源范围无效')

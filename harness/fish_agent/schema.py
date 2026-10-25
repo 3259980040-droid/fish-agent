@@ -7,6 +7,7 @@ receive order, the one wake/run ledger, and the pending wake set. They do not co
 original messages; an input row keeps only the reference into the store that owns
 the words.
 """
+from locations import project_path
 from pathlib import Path
 from storage import database
 
@@ -82,7 +83,7 @@ TABLES = (INPUTS, RUNS, WAKES, STATE, BATCHES, BATCH_ITEMS, BATCH_PLACES)
 
 
 def path(root) -> Path:
-    return Path(root) / 'data/social/experience.db'
+    return project_path(Path(root), 'data/social/experience.db')
 
 
 def ensure(root) -> Path:

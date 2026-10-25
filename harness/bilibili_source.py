@@ -7,6 +7,7 @@
 """
 
 from __future__ import annotations
+from locations import project_path
 
 import json
 import os
@@ -38,7 +39,7 @@ def load_credential(root: Path) -> dict[str, str]:
     protected = SecretStore(root).get('bili-account')
     if protected:
         data = json.loads(protected)
-    path = root / "data" / "research" / "bili_credential.json"
+    path = project_path(root, "data", "research", "bili_credential.json")
     if path.exists() and not protected:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -260,7 +261,7 @@ class BilibiliSourceAdapter:
         url = self.get_play_url(bvid, cid)
         if not url:
             return None
-        dest = self.root / "data" / "research" / "videos" / f"{bvid}.mp4"
+        dest = project_path(self.root, "data", "research", "videos", f"{bvid}.mp4")
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists() and dest.stat().st_size > 1024:
             return dest

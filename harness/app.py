@@ -7,6 +7,7 @@ DSH 不存在、runtime 配置为空/错误、DSH 启动失败，都不能让客
 """
 
 from __future__ import annotations
+from locations import project_path
 
 import argparse
 import sqlite3
@@ -615,7 +616,7 @@ class FishApp(tk.Tk):
 
     def open_data_dir(self) -> None:
         import os
-        os.startfile(self.root / "data")
+        os.startfile(project_path(self.root, "data"))
 
     def poll(self) -> None:
         running = 0

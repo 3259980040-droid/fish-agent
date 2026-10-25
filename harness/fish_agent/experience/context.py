@@ -7,6 +7,7 @@ main execution keeps the loop and the budget. Nothing here is a second history
 store: every block keeps its source reference.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 from pathlib import Path
@@ -360,7 +361,7 @@ def self_wake_materials(runtime, run, inputs, cancelled=None):
         chat = place
         if not chat.startswith('group:'):
             raise ValueError('自主回合缺少群场所，未生成内容')
-        path = root / 'data/qq/qq.db'
+        path = project_path(root, 'data/qq/qq.db')
         session = 'group-fish:' + chat
         bind_session(root, role, session, 'chat:' + chat, '')
         experience_turn = ExperienceTurn(root, path, conversation, None, channel=chat, event=event)
@@ -378,7 +379,7 @@ def self_wake_materials(runtime, run, inputs, cancelled=None):
                 'trace_reference': source_info['current_reference'],
                 'conversation': conversation, 'message': '', 'chat': chat}
     if source == 'qq-private':
-        path = root / 'data/qq/qq.db'
+        path = project_path(root, 'data/qq/qq.db')
         owner = str(Governance(root, role).owner_id())
         if not owner:
             raise ValueError('尚未配置主人账号，未生成自主回合')
@@ -399,7 +400,7 @@ def self_wake_materials(runtime, run, inputs, cancelled=None):
                 'trace_reference': source_info['current_reference'],
                 'conversation': conversation, 'message': ''}
     if source == 'desktop':
-        path = root / 'data/qq/desktop-chat.db'
+        path = project_path(root, 'data/qq/desktop-chat.db')
         session = 'desktop:' + conversation
         bind_session(root, role, session, 'owner', '', True)
         memory = MemoryStore(root, role)

@@ -5,6 +5,7 @@ module reads and writes exactly that source. There is no second connection regis
 the old `harness/models.json` was never read by a gateway and is not consulted here.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import time
@@ -93,7 +94,7 @@ def save(root, *, role='qq', base, model, key='', name=''):
     # The one protected place the gateway reads; a blank key keeps the current one.
     if str(key).strip():
         SecretStore(root).put('agent-' + role, str(key).strip())
-    save_agent_settings(root / 'harness/agents.json', role, updates)
+    save_agent_settings(project_path(root, 'harness/agents.json'), role, updates)
     _forget_metadata(root, base, model)
     connection = _connection(root, role)
     return {'connection': connection, 'effective_at': time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -154,7 +155,7 @@ def remove(root, *, role='qq'):
 
 def _forget_metadata(root, base, model):
     """Clear the exact provider+model window cache so a switch resolves the real window."""
-    path = Path(root) / 'data/social/model-metadata.json'
+    path = project_path(Path(root), 'data/social/model-metadata.json')
     if not path.is_file():
         return
     try:

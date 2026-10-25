@@ -1,4 +1,5 @@
 """Fish-owned persistent plans and occurrences; neither CRUD nor execution needs DSH."""
+from locations import project_path
 import json
 import time
 import uuid
@@ -348,7 +349,7 @@ class FishSchedules:
         group_policy = GroupPolicy(self.root)
         patrol = row.get('configuration_key') == 'autonomy-patrol'
         for source, filename in (('qq', 'qq.db'), ('desktop', 'desktop-chat.db')):
-            path = self.root / 'data/qq' / filename
+            path = project_path(self.root, 'data/qq', filename)
             if not path.is_file():
                 continue
             with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as db:

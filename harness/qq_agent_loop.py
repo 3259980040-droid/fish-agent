@@ -1,6 +1,7 @@
 """QQ intake and delivery for the single Fish Agent; inputs never wait on thought."""
 
 from __future__ import annotations
+from locations import project_path
 
 import argparse
 import asyncio
@@ -194,7 +195,7 @@ class QQAgentLoop:
             os.environ.get("FISH_QQ_URL", "ws://127.0.0.1:3101/ws"),
             os.environ.get("FISH_QQ_TOKEN", ""),
             self.on_event,
-            checkpoint=root/'harness/runtime/qq-channel-cursor.json',
+            checkpoint=project_path(root, 'harness/runtime/qq-channel-cursor.json'),
             on_health=self._channel_health,
         )
         self.dsh: DSHWebClient | None = None
@@ -209,7 +210,7 @@ class QQAgentLoop:
         self.group_ids: set[str] = set()
         self.group_mode = os.environ.get("FISH_QQ_GROUP_REPLY", "off").lower()
         try:
-            cfg = json.loads((root / "channels" / "fish_qq" / "config.json").read_text(encoding="utf-8"))
+            cfg = json.loads((project_path(root, "channels", "fish_qq", "config.json")).read_text(encoding="utf-8"))
             self.group_ids = {str(x) for x in (cfg.get("allowlist", {}).get("group_ids", []) or [])}
         except Exception:
             self.governance.fault('qq-channel', ValueError('QQ 通道配置无法读取'), stage='configuration')
@@ -314,8 +315,8 @@ class QQAgentLoop:
     def _maintenance_seconds(self):
         """The outer wait is what actually paces the autonomous round."""
         from storage import read_json
-        settings = dict(read_json(self.root / 'harness/control.json'))
-        settings.update(read_json(self.root / 'harness/context-settings.json', {}) or {})
+        settings = dict(read_json(project_path(self.root, 'harness/control.json')))
+        settings.update(read_json(project_path(self.root, 'harness/context-settings.json'), {}) or {})
         try:
             value = float(settings.get('maintenance_interval_s', 60))
         except (TypeError, ValueError):

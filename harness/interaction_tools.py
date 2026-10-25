@@ -1,4 +1,5 @@
 """Fish-owned browser and Windows tools; no DSH model or prompt."""
+from locations import project_path
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -29,13 +30,13 @@ class InteractionTools:
         from playwright.sync_api import sync_playwright
         if self.browser is None:
             self.playwright = sync_playwright().start()
-            profile = self.root/'workspace/browser/profile'
+            profile = project_path(self.root, 'workspace/browser/profile')
             profile.mkdir(parents=True,exist_ok=True)
             self.browser = self.playwright.chromium.launch_persistent_context(str(profile),channel='msedge',headless=True,accept_downloads=True)
         action = args['action']
         if action=='tabs':
             return {'tabs':[{'id':key,'url':page.url,'title':page.title()} for key,page in self.tabs.items() if not page.is_closed()],
-                    'profile':str(self.root/'workspace/browser/profile'),'account':'Fish自己的浏览器资料，不自动继承个人浏览器登录'}
+                    'profile':str(project_path(self.root, 'workspace/browser/profile')),'account':'Fish自己的浏览器资料，不自动继承个人浏览器登录'}
         key = str(args.get('tab_id') or '')
         if action=='open':
             page = self.browser.new_page(); key = uuid.uuid4().hex; self.tabs[key] = page

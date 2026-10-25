@@ -1,5 +1,6 @@
 """Checksummed backups with SQLite snapshots and optional portable credentials."""
 from __future__ import annotations
+from locations import project_path
 import base64
 import hashlib
 import json
@@ -59,17 +60,18 @@ def _crypt(value, password, *, decrypt=False):
 
 class BackupManager:
     def __init__(self, root):
-        self.root = Path(root).resolve()
+        from locations import host_root
+        self.root = host_root(root)
 
     def create(self, destination, *, password='', portable_keys=False):
         destination = Path(destination).resolve()
-        if destination.is_relative_to(self.root / 'data') or destination.is_relative_to(self.root / 'homes'):
+        if destination.is_relative_to(project_path(self.root, 'data')) or destination.is_relative_to(self.root / 'homes'):
             raise ValueError('请把备份保存在数据目录以外')
         from secrets_store import SecretStore
         secrets = {}
         if portable_keys:
             if not 10 <= len(password) <= 200: raise ValueError('包含可迁移密钥时，请设置至少 10 字符的备份密码')
-            for file in (self.root / 'harness/secrets').glob('*.bin'):
+            for file in (project_path(self.root, 'harness/secrets')).glob('*.bin'):
                 secrets[file.stem] = SecretStore(self.root).get(file.stem)
             for ref, env in [('agent-qq', 'FISH_QQ_DEEPSEEK_API_KEY'), ('agent-research', 'FISH_RESEARCH_DEEPSEEK_API_KEY'), ('channel-core', 'FISH_QQ_TOKEN'), ('channel-napcat', 'NAPCAT_TOKEN')]:
                 value = SecretStore(self.root).get(ref, env)
@@ -206,4 +208,9 @@ class BackupManager:
                         try: result = json.dumps(move(json.loads(value)), ensure_ascii=False) if structured else move(value)
                         except (ValueError, TypeError): continue
                         if result != value: db.execute(f'UPDATE "{table}" SET "{column}"=? WHERE rowid=?', (result, rowid))
+        for marker in extracted.glob('data/instances/*/instance.json'):
+            value = read_json(marker, {})
+            if value.get('host_root') != str(self.root):
+                value['host_root'] = str(self.root)
+                write_json(marker, value); count += 1
         return count

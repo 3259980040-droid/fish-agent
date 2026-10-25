@@ -6,6 +6,7 @@
 编号 → 记忆 id 的对应只存在本进程的 _LAST_EVENTS 里：重启就没了，重新发 /事件 即可。
 """
 from __future__ import annotations
+from locations import project_path
 
 import re
 import sqlite3
@@ -222,7 +223,7 @@ def _self_switch(loop, on):
 
 
 def _rows(loop, limit=8):
-    path = loop.root / 'data/qq/memory.db'
+    path = project_path(loop.root, 'data/qq/memory.db')
     if not path.is_file():
         return []
     conn = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=10)

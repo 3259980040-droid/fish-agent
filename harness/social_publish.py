@@ -2,6 +2,7 @@
 
 API source: NapNeko/NapCatQQ SendQzoneMsg.ts. No public test post is automatic.
 """
+from locations import project_path, integration_settings
 import asyncio
 import json
 from pathlib import Path
@@ -20,7 +21,7 @@ def _image_reference(value):
 
 def execute(root, action, params):
     root = Path(root)
-    folder = root/'outputs/social/qzone'
+    folder = project_path(root, 'outputs/social/qzone')
     if action == 'qzone_draft':
         text = str(params.get('content', '')).strip()
         if not text: raise ValueError('动态正文为空')
@@ -32,7 +33,7 @@ def execute(root, action, params):
         write_json(folder/(draft['id']+'.json'), draft)
         return {**draft, 'path': str(folder/(draft['id']+'.json')), 'published': False}
     if action != 'qzone_publish': raise ValueError('未知动态操作')
-    if not read_json(root/'harness/integration.json', {}).get('qzone_enabled', False):
+    if not integration_settings(root).get('qzone_enabled', False):
         raise PermissionError('空间发布开关未开启；草稿仍保留，可在客户端设置中开启')
     draft_id = str(params.get('draft_id', ''))
     if len(draft_id)!=32 or not all(c in '0123456789abcdef' for c in draft_id): raise ValueError('请先创建动态草稿并使用实际编号')

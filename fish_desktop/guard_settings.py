@@ -1,4 +1,5 @@
 """Editable local rules with draft validation and a send-free preview."""
+from locations import project_path
 import json
 import tempfile
 from pathlib import Path
@@ -35,7 +36,7 @@ class GuardSettingsPage(BasePage):
 
     def refresh(self):
         if self.loaded or self.loading: return
-        directory = self.services.root / 'harness/safety'
+        directory = project_path(self.services.root, 'harness/safety')
         def done(data):
             self.rules.setPlainText(data[0]); self.terms.setPlainText(data[1]); self.loaded = True
             self.blocked.setPlainText('\n'.join(data[2]['blocked_text'])); self.patterns.setPlainText('\n'.join(data[2]['block_patterns']))
@@ -52,7 +53,7 @@ class GuardSettingsPage(BasePage):
             if cat.get('action', 'block') not in ACTION_ORDER or cat.get('severity', 'medium') not in SEVERITY_ORDER: raise ValueError('规则 action 或 severity 无效')
             if not isinstance(cat.get('patterns', []), list) or len(cat.get('patterns', [])) > 200: raise ValueError('每类最多 200 条正则')
             if any(not isinstance(p, str) or len(p) > 4000 for p in cat.get('patterns', [])): raise ValueError('正则表达式无效或过长')
-        directory = self.services.root / 'harness/safety'; directory.mkdir(parents=True, exist_ok=True)
+        directory = project_path(self.services.root, 'harness/safety'); directory.mkdir(parents=True, exist_ok=True)
         with settings_lock(self.services.root), tempfile.TemporaryDirectory(prefix='.rule-draft-', dir=directory) as tmp:
             temporary = Path(tmp); rules = temporary / 'harness/safety/rules.json'
             write_json(rules, data)
@@ -73,7 +74,7 @@ class GuardSettingsPage(BasePage):
                 return verdict
             commit_files(self.services.root, {directory / 'rules.json': rules.read_bytes(),
                 directory / 'local_terms.txt': terms.encode('utf-8'),
-                self.services.root / 'harness/control.json': preview.path.read_bytes()})
+                project_path(self.services.root, 'harness/control.json'): preview.path.read_bytes()})
             Governance(self.services.root).audit('settings', '回复规则已统一更新')
             return {'ok': True}
 

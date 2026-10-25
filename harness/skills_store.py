@@ -6,6 +6,7 @@ one never changes Fish's identity, persona or permissions. The enable flag only
 decides whether the skill is listed for her; nothing here runs a model.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import re
@@ -18,7 +19,7 @@ MAX_DESCRIPTION = 240
 
 
 def _base(root):
-    path = Path(root) / 'data/skills'
+    path = project_path(Path(root), 'data/skills')
     path.mkdir(parents=True, exist_ok=True)
     return path
 

@@ -1,4 +1,5 @@
 """Owner-local member management; private scores never use a model tool."""
+from locations import project_path
 # refactoring-ui §2.1/§2.8/§3.6: roster is primary, selected-member form secondary,
 # audit tertiary. One primary action saves the selected member. Reuse Qt cards,
 # SPACE page/section/gap/small and existing theme colors; no new palette.
@@ -72,7 +73,7 @@ class MembersPanel(BasePage):
 
     def refresh(self):
         from storage import read_json
-        groups=[str(x) for x in read_json(self.services.root/'channels/fish_qq/config.json').get('allowlist',{}).get('group_ids',[])]
+        groups=[str(x) for x in read_json(project_path(self.services.root, 'channels/fish_qq/config.json')).get('allowlist',{}).get('group_ids',[])]
         settings=self.roster.settings()
         if not settings['group_id'] and len(groups)==1: settings=self.roster.configure(groups[0])
         selected=self.groups.currentData() or settings['group_id']

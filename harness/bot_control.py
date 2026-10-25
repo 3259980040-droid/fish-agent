@@ -3,6 +3,7 @@
 Plan CRUD and occurrences belong to FishSchedules. This facade preserves the
 management API without creating a DSH session or calling its scheduler.
 """
+from locations import project_path
 import asyncio
 import json
 import os
@@ -86,7 +87,7 @@ def describe(timing, when_iso=''):
 
 class BotControl:
     def __init__(self, root, *, transport=None):
-        self.root = Path(root); self.path = self.root / 'data/social/owner-control.db'
+        self.root = Path(root); self.path = project_path(self.root, 'data/social/owner-control.db')
         # transport(target, text, request_id) -> {'ok': bool, 'payload': {...}, 'error': {...}}; default real channel.
         self.transport = transport or self._channel_transport
         with database(self.path) as db:

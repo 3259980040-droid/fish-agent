@@ -7,6 +7,7 @@ Each save/original text is kept as an immutable revision (``memory_history``)
 so owner corrections update the active fact without losing its source.
 """
 from __future__ import annotations
+from locations import project_path
 import hashlib
 import json
 import math
@@ -729,7 +730,7 @@ class MemoryStore:
             raise ValueError('subject 只能留空，或填 qq:<5-15 位数字的 QQ 号>；不确定就留空')
         number, group = subject[3:], _group_number(scope)
         if group:
-            observed = _observed_senders(Path(self.root) / 'data/social/group-policy.db',
+            observed = _observed_senders(project_path(Path(self.root), 'data/social/group-policy.db'),
                                          'group:' + group)
             if number == group or number not in observed:
                 raise ValueError('这个人没在这个群说过话，不能记成对他的印象'

@@ -1,4 +1,5 @@
 """Staged onboarding settings; no credentials are written until Finish."""
+from locations import project_path
 import json
 import re
 import secrets
@@ -22,7 +23,7 @@ def save_setup(root, values):
         config = HarnessConfig(root); raw = config.raw
         files = {}; protected = SecretStore(root)
         def json_file(relative, value):
-            files[root / relative] = (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode()
+            files[project_path(root, relative)] = (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode()
         def secret(ref, value):
             if value.strip(): files[protected._path(ref)] = protected._crypt(value.strip().encode())
         for agent in raw['agents']:
@@ -32,12 +33,12 @@ def save_setup(root, values):
             agent.update(name=data['name'].strip(), model=data['model'].strip(), base_url=data['base_url'].strip().rstrip('/'))
             secret('agent-' + role, data.get('api_key', ''))
             if 'persona' in data:
-                files[root / agent['persona']] = (data['persona'].rstrip() + '\n').encode()
+                files[resolve(root, agent['persona'])] = (data['persona'].rstrip() + '\n').encode()
         cli, node = values['cli'].strip(), values['node'].strip()
         for title, value in [('DSH', cli), ('Node', node)]:
             if not value or not resolve(root, value).is_file(): raise ValueError(title + ' 路径不存在')
         raw['runtime'].update(cli=cli, node=node)
-        channel = read_json(root / 'channels/fish_qq/config.json')
+        channel = read_json(project_path(root, 'channels/fish_qq/config.json'))
         owner = values.get('owner_id', '').strip()
         if owner and not re.fullmatch('[1-9][0-9]{4,14}', owner): raise ValueError('主人 QQ 号格式不正确')
         if values.get('enable_qq') and not owner: raise ValueError('接入 QQ 时必须填写主人账号')
@@ -50,7 +51,7 @@ def save_setup(root, values):
         secret('channel-napcat', values.get('napcat_token', ''))
         if not protected.get('channel-core', 'FISH_QQ_TOKEN'):
             secret('channel-core', secrets.token_hex(24))
-        if 'global' in values: files[root / 'harness/global/AGENTS.md'] = (values['global'].rstrip() + '\n').encode()
+        if 'global' in values: files[project_path(root, 'harness/global/AGENTS.md')] = (values['global'].rstrip() + '\n').encode()
         from research_autonomy import ResearchControl
         interests = ResearchControl(root).config()
         interests['directions'] = [v.strip() for v in values.get('directions', []) if v.strip()]

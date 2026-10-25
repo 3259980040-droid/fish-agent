@@ -3,6 +3,7 @@
 Trial authorization is separate from final persona approval/deployment. A trial
 never selects the owner's private route or grants group members owner powers.
 """
+from locations import project_path
 import asyncio
 import hmac
 import re
@@ -48,7 +49,7 @@ class GroupTests:
         owner = self.contexts.owner()
         if not owner or not hmac.compare_digest(str(sender).encode(), owner.encode()):
             raise PermissionError('只有配置的主人 QQ 可以控制群测试')
-        allow = read_json(self.root / 'channels/fish_qq/config.json').get('allowlist', {}).get('group_ids', [])
+        allow = read_json(project_path(self.root, 'channels/fish_qq/config.json')).get('allowlist', {}).get('group_ids', [])
         if str(group) not in {str(v) for v in allow}:
             raise PermissionError('此群不在白名单中')
         if not Governance(self.root).permitted(sender, 'persona.test'):

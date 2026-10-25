@@ -1,4 +1,5 @@
 """The bot's only read-only web owner: DeepSeek Search/Fetch API calls plus the 24h cache."""
+from locations import project_path
 import hashlib
 import ipaddress
 import json
@@ -41,7 +42,7 @@ SECRET_SHAPE=re.compile(r'sk-[\w-]+|(?:api.?key|token|密码|password|secret)\s*
 
 class WebKnowledge:
     def __init__(self, root):
-        self.root=Path(root);self.path=self.root/'data/qq/web-cache.db'
+        self.root=Path(root);self.path=project_path(self.root, 'data/qq/web-cache.db')
         with database(self.path) as db:
             db.execute('CREATE TABLE IF NOT EXISTS searches(id TEXT PRIMARY KEY,chat TEXT,query TEXT,result TEXT,created REAL,expires REAL)')
             db.execute('CREATE TABLE IF NOT EXISTS fetched_pages(url TEXT PRIMARY KEY,title TEXT,path TEXT,digest TEXT,fetched_at TEXT,created REAL)')
@@ -330,7 +331,7 @@ class WebKnowledge:
             from datetime import datetime, timezone
             fetched_at = datetime.now(timezone.utc).isoformat(timespec='seconds')
             digest = hashlib.sha256(content.encode('utf-8')).hexdigest()
-            original = self.root / 'data/qq/library/fetched' / hashlib.sha256(target.encode()).hexdigest()[:16] / (digest + '.txt')
+            original = project_path(self.root, 'data/qq/library/fetched', hashlib.sha256(target.encode()).hexdigest()[:16], digest + '.txt')
             original.parent.mkdir(parents=True, exist_ok=True)
             if not original.exists():
                 original.write_text(content, encoding='utf-8')

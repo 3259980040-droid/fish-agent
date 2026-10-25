@@ -5,6 +5,7 @@ Phase 1A 的目标是让这一层在 DSH 不存在、runtime 配置错误、DSH 
 """
 
 from __future__ import annotations
+from locations import project_path
 
 import json
 import hashlib
@@ -44,7 +45,16 @@ def resolve(root: Path, value: str | Path) -> Path:
         base = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent.parent / 'vendor'))
         return base / str(value)[len('@bundle/'):]
     path = Path(value)
-    return path if path.is_absolute() else (root / path)
+    if path.is_absolute():
+        from locations import host_root
+        try:
+            relative = path.relative_to(host_root(root))
+        except ValueError:
+            return path
+        if relative.parts and relative.parts[0] in ('data', 'workspace', 'qq-work', 'harness'):
+            return project_path(root, relative)
+        return path
+    return project_path(root, path)
 
 
 def ensure_dir(path: Path) -> Path:
@@ -96,7 +106,7 @@ class ChannelSpec:
 class HarnessConfig:
     def __init__(self, root: Path = PROJECT, path: Path | None = None):
         self.root = Path(root).resolve()
-        self.path = path or (self.root / "harness" / "agents.json")
+        self.path = path or (project_path(self.root, "harness", "agents.json"))
         self.error = ""
         raw: dict[str, Any] = {}
         try:
@@ -280,7 +290,7 @@ class RuntimeManager:
     def runtime_env(self, agent_id=None) -> dict[str, str]:
         from network_config import environment
         env = environment(self.config.root, os.environ)
-        temporary = self.config.root / ('data/' + agent_id + '/runtime-tmp' if agent_id in ('qq', 'research') else 'harness/tmp/runtime')
+        temporary = project_path(self.config.root, 'data/' + agent_id + '/runtime-tmp' if agent_id in ('qq', 'research') else 'harness/tmp/runtime')
         temporary.mkdir(parents=True, exist_ok=True)
         env.update(TEMP=str(temporary), TMP=str(temporary))
         node = self.node_path()
@@ -338,7 +348,7 @@ class RuntimeManager:
         configured = self.config.runtime_patch(agent_id)
         if configured is not None:
             return configured
-        return self.config.root / "harness" / "runtime" / f"{agent_id}.patch.yml"
+        return project_path(self.config.root, "harness", "runtime", f"{agent_id}.patch.yml")
 
     def write_overlay(self, agent_id: str) -> Path:
         agent = self.config.agent(agent_id)
@@ -365,7 +375,7 @@ class RuntimeManager:
                 "  disabled: true",
             ]
         if agent_id == 'qq':
-            integration_path = self.config.root / 'harness/integration.json'
+            integration_path = project_path(self.config.root, 'harness/integration.json')
             integration = json.loads(integration_path.read_text(encoding='utf-8')) if integration_path.exists() else {}
             native_ui = Path(integration.get('native_ui_package', ''))
             if (native_ui / 'lib/index.js').is_file():
@@ -396,7 +406,7 @@ class RuntimeManager:
         value = os.environ.get(env_name)
         if value:
             return value
-        path = self.config.root / "harness" / "runtime" / "control.token"
+        path = project_path(self.config.root, "harness", "runtime", "control.token")
         if path.exists():
             return path.read_text(encoding="utf-8").strip()
         token = secrets.token_hex(16)
@@ -777,9 +787,9 @@ class ChannelManager:
 
 def init_databases(root: Path = PROJECT) -> dict[str, Path]:
     paths = {
-        "harness": root / "harness" / "harness.db",
-        "research": root / "data" / "research" / "research.db",
-        "qq": root / "data" / "qq" / "qq.db",
+        "harness": project_path(root, "harness", "harness.db"),
+        "research": project_path(root, "data", "research", "research.db"),
+        "qq": project_path(root, "data", "qq", "qq.db"),
     }
     for path in paths.values():
         ensure_dir(path.parent)
@@ -906,7 +916,7 @@ class PersonaManager:
         agent = self.config.agent(agent_id)
         if agent is None:
             raise KeyError(agent_id)
-        result = [("Global", self.config.root / "harness" / "global" / "AGENTS.md")]
+        result = [("Global", project_path(self.config.root, "harness", "global", "AGENTS.md"))]
         if agent.persona:
             result.append(("Agent Persona", resolve(self.config.root, agent.persona)))
         if agent.workspace:

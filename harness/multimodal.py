@@ -4,6 +4,7 @@ QQ images enter the original DSH conversation. The installed video tool extracts
 frames/subtitles, which DeepSeek understands. Speech transcription is optional.
 """
 from __future__ import annotations
+from locations import project_path
 
 import base64
 import hashlib
@@ -51,7 +52,7 @@ class MediaError(RuntimeError):
 
 def load_config(root: Path) -> dict:
     result = json.loads(json.dumps(DEFAULTS))
-    path = root / "harness" / "multimodal.json"
+    path = project_path(root, "harness", "multimodal.json")
     if path.exists():
         data = json.loads(path.read_text(encoding="utf-8"))
         for key in result:
@@ -80,7 +81,7 @@ def save_config(root: Path, values: dict) -> None:
     data["video"]["max_frames"] = max(1, min(12, int(data["video"]["max_frames"])))
     for section in ("vision", "speech"):
         SecretStore(root).put(f"media-{section}", values.get(section, {}).get("api_key", ""))
-    atomic_json(root / "harness" / "multimodal.json", data)
+    atomic_json(project_path(root, "harness", "multimodal.json"), data)
 
 
 def analyzer_command(configured: str = "", root: Path | None = None) -> list[str]:
@@ -132,7 +133,7 @@ class MediaService:
         bundled_video = '@bundle/runtime/video/node_modules/mcp-video-analyzer/dist/index.js'
         if not self.config['video']['command'] and resolve(root, bundled_video).is_file():
             self.config['video']['command'] = bundled_video
-        self.directory = root / "data" / agent_id / "media"
+        self.directory = project_path(root, "data", agent_id, "media")
         if self.config["vision"]["mode"] == "deepseek":
             from core import HarnessConfig
             agent = HarnessConfig(root).agent(agent_id)

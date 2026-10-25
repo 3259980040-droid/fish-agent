@@ -1,4 +1,5 @@
 """Exact-image identifications backed by an actual owner correction."""
+from locations import project_path
 import hashlib
 import json
 import time
@@ -9,12 +10,12 @@ from governance import Governance
 
 class ImageKnowledge:
     def __init__(self, root):
-        self.root=Path(root);self.path=self.root/'data/qq/image-knowledge.db'
+        self.root=Path(root);self.path=project_path(self.root, 'data/qq/image-knowledge.db')
         with database(self.path) as db:
             db.execute('CREATE TABLE IF NOT EXISTS confirmations(digest TEXT PRIMARY KEY,quote TEXT,image_message INTEGER,correction_message INTEGER,created REAL)')
 
     def confirm(self, path, image_message, correction_message, quote):
-        with database(self.root/'data/qq/qq.db') as db:
+        with database(project_path(self.root, 'data/qq/qq.db')) as db:
             original=db.execute('SELECT * FROM messages WHERE id=? AND direction=\'inbound\'',(image_message,)).fetchone()
             correction=db.execute('SELECT * FROM messages WHERE id=? AND direction=\'inbound\'',(correction_message,)).fetchone()
         owner=Governance(self.root).owner_id()

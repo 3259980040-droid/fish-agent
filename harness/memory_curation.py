@@ -13,6 +13,7 @@ daily window or pretends unfinished material was processed. Re-running the same
 range is allowed and unchanged material is skipped by the learning-job state.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import re
@@ -195,7 +196,7 @@ def _revision(root, role='qq'):
         row = db.execute("SELECT value FROM metadata WHERE key='revision'").fetchone()
         memory_revision = int(row[0] or 0) if row else 0
     source_revision = 0
-    for path in (Path(root) / 'data/qq/qq.db', Path(root) / 'data/qq/desktop-chat.db'):
+    for path in (project_path(Path(root), 'data/qq/qq.db'), project_path(Path(root), 'data/qq/desktop-chat.db')):
         if not path.is_file():
             continue
         try:

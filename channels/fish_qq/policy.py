@@ -20,13 +20,17 @@ def unlimited_group(root, chat_id):
     from pathlib import Path
     from contextlib import closing
     if not re.fullmatch(r'group:[0-9]{5,15}', chat_id):return False
-    root=Path(root);path=root/'data/social/group-policy.db'
-    context=root/'data/social/context.db'
+    from harness.locations import host_root, project_path
+    root=Path(root)
+    if not (host_root(root)/'data/host/instances.json').is_file():
+        return False
+    path=project_path(root,'data/social/group-policy.db')
+    context=project_path(root,'data/social/context.db')
     try:
         if context.is_file():
             with closing(sqlite3.connect('file:'+str(context)+'?mode=ro',uri=True)) as db:
                 row=db.execute('SELECT space FROM group_test_routes WHERE group_id=?',(chat_id.split(':')[1],)).fetchone()
-            if row and re.fullmatch(r'[a-f0-9]{32}',row[0]):path=root/'data/qq/spaces'/row[0]/'group-policy.db'
+            if row and re.fullmatch(r'[a-f0-9]{32}',row[0]):path=project_path(root,'data/qq/spaces',row[0],'group-policy.db')
         if not path.is_file():return False
         with closing(sqlite3.connect('file:'+str(path)+'?mode=ro',uri=True)) as db:
             row=db.execute('SELECT config FROM groups WHERE chat=?',(chat_id,)).fetchone()

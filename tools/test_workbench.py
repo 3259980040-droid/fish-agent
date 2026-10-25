@@ -17,12 +17,14 @@ class WorkbenchTests(Fixture):
         library=PersonaLibrary(self.root)
         first=library.import_text('{"persona_id":"A","system_prompt":"原始风格"}')[0]
         second=library.import_text('[bot]\nnickname="B"\n[personality]\npersonality="新的风格"')[0]
-        result=library.apply(first['id']);store=SocialContext(self.root)
-        store.bind_runtime(result['space'],'native-history-session')
+        from desktop_chat import DesktopChat
+        chat=DesktopChat(self.root,'qq');cid=chat.new('原历史')
+        mid=chat.receive(cid,'已经保存的原文',[])
+        library.apply(first['id']);store=SocialContext(self.root)
         changed=library.apply(second['id'])
-        self.assertEqual(result['space'],changed['space'])
-        self.assertEqual(store.owner_space(self.owner)['session'],'native-history-session')
-        self.assertEqual(store.owner_space(self.owner)['persona']['body'],'personality：新的风格')
+        self.assertEqual(changed['space'],'')
+        self.assertEqual(store.active_persona('qq')['body'],'personality：新的风格')
+        self.assertEqual(chat.inbound(cid,mid)['text'],'已经保存的原文')
 
     def test_verified_group_owner_changes_actual_group_configuration(self):
         host=ToolHost(self.root);host.bind('qq','owner-group','chat:'+self.chat,self.owner)
