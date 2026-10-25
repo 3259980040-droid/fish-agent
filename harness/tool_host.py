@@ -1005,7 +1005,11 @@ class ToolHost:
             # row keeps the place it came from. The label is provenance, not identity.
             if group:
                 self.scope_allowed(identity, role, name, '统一记忆：跨场所只读检索，来源逐条标注')
-            return MemoryStore(self.root, role).search(str(arguments.get('query', '')), scope=None, limit=12)
+            # A memory she just saved is model inference and starts as a candidate;
+            # excluding candidates here made her own fresh write look lost ("the index
+            # lags"), while the row was already there. The row keeps its 待核实 label.
+            return MemoryStore(self.root, role).search(str(arguments.get('query', '')), scope=None,
+                                                       limit=12, include_candidates=True)
         if name == 'fish_memory_save':
             # One memory pool: she works locally and only the delivery differs, so a
             # fact learned in a group is the same fact she knows in private.

@@ -88,5 +88,17 @@ class UnifiedMemoryTests(unittest.TestCase):
         self.assertNotIn('群里只搜得到本群', tools['fish_memory_search']['description'])
 
 
+    def test_a_just_saved_candidate_is_findable_with_its_unconfirmed_label(self):
+        candidate = self.store.save('主人刚让我测试记忆写入链路', category='事实', scope='owner',
+                                    source='qq:900', source_text='主人原话',
+                                    evidence='model_inference', status='candidate')
+        hidden = [row['id'] for row in self.store.search('记忆写入链路', limit=20)]
+        self.assertNotIn(candidate['id'], hidden)
+        found = [row for row in self.store.search('记忆写入链路', limit=20, include_candidates=True)
+                 if row['id'] == candidate['id']]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]['status_label'], '待核实')
+
+
 if __name__ == '__main__':
     unittest.main()
