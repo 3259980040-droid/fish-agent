@@ -46,6 +46,8 @@ def run_model_loop(root, role, *, persona, history, history_source, memory, scop
     expression, options = expression_policy(semantic_bubbles=output == 'bubbles'), chat_options(root)
     from context_budget import ContextBudget
     budget = ContextBudget(root, gateway)
+    if trace is not None:
+        budget.turn_id = trace.id
     output_source = 'text'
     library = None
     tool_list = tool_api.definitions(root, role,session=session) if tool_context else []
@@ -110,6 +112,7 @@ def run_model_loop(root, role, *, persona, history, history_source, memory, scop
             # same one that priced the request, used when a surface has no price yet.
             experience.requested(budget_report, tokens=getattr(budget, 'tokens', None))
         trace.event('request', {'model': gateway.model,
+                                'context_request_id': accounting,
                                 'estimated_input_tokens': budget_report.get('estimated_input_tokens'),
                                 'input_ceiling': budget_report.get('input_ceiling')})
         try:
@@ -248,6 +251,8 @@ def execute(root, role, *, prepare, origin, cancelled=None, output='text', exper
             session = materials.get('session') or ''
             trace = TurnTrace(root, role, session, origin,
                               materials.get('trace_reference') or trace_reference, child=child)
+            if materials.get('execution'):
+                trace.event('execution', str(materials['execution']))
             result = run_model_loop(
                 root, role, persona=materials['persona'], history=materials.get('history') or [],
                 history_source=materials.get('history_source') or {}, memory=materials.get('memory') or '',

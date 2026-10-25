@@ -1299,19 +1299,9 @@ class Workbench:
         if action == 'chat.reasoning':
             # Stored display copy of the provider's own reasoning for one turn.
             # Nothing is regenerated here: a turn without a trace answers empty.
-            import sqlite3 as _sqlite3
-            from contextlib import closing as _closing
             reference = str(params.get('reference', '') or '')
-            path = project_path(self.root, 'data/social/experience.db')
-            if not reference or not path.is_file():
-                return {'reference': reference, 'reasoning': '', 'phase': '', 'error': ''}
-            with _closing(_sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
-                row = db.execute('SELECT phase, reasoning, error FROM turn_traces WHERE reference=? ORDER BY updated DESC LIMIT 1',
-                                 (reference,)).fetchone()
-            if not row:
-                return {'reference': reference, 'reasoning': '', 'phase': '', 'error': ''}
-            return {'reference': reference, 'phase': str(row[0] or ''),
-                    'reasoning': str(row[1] or '')[:20000], 'error': str(row[2] or '')[:500]}
+            from fish_agent.execution.reads import read_trace
+            return read_trace(self.root, reference, main_only=False)
         if action == 'chat.delete':
             return self.delete_conversations(params)
         if action == 'chat.mode':
@@ -1367,6 +1357,9 @@ class Workbench:
                 result['execution'] = live.get('execution') or execution
                 result['elapsed_ms'] = live.get('elapsed_ms', 0)
             return result
+        if action == 'turns.list':
+            return self.runtime().execution.turns_list(limit=params.get('limit', 20),
+                                                        cursor=params.get('cursor') or '')
         if action == 'turn.view':
             view = self.runtime().execution.turn_view(str(params.get('execution') or ''))
             if view is None:
