@@ -1,24 +1,10 @@
-"""Scheduled memory maintenance: daily/weekly jobs in Asia/Shanghai (UTC+8).
+"""Scheduled-state readers for the one memory curation program.
 
-``MemoryMaintenance(root).tick(now)`` is cheap and idempotent and is meant to
-be called from the ToolHost background worker; it catches up a missed daily
-04:00 or weekly Sunday 04:30 window once, then only processes *new* source
-messages (per-role incremental cursors). ``run(kind, now=...)`` executes one
-job on demand.
-
-Sources are the real private/local histories already on disk: inbound QQ
-messages in ``data/qq/qq.db`` and inbound desktop chats in
-``data/<role>/desktop-chat.db``. Only user messages are read -- never the
-bot's own replies or model-written summaries -- and every stored fact keeps
-its ``source`` reference. A job with no new eligible message makes no model
-request (the call itself is refused in that case).
-
-Weekly maintenance does not delete memory files: it deduplicates automatic
-facts, evaluates expiry/inactivity with the upstream A_memorix lifecycle policy
-(via ``memory_source``) and only moves inactive automatic facts to the
-``candidate`` status so they are no longer recalled as active facts. Owner
-(newest copy of an auto fact) writes are never touched. No user notification
-is produced by any run; failures are recorded in the maintenance state.
+The daily actual work lives in :mod:`memory_curation`: its automatic 04:00
+window, the Fish tool and the client button all submit the same run. This module
+keeps the historical readers (QQ/desktop messages), the persisted schedule
+status and the compatibility entry points; it no longer owns a second learning
+loop, a second daily tick or an independent dedup pass.
 """
 from __future__ import annotations
 
@@ -44,7 +30,6 @@ MAX_CATCH_UP_MESSAGES = 400  # messages replayed once by a missed window
 MAX_FAILURES_RETRIED = 1
 HALF_LIFE_HOURS = 24 * 7
 DECAY_THRESHOLD = 0.1
-TERMINAL = ('done', 'empty')
 
 _NAMESPACE = 'memory-maintenance'
 # Process-wide (not thread-local): every thread/instance of a root shares the
@@ -478,17 +463,9 @@ class HistoryCursor:
 # --------------------------------------------------------------------------
 
 YES = ('ok', 'done', 'skipped', 'empty')
-NO = ('pending', 'running', 'failed')
 
 
-def _learning(state: _State) -> dict:
-    return state.get('learning') or {'processed': {}, 'failures': {}}
 
-
-def _known_sources(store) -> set:
-    """Every source the role already has a learning job for (live queue)."""
-    with database(store.path) as db:
-        return {row[0] for row in db.execute('SELECT source FROM learning_jobs').fetchall()}
 
 
 def _clean_source(text: str) -> str:
@@ -635,42 +612,10 @@ class MemoryMaintenance:
         return result
 
     def tick(self, now=None):
-        """Cheap, idempotent: run each due job once; never raises for a job."""
-        now = to_timestamp(now)
-        with self.lock:
-            for role in self._roles():
-                # First use: rows existing now are history, not backlog.
-                self.history.initialize(role, now)
-            return self._tick(now)
+        """Compatibility entry into the one curation program's daily window."""
+        from memory_curation import tick as curation_tick
+        return curation_tick(self.root, now)
 
-    def _tick(self, now):
-        summary = {'now': _iso(now), 'ran': [], 'errors': [], 'status': 'ok'}
-        due = self.due(now)
-        # A model-less role (no key yet) stays due until a key exists; it is
-        # retried at most hourly so it never delays or re-runs the other role.
-        attention = _shared_memory('attention', dict)
-        key = str(self.root.resolve())
-        last = attention.get(key) or {}
-        waiting = [(role, kind) for role, kind in due
-                   if self._job(self._state(role), kind).get('status') == 'pending']
-        if waiting and now - float(last.get('at') or 0) < 3600 and set(waiting) == set(last.get('items') or []):
-            summary['status'] = 'idle'
-            summary['deferred'] = [f'{role}:{kind}' for role, kind in waiting]
-            return summary
-        for role, kind in due:
-            try:
-                result = self.run(kind, now=now, role=role)
-                summary['ran'].append({'role': role, 'kind': kind, 'status': result['status'],
-                                       'summary': result['summary']})
-            except Exception as exc:  # noqa: BLE001 - recorded in state, chat continues
-                summary['errors'].append({'role': role, 'kind': kind,
-                                          'error': type(exc).__name__ + ': ' + str(exc)[:200]})
-        attention[key] = {'at': now, 'items': [f'{role}:{kind}' for role, kind in waiting]}
-        if not due:
-            summary['status'] = 'idle'
-        elif summary['errors']:
-            summary['status'] = 'partial'
-        return summary
 
     # -- run ----------------------------------------------------------------
 
@@ -679,61 +624,19 @@ class MemoryMaintenance:
         period = 86400 if kind == 'daily' else 7 * 86400
         return window - period
 
-    def _missed(self, record, kind, window) -> bool:
-        """Was the previous window missed (last successful run before it)?
-
-        For the daily job this is checked against the previous *daily* window
-        (Fish may have been off for days); because a missed window is caught
-        up only once, a run cost of at most one extra bounded catch-up is
-        guaranteed per long gap.
-        """
-        return float(record.get('last_window') or 0) < self._earlier_window(kind, window)
 
     @staticmethod
     def _skip_missed(record, kind, window) -> bool:
         """True when this missed window was already caught up once."""
         return float(record.get('attempted_window') or 0) >= window
 
-    def _run_once(self, kind, now, role, gateway_factory, catch_up):
-        """One attempt for the window of ``now``; returns (status, summary)."""
-        window = due_windows(now)[kind]
-        state = self._state(role)
-        previous = self._job(state, kind)
-        record = {**previous, 'status': 'running', 'started_at': time.time(), 'last_error': ''}
-        self._save_job(state, kind, record)
-        try:
-            if kind == 'daily':
-                # A catch-up replays since the last successful run; a regular
-                # run covers since the previous daily window. Weekly never
-                # replays history: its review only looks at current memory.
-                if catch_up:
-                    start = max(float(previous.get('last_window') or 0), self._earlier_window(kind, window) - 6 * 86400)
-                else:
-                    start = self._earlier_window(kind, window)
-                summary = self._daily(role, window, now, gateway_factory, start=start, catch_up=catch_up,
-                                      budget=MAX_CATCH_UP_MESSAGES if catch_up else DAILY_MAX_MESSAGES)
-            else:
-                summary = self._weekly(role, window, now)
-        except Exception as exc:
-            self._save_job(state, kind, {**record, 'status': 'error', 'finished_at': time.time(),
-                                         'last_error': type(exc).__name__ + ': ' + str(exc)[:300],
-                                         'attempted_window': window})
-            raise
-        record.update(status=summary.pop('status'), finished_at=time.time(), attempted_window=window,
-                      summary=summary, last_error=str(summary.get('error') or '')[:300])
-        if record['status'] in YES:
-            # Successful (or empty) run: this is the last successful window; a
-            # catch-up computes the next start from it.
-            record['last_window'] = window
-        self._save_job(state, kind, record)
-        return record['status'], summary
 
     def run(self, kind, now=None, *, role='qq', gateway_factory=None):
-        """Execute 'daily' or 'weekly' once for a role and persist the result.
+        """Compatibility entry into the one curation program.
 
-        If the previous window was missed, the messages since the last run are
-        collected once (``caught_up``) before the current window runs, so a
-        long downtime never silently drops history.
+        Daily learning/digest/emoji and the duplicate/expiry pass are no longer
+        executed here; this class keeps status readers and the historical
+        readers, while every write goes through ``memory_curation``.
         """
         if kind not in ('daily', 'weekly'):
             raise ValueError('维护任务只能是 daily 或 weekly')
@@ -741,172 +644,25 @@ class MemoryMaintenance:
             raise ValueError('未知角色')
         now = to_timestamp(now)
         window = due_windows(now)[kind]
-        with self.lock:
-            state = self._state(role)
-            # First real use of this role's state: without a baseline the whole
-            # pre-existing history (and the live queue built from it) looked
-            # "new". Record the current rows as history; only later messages
-            # are learned (`collect()` applies the same rule as a backstop).
-            record = self._job(state, kind)
-            self.history.initialize(role, now)
-            if float(record.get('last_window') or 0) >= window:
-                return {'kind': kind, 'role': role, 'window': _iso(window), 'status': 'already-done',
-                        'summary': record.get('summary') or {}}
-            caught_up = None
-            if kind == 'daily' and self._missed(record, kind, window):
-                # Fish was off over at least one window: replay what arrived
-                # since the last successful run, once. (A run already done for
-                # today is not repeated by the normal run below.)
-                status, caught_up = self._run_once(kind, now, role, gateway_factory, True)
-                return {'kind': kind, 'role': role, 'window': _iso(window), 'status': status,
-                        'summary': caught_up, 'caught_up': caught_up}
-            if (record.get('status') != 'error' and float(record.get('attempted_window') or 0) >= window
-                    and not caught_up):
-                return {'kind': kind, 'role': role, 'window': _iso(window), 'status': 'already-done',
-                        'summary': record.get('summary') or {}}
-            status, summary = self._run_once(kind, now, role, gateway_factory, False)
-            try:
-                from memory_engine import enqueue_warm
-                enqueue_warm(self.root, role)
-            except Exception:  # noqa: BLE001 - backfill is best effort
-                pass
-            result = {'kind': kind, 'role': role, 'window': _iso(window), 'status': status, 'summary': summary}
-            if caught_up is not None:
-                result['caught_up'] = caught_up
-            return result
+        if kind == 'weekly':
+            from memory_curation import tidy_memories
+            summary = tidy_memories(self.root, role, now)
+            return {'kind': kind, 'role': role, 'window': _iso(window), 'status': 'done',
+                    'summary': summary}
+        from memory_curation import run_now
+        gateway = gateway_factory(role) if gateway_factory is not None else None
+        record = run_now(self.root, role=role, gateway=gateway, requested_by='daily',
+                         start=self._earlier_window(kind, window), end=now,
+                         day=_iso(window)[:10])
+        return {'kind': kind, 'role': role, 'window': _iso(window),
+                'status': record.get('status'), 'summary': record.get('result') or {}}
 
     # -- daily --------------------------------------------------------------
-    def _gateway(self, role, factory):
-        if factory is not None:
-            return factory(role)
-        from model_gateway import ModelGateway
-        try:
-            return ModelGateway(self.root, role)
-        except (ValueError, KeyError, OSError):
-            return None
 
-    def _daily(self, role, window, now, factory=None, *, start, catch_up=False, budget=DAILY_MAX_MESSAGES) -> dict:
-        """Learn the messages of this session (``start`` .. ``now``).
-
-        A regular run takes messages since the previous window; a catch-up
-        run (a missed window) takes the ones since the last successful run,
-        bounded, so nothing that arrived while Fish was off is lost. Messages
-        already in the role's learning history (live mode queues them as they
-        arrive) are never extracted again.
-        """
-        from memory_store import MemoryStore
-        store = MemoryStore(self.root, role)
-        today = _iso(window)[:10]
-        state = self._state(role)
-        learning = _learning(state)
-        window_key = f'{role}:{today}' + (':catch-up' if catch_up else '')
-        if not catch_up and learning.get('window') == window_key and not (
-                'error' in (self._job(state, 'daily') or {})):
-            # Already final for this Shanghai day (a manual re-run never re-learns).
-            return {'status': 'empty', 'window': window_key, 'new_messages': 0, 'model_calls': 0,
-                    'note': '今日窗口已完成，未调用模型'}
-        collected = self.history.collect(role, start, now, limit=budget)
-        queue = self._learning_queue(role)
-        processed = learning.get('processed') or {}
-        failures = learning.get('failures') or {}
-        # Only rows this run learns (or the live pipeline already queued):
-        # others stay below 'seen' and are picked up by a later run.
-        known = set(queue)
-        fresh = []
-        for message in collected['messages']:
-            source = message['source']
-            references = [source, *message.get('source_aliases', [])]
-            if any(ref in known or ref in processed or int(failures.get(ref, 0)) > MAX_FAILURES_RETRIED for ref in references):
-                continue
-            fresh.append(message)
-        summary = {'window': window_key, 'new_messages': len(fresh), 'scanned': collected['seen'],
-                   'skipped_existing': collected['seen'] - len(fresh),
-                   'catch_up_from': _iso(start) if catch_up else '',
-                   'sources': sorted({message['origin'] for message in fresh}),
-                   'queued': 0, 'model_calls': 0}
-        if not fresh:
-            # Nothing new to learn: no model request at all. A catch-up keeps
-            # the day resumable so the current window still learns normally.
-            learning.update(processed=processed, failures=failures, updated_at=now,
-                            window=learning.get('window') if catch_up else window_key)
-            state.set('learning', learning)
-            self.history.advance(self._handled(role, collected['messages']))
-            summary.update(status='empty', note='没有需要学习的新内容，未调用模型')
-            return summary
-        gateway = self._gateway(role, factory)
-        if gateway is None or not getattr(gateway, 'key', ''):
-            # Not a lost window: nothing is advanced, so the same messages are
-            # retried once a model key exists (no backlog is lost).
-            summary.update(status='pending', note='模型未配置，今日任务保留待重试；未调用模型')
-            return summary
-        mine = set()
-        for message in fresh:
-            scope = message['scope']
-            if store.is_test_scope(scope):
-                continue
-            job = queue.get(message['source'])
-            if job and job['scope'] == scope and job['status'] != 'failed':
-                continue              # already queued/learned by the live pipeline
-            store.enqueue(message['source'], message['text'], scope, subject=message['subject'],
-                          source_aliases=message.get('source_aliases', []))
-            job = self._learning_queue(role).get(message['source'])
-            if job and job['scope'] == scope and job['status'] in ('pending', 'running'):
-                mine.add(message['source'])
-        summary['queued'] = len(mine)
-        summary['model_calls'] = self._drain(role, mine, gateway, processed, failures, budget)
-        summary['failed'] = sorted(source for source, count in failures.items() if count)
-        learning.update(window=window_key, processed=processed, failures=failures, updated_at=time.time())
-        state.set('learning', learning)
-        self.history.advance(self._handled(role, collected['messages']))
-        summary['status'] = 'partial' if summary['failed'] else 'done'
-        return summary
 
     @staticmethod
-    def _handled(role, fresh):
-        """Collected view limited to ``fresh``: only these rows move ``seen``.
 
-        A row already in the live queue, or one beyond the per-run budget,
-        keeps its old position and is picked up by a later run.
-        """
-        return {'role': role, 'messages': list(fresh), 'rows': list(fresh)}
 
-    def _learning_queue(self, role):
-        with database(role_dir(self.root, role) / 'memory.db') as db:
-            return {row['source']: dict(row) for row in db.execute(
-                "SELECT source,scope,status FROM learning_jobs WHERE scope NOT LIKE 'space:%' "
-                "AND scope NOT LIKE 'chat:group:%:test:%'")}
-
-    def _drain(self, role, mine, gateway, processed, failures, budget=DAILY_MAX_MESSAGES):
-        """Learn this window's queued messages (existing ``learn_one``), capped."""
-        from memory_store import MemoryStore
-        store = MemoryStore(self.root, role)
-        calls, no_progress = 0, 0
-        with database(store.path) as db:
-            ordered = [row['source'] for row in db.execute(
-                "SELECT source FROM learning_jobs WHERE status IN ('pending','running') "
-                "AND scope NOT LIKE 'space:%' AND scope NOT LIKE 'chat:group:%:test:%' ORDER BY created")]
-        # Only this run's messages; a live-pipeline job before them is left to
-        # the live worker (model_calls counts our own calls only).
-        for source in [source for source in ordered if source in mine]:
-            if calls >= int(budget) or no_progress >= 2:
-                break
-            learned = store.learn_one(gateway, source)
-            calls += 1
-            with database(store.path) as db:
-                status = db.execute('SELECT status FROM learning_jobs WHERE source=?', (source,)).fetchone()
-            if not learned or status is None:
-                no_progress += 1
-                continue
-            state = status['status']
-            if status is not None and state in TERMINAL:
-                processed[source] = state
-                failures.pop(source, None)
-                no_progress = 0
-            else:
-                processed[source] = state
-                failures[source] = int(failures.get(source, 0)) + 1
-                no_progress += 1
-        return calls
 
     # -- weekly -------------------------------------------------------------
     @staticmethod
@@ -919,87 +675,7 @@ class MemoryMaintenance:
         return (row['source'] != 'manual' and row['evidence'] not in ('manual','owner_quote')
                 and not str(row['scope']).startswith('chat:group:') and not row.get('conflict'))
 
-    def _weekly(self, role, window, now) -> dict:
-        from memory_store import MemoryStore
-        MemoryStore(self.root, role)          # schema is created idempotently
-        state = self._state(role)
-        upstream = bool(memory_source.source_status(self.root)['lifecycle']['loaded'])
-        summary = {'evaluated': 0, 'collapsed': [], 'deactivated': [], 'kept': 0,
-                   'skipped_manual': 0, 'upstream': upstream, 'deleted': 0, 'model_calls': 0}
-        conflict = state.get('conflicts') or {}
-        with database(role_dir(self.root, role) / 'memory.db') as db:
-            rows = [dict(row) for row in db.execute('SELECT * FROM memories')]
-        for row in rows:
-            row['conflict'] = row['id'] in conflict
-        auto = [row for row in rows if self._auto(row)]
-        summary['skipped_manual'] = len(rows) - len(auto)
-        summary['evaluated'] = len(auto)
-        # 1) duplicates of the same learned text: keep the newest copy, move the
-        #    others to candidates with their source preserved (no deletion).
-        kept = set()
-        for cluster in _clusters(auto):
-            if len(cluster['rows']) < 2:
-                continue
-            keep = max(cluster['rows'], key=lambda row: (float(row['created'] or 0), float(row['updated'] or 0)))
-            kept.add(keep['id'])
-            for row in cluster['rows']:
-                if row['id'] == keep['id'] or row['status'] != 'active':
-                    continue
-                self._deactivate(role, row, 'duplicate', now, upstream)
-                summary['collapsed'].append({'id': row['id'], 'duplicate_of': keep['id'], 'source': row['source']})
-        # 2) expiry + upstream lifecycle inactivity (no hard deletion)
-        lifecycle = state.get('lifecycle') or {}
-        for row in auto:
-            if row['status'] != 'active' or lifecycle.get(row['id'], {}).get('status') == 'inactive':
-                continue
-            if row['id'] in kept and not (row['expires'] and row['expires'] <= now):
-                # The surviving copy of a duplicate set stays searchable; its
-                # inactive twins already hold that set's lifecycle verdict.
-                summary['kept'] += 1
-                continue
-            reason = None
-            if row['expires'] and row['expires'] <= now:
-                reason = 'expired'
-            else:
-                anchor = float(row['observed'] or row['created'])
-                strength = min(1.0, max(0.0, float(row['confidence']) or 1.0))
-                decision = memory_source.evaluate_due(self.root, strength=strength, anchor=anchor, now=now,
-                                                      half_life_hours=HALF_LIFE_HOURS, threshold=DECAY_THRESHOLD)
-                lifecycle[row['id']] = {'status': 'inactive' if decision['inactive'] else 'active',
-                                        'reason': decision['reason'], 'checked_at': now,
-                                        'next_at': decision['next_at'], 'anchor': anchor,
-                                        'upstream': decision['upstream']}
-                if decision['inactive']:
-                    reason = str(decision['reason'] or 'decayed')
-            if reason:
-                self._deactivate(role, row, reason, now, upstream)
-                summary['deactivated'].append({'id': row['id'], 'reason': reason})
-            else:
-                summary['kept'] += 1
-        state.set('lifecycle', lifecycle)
-        # The semantic index follows the facts it serves (bounded backfill).
-        try:
-            from memory_engine import MemoryEngine
-            summary['backfill'] = MemoryEngine(self.root, role).backfill().get('count', 0)
-        except Exception as exc:  # noqa: BLE001 - shown in status, not fatal
-            summary['backfill_error'] = type(exc).__name__
-        summary['status'] = 'done'
-        summary['note'] = '只整理自动学习的事实；人工保存或确认的事实未改动，未删除任何记忆文件或记录'
-        return summary
 
-    def _deactivate(self, role, row, reason, now, upstream):
-        """Move a row to candidate (never deletes) and record its lifecycle state."""
-        with database(role_dir(self.root, role) / 'memory.db') as db:
-            db.execute('BEGIN IMMEDIATE')
-            if row['status'] == 'active':
-                db.execute("UPDATE memories SET status='candidate', updated=? WHERE id=? AND status='active'",
-                           (now, row['id']))
-                db.execute("UPDATE metadata SET value=value+1 WHERE key='revision'")
-        state = self._state(role)
-        lifecycle = state.get('lifecycle') or {}
-        lifecycle[row['id']] = {'status': 'inactive', 'reason': reason, 'since': now, 'upstream': upstream,
-                                'anchor': float(row['observed'] or row['created'])}
-        state.set('lifecycle', lifecycle)
 
     # -- confirmations ------------------------------------------------------
     def confirm(self, memory_id, *, scope='owner', role='qq', source='manual'):
@@ -1068,7 +744,6 @@ def start_background(host, root=None, *, interval: float = 60.0, embed_interval:
     stop = getattr(host, 'stop', None)
     if stop is None:
         stop = threading.Event()
-    maintenance = MemoryMaintenance(root)
     last_embed = 0.0
 
     def warm_embeddings():
@@ -1096,8 +771,11 @@ def start_background(host, root=None, *, interval: float = 60.0, embed_interval:
             if stop.is_set():
                 break
             try:
-                maintenance.tick()
-            except Exception:  # noqa: BLE001 - persisted in the job record
+                # The one automatic daily trigger: it submits the same curation
+                # program the tool and the client button use, then returns.
+                from memory_curation import tick as curation_tick
+                curation_tick(root)
+            except Exception:  # noqa: BLE001 - persisted in the curation run record
                 pass
             if time.time() - last_embed >= embed_interval:
                 last_embed = time.time()

@@ -325,7 +325,6 @@ class QQAgentLoop:
     async def _maintenance(self):
         from data_retention import DataRetention
         from group_language import GroupLanguage
-        from daily_curate import tick as daily_curate_tick
         GroupLanguage(self.root)
         while not self._stop.is_set():
             try:
@@ -334,13 +333,8 @@ class QQAgentLoop:
                 self.governance.audit('data_maintenance_failed',type(exc).__name__)
             # 自主开口的旧节拍已退出：群消息的默认触发放在唯一主执行里，
             # 45 分钟定时与三秒自唤醒由 06-01 接回同一条思考（不再另建生成路径）。
-            try:
-                # 每日整理唯一入口：清理记忆 + 当天小结 + 挑表情；
-                # 小结由它内部调用 memory_digest.daily，这里不再单独调一遍，
-                # 否则同一份小结有两个触发方，各自记账、各自调模型。
-                await asyncio.to_thread(daily_curate_tick, self.root)
-            except Exception as exc:
-                self.governance.audit('daily_curate_failed', type(exc).__name__)
+            # 每日记忆整理也不再从这里启动：宿主后台的唯一 curation.tick
+            # 与 Fish 工具、客户端按钮共用同一整理程序和同一条执行记录。
             # All reminders and autonomous opportunities are owned by AgentScheduler.
             # This maintenance pass only handles non-social housekeeping and fault notices.
             for fault in self.governance.fault_snapshot()['items']:

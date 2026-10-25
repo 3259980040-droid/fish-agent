@@ -13,7 +13,7 @@ from pathlib import Path
 import requests
 from governance import Governance, control_token
 from memory_store import MemoryStore
-from model_gateway import ModelGateway, ModelLedger
+from model_gateway import ModelLedger
 from plugin_registry import PluginRegistry
 from storage import database, read_json, write_json
 
@@ -276,6 +276,28 @@ def builtins(role):
         {'name': 'fish_memory_save', 'description': '保存一条记忆。参数：text 内容；category 类别；kind=fact/event；due、evidence、source_message_id、source_quote、source_url 可选。返回记忆 id。改期用 event_id，完成或取消用 fish_memory_complete。', 'parameters': schema(memory_fields, ['text'])},
         {'name': 'fish_memory_complete', 'description': '结束一条kind=event的记忆：cancel为false或省略表示主人明确说做完了，记为已完成；cancel为true表示主人明确说取消、不做了或做不了了，记为已取消。完成和取消是两种不同记录（action分别为completed和cancelled），都会在来源里追加一行说明，此后不再主动提。只在主人明确说做完或取消时调用；note写主人当时的说法。必须先用fish_memory_search确认ID，改期用fish_memory_save给event_id，不要重新存一条。完成或取消主人的约定只在主人私聊或本地桌面进行；群聊与独立窗口不能替主人确认。', 'parameters': schema({'id': string, 'note': string, 'cancel': {'type': 'boolean', 'default': False, 'description': 'true表示取消，默认false表示完成'}}, ['id'])},
         {'name': 'fish_memory_delete', 'description': '按主人要求删除记忆并防止从原来源重新学习。先搜索确认 ID。', 'parameters': schema({'id': string}, ['id'])},
+        {'name': 'fish_knowledge_search',
+         'description': '统一检索：先在消息、目录、资料、记忆和小结的 FTS5 索引里找命中，再给概述；命中带稳定 reference 和 index/overview/original 三层，需要原话、原件或修订时用 fish_knowledge_open 按 reference 展开。资料或记忆的语义向量实际可用时返回混合检索，否则明确说明仅词法及真实原因；词法分数不冒充语义分数。长问句的首尾关键词都会参与，结果有上限并如实说明截断。',
+         'parameters': schema({'query': string,
+                               'limit': {'type': 'integer', 'minimum': 1, 'maximum': 50, 'default': 12,
+                                         'description': '最多返回多少条索引命中'}}, ['query'])},
+        {'name': 'fish_knowledge_open',
+         'description': '按 fish_knowledge_search 返回的 reference 展开一层：level=overview 读概述，level=original 读原话、原件位置或记忆修订；消息和目录按 page/count 分页。引用只指向原库记录，不复制出第二份正文。传入未知或已删除的引用会说明找不到。',
+         'parameters': schema({'reference': string,
+                               'level': {'type': 'string', 'enum': ['index', 'overview', 'original'],
+                                         'default': 'original'},
+                               'page': {'type': 'integer', 'minimum': 1, 'default': 1},
+                               'count': {'type': 'integer', 'minimum': 1, 'maximum': 20, 'default': 5}},
+                              ['reference'])},
+        {'name': 'fish_memory_curate',
+         'description': '启动或查看完整记忆整理：读取新增或指定范围，做基础格式化、明确重复与来源整理，用 Fish 自己配置的模型提炼事实、事件和概述，保存记忆及修订，再更新 FTS5 和适用的向量索引。每日自动整理、客户端“整理”按钮和这个工具调用同一程序、同一执行引用、同一进度记录。action=start 立刻返回真实 run 引用，不等待模型，也不占主思考锁；action=status 用同一 run_id 查阶段和结果。未变化材料会跳过；失败会记录范围和原因，不标记为已完成，可再次启动。',
+         'parameters': schema({'action': {'type': 'string', 'enum': ['start', 'status']},
+                               'run_id': {'type': 'string', 'description': 'status 时可指定；不填则列最近'},
+                               'day': {'type': 'string', 'description': 'start 时可指定 YYYY-MM-DD'},
+                               'start': {'type': 'string', 'description': 'start 时可指定起始时间（ISO 或 Unix 秒）'},
+                               'end': {'type': 'string', 'description': 'start 时可指定结束时间（ISO 或 Unix 秒）'},
+                               'force': {'type': 'boolean', 'default': False,
+                                         'description': '重做已失败或已处理的范围'}}, ['action'])},
         {'name': 'fish_interests_read', 'description': '读取主人指定的 B 站研究方向和排除范围。个人反馈不能自行改写这些方向。', 'parameters': schema({})},
         {'name': 'fish_interests_update', 'description': '仅在主人明确要求时更改研究方向、关键词或排除词。保留未传入的配置。', 'parameters': schema({k: {'type': 'array', 'items': string} for k in ('directions', 'keywords', 'exclude', 'ups')})},
     ]
@@ -791,11 +813,13 @@ class ToolHost:
                     query = str(arguments.get('query', '') or '').strip()
                     if query:
                         # One entry for both readings of "history": a time window or a
-                        # keyword looked up in the index, so she never needs two tools.
-                        from history_index import search as search_history
-                        hits = search_history(self.root, query, limit=int(arguments.get('limit', 8)))
-                        return {'query': query, 'hits': hits,
-                                'note': '按关键词命中索引；原文摘要只到 120 字，需要上下文再用消息号按区间取'}
+                        # keyword looked up in the unified index, so she never needs
+                        # two different lookup paths.
+                        from knowledge import search as knowledge_search
+                        result = knowledge_search(self.root, query, limit=int(arguments.get('limit', 8)),
+                                                  scope=scope_text)
+                        return {**result,
+                                'note': '按统一索引命中；每条带 reference 和 index/overview/original 三层，需要原话用 fish_knowledge_open 展开'}
                     from group_read import read_group
                     bounded = {key: arguments[key] for key in ('minutes', 'limit', 'before') if key in arguments}
                     return read_group(self.root, scope_text[len('chat:group:'):], **bounded)
@@ -822,10 +846,10 @@ class ToolHost:
             if name == 'fish_group_history':
                 query = str(arguments.get('query', '') or '').strip()
                 if query:
-                    from history_index import search as search_history
-                    hits = search_history(self.root, query, limit=int(arguments.get('limit', 8)))
-                    return {'query': query, 'hits': hits,
-                            'note': '按关键词命中索引；摘要只到 120 字，需要上下文再用消息号按区间取'}
+                    from knowledge import search as knowledge_search
+                    result = knowledge_search(self.root, query, limit=int(arguments.get('limit', 8)))
+                    return {**result,
+                            'note': '按统一索引命中；每条带 reference 和 index/overview/original 三层，需要原话用 fish_knowledge_open 展开'}
                 from group_read import read_group
                 bounded = {key: arguments[key] for key in ('minutes', 'limit', 'before') if key in arguments}
                 return read_group(self.root, arguments.get('group_id'), **bounded)
@@ -941,6 +965,41 @@ class ToolHost:
             from research_autonomy import ResearchControl
             store = ResearchControl(self.root)
             return store.search(str(arguments['query'])) if name.endswith('search') else store.detail(str(arguments['bvid']))
+        if name in ('fish_knowledge_search', 'fish_knowledge_open'):
+            # The graded entry reads the one Fish experience; its hits name the
+            # owning store. A bound group may search what she knows, while the
+            # document channel stays inside that group's own shelf.
+            from knowledge import open as knowledge_open
+            from knowledge import search as knowledge_search
+            if group:
+                self.scope_allowed(identity, role, name, '统一检索：命中逐条标注来源，资料只读本群书架')
+            elif not owner_main:
+                self.scope_refused(identity, role, name, '统一检索仅用于主人私聊、本地控制台或已授权的群')
+            if name == 'fish_knowledge_search':
+                return knowledge_search(self.root, str(arguments.get('query', '')),
+                                        limit=int(arguments.get('limit', 12)),
+                                        scope=scope_text if group else None)
+            try:
+                return knowledge_open(self.root, str(arguments.get('reference', '')),
+                                      level=str(arguments.get('level', 'original')),
+                                      page=int(arguments.get('page', 1)),
+                                      count=int(arguments.get('count', 5)))
+            except ValueError as exc:
+                return {'ok': False, 'error': str(exc), 'reference': str(arguments.get('reference', ''))}
+        if name == 'fish_memory_curate':
+            if group:
+                self.scope_refused(identity, role, name,
+                                   '整理会归纳并改写长期记忆，只在主人私聊或本地控制台启动；群里只能检索')
+            if not owner_main:
+                raise PermissionError('整理工具仅用于主人私聊或本地控制台')
+            require('memory.write')
+            from memory_curation import status as curation_status
+            from memory_curation import submit as curation_submit
+            if arguments.get('action') == 'status':
+                return curation_status(self.root, arguments.get('run_id'), limit=10)
+            return curation_submit(self.root, day=arguments.get('day'), start=arguments.get('start'),
+                                   end=arguments.get('end'), force=bool(arguments.get('force')),
+                                   requested_by='tool')
         if name == 'fish_memory_search':
             # One memory: the same Fish reads the same records in every place, and each
             # row keeps the place it came from. The label is provenance, not identity.
@@ -1810,19 +1869,11 @@ class ToolHost:
                 try:
                     if Governance(self.root, role).config()['paused']:
                         continue
-                    gateway = ModelGateway(self.root, role)
-                    if not gateway.key:
-                        continue
-                    MemoryStore(self.root, role).learn_one(gateway)
                     if role == 'qq':
-                        from emoji_store import EmojiStore
-                        EmojiStore(self.root).learn_one(gateway)
                         # 自动压缩只有一条触发路径：请求预算测到压力后由共同经历入队，
                         # 这里只负责把队列里那一段用一个成功提交整理完。
                         from fish_agent.experience.compaction import drain as compact_context
                         compact_context(self.root)
-                        from history_index import ensure as index_history
-                        index_history(self.root)
                 except Exception:
                     # Each job retains its own failure; never silently retry paid calls.
                     continue
