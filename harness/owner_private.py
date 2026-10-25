@@ -142,7 +142,7 @@ async def reply(loop, item, text, key, *, turn='', inbound_status='processed'):
     try:
         validate = lambda: window_current(loop, item)
         from experience import delivery
-        delivery(loop.root, 'qq:' + str(item['message_id']), sending=True)
+        delivery(loop.root, str(item.get('reference') or 'qq:' + str(item['message_id'])), sending=True)
         result = await loop._deliver_reply(target, [], key, loop.private_cancel,
             validate=validate, validation_error=WINDOW_CHANGED, bubble_plan=plan,
             instance_root=__import__('locations').instance_context(loop.root,item.get('instance_id')).root,
@@ -172,7 +172,7 @@ async def reply(loop, item, text, key, *, turn='', inbound_status='processed'):
             channel_message_id=ids[-1] if ids else '', cancelled=bubble_state == 'cancelled',
             segments=[{**part, 'delivery': detail_bubble} for part in plan[index]['segments']])
     from experience import delivery
-    delivery(loop.root,'qq:'+str(item['message_id']),outcome=state,error=error)
+    delivery(loop.root,str(item.get('reference') or 'qq:'+str(item['message_id'])),outcome=state,error=error)
     loop.store.update_message(item['message_id'], status=inbound_status if result.get('ok') else state, error=error,
                               cancelled=state == 'cancelled')
     if turn:
@@ -183,52 +183,56 @@ async def reply(loop, item, text, key, *, turn='', inbound_status='processed'):
                         'message_ids': [item['message_ids'] for item in receipts if item.get('message_ids')]}}
 
 
-async def deliveries(loop):
-    """Deliver accepted task results once; never replay uncertain files or messages."""
-    with database(loop.store.db_path) as db:
-        db.execute('CREATE TABLE IF NOT EXISTS task_notices(task TEXT PRIMARY KEY,state TEXT)')
-        db.execute("UPDATE task_notices SET state='unknown' WHERE state='sending'")
-    from bot_control import BotControl
-    control = BotControl(loop.root)
-    while not loop._stop.is_set():
-        try:
-            rows = await asyncio.to_thread(task_call,loop.root,'list',{})
-            for value in rows['tasks']:
-                if value['status'] in ACTIVE:
-                    continue
-                target = value['config'].get('notify_target')
-                if not target or not str(target).startswith(('private:','group:')):
-                    continue
-                if value['status']=='completed' and value['artifact_status'] in ('ready','served'):
-                    if any(not any(r['artifact']==a['id'] for r in value['deliveries']) for a in value['artifacts']):
-                        value = await asyncio.to_thread(task_call,loop.root,'deliver',{'task':value['id']})
+async def deliveries(host_loop):
+    """One account monitor reads terminal tasks from each originating instance."""
+    while not host_loop._stop.is_set():
+        for loop in host_loop.instance_routes():
+            if loop.governance.config()['paused']: continue
+            try:
                 with database(loop.store.db_path) as db:
-                    changed = db.execute("INSERT OR IGNORE INTO task_notices VALUES(?,'sending')",(value['id'],)).rowcount
-                if not changed:
-                    continue
-                direct = value['config'].get('direct_deliveries') or []
-                if value['status']=='completed' and any(row.get('state') in ('SUCCEEDED','sent','UNKNOWN','uncertain') for row in direct):
-                    # This child already contacted the same recipient. Keep its
-                    # final result on the task page; do not repeat it as a notice.
-                    state = 'uncertain' if any(row.get('state') in ('UNKNOWN','uncertain') for row in direct) else 'sent'
+                    db.execute('CREATE TABLE IF NOT EXISTS task_notices(task TEXT PRIMARY KEY,state TEXT)')
+                    if not getattr(loop, '_notices_ready', False):
+                        db.execute("UPDATE task_notices SET state='unknown' WHERE state='sending'")
+                        loop._notices_ready = True
+                from bot_control import BotControl
+                control = BotControl(loop.root)
+                rows = await asyncio.to_thread(task_call,loop.root,'list',{})
+                for value in rows['tasks']:
+                    if value['status'] in ACTIVE:
+                        continue
+                    target = value['config'].get('notify_target')
+                    if not target or not str(target).startswith(('private:','group:')):
+                        continue
+                    if value['status']=='completed' and value['artifact_status'] in ('ready','served'):
+                        if any(not any(r['artifact']==a['id'] for r in value['deliveries']) for a in value['artifacts']):
+                            value = await asyncio.to_thread(task_call,loop.root,'deliver',{'task':value['id']})
+                    with database(loop.store.db_path) as db:
+                        changed = db.execute("INSERT OR IGNORE INTO task_notices VALUES(?,'sending')",(value['id'],)).rowcount
+                    if not changed:
+                        continue
+                    direct = value['config'].get('direct_deliveries') or []
+                    if value['status']=='completed' and any(row.get('state') in ('SUCCEEDED','sent','UNKNOWN','uncertain') for row in direct):
+                        # This child already contacted the same recipient. Keep its
+                        # final result on the task page; do not repeat it as a notice.
+                        state = 'uncertain' if any(row.get('state') in ('UNKNOWN','uncertain') for row in direct) else 'sent'
+                        with database(loop.store.db_path) as db:
+                            db.execute('UPDATE task_notices SET state=? WHERE task=?',(state,value['id']))
+                        continue
+                    status_text = '系统任务结果：\n'+task_text(value)
+                    bubbles = [{'kind':'text','text':status_text}]
+                    if value['status']=='completed':
+                        bubbles.extend(value['config'].get('result_bubbles') or ([{'kind':'text','text':value['result']}] if value['result'] else []))
+                    try:
+                        result = await asyncio.to_thread(control.deliver_bubbles,target,bubbles,'owner-task-result:'+value['id'],
+                            source='task-result',context='owner:task:'+value['id'])
+                        state = {'SUCCEEDED':'sent','UNKNOWN':'uncertain'}.get(result['state'],'failed')
+                    except Exception as exc:
+                        state = 'uncertain' if not isinstance(exc,(ValueError,PermissionError)) else 'failed'
+                        await loop._fault('task-result:'+value['id'],exc,stage='delivery',uncertain=state=='uncertain')
                     with database(loop.store.db_path) as db:
                         db.execute('UPDATE task_notices SET state=? WHERE task=?',(state,value['id']))
-                    continue
-                status_text = '系统任务结果：\n'+task_text(value)
-                bubbles = [{'kind':'text','text':status_text}]
-                if value['status']=='completed':
-                    bubbles.extend(value['config'].get('result_bubbles') or ([{'kind':'text','text':value['result']}] if value['result'] else []))
-                try:
-                    result = await asyncio.to_thread(control.deliver_bubbles,target,bubbles,'owner-task-result:'+value['id'],
-                        source='task-result',context='owner:task:'+value['id'])
-                    state = {'SUCCEEDED':'sent','UNKNOWN':'uncertain'}.get(result['state'],'failed')
-                except Exception as exc:
-                    state = 'uncertain' if not isinstance(exc,(ValueError,PermissionError)) else 'failed'
-                    await loop._fault('task-result:'+value['id'],exc,stage='delivery',uncertain=state=='uncertain')
-                with database(loop.store.db_path) as db:
-                    db.execute('UPDATE task_notices SET state=? WHERE task=?',(state,value['id']))
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            await loop._fault('task-result-monitor',exc,stage='delivery')
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await loop._fault('task-result-monitor',exc,stage='delivery')
         await asyncio.sleep(2)

@@ -6,7 +6,7 @@ private/task-result/owner-request toggle. Group listening stays an input concern
 The channel still checks its configured owner and authorized QQ destinations.
 """
 from __future__ import annotations
-from locations import project_path
+from locations import project_path, instance_context, host_root
 
 import re
 from datetime import datetime
@@ -96,16 +96,16 @@ def owner_private_chat(root) -> str:
 def channel_allows(root, chat_id: str) -> tuple[bool, str]:
     """Mirror channels/fish_qq server ``_check_delivery`` recipient checks."""
     try:
-        from storage import read_json
-        allow = read_json(project_path(Path(root), 'channels/fish_qq/config.json'), {}).get('allowlist', {})
+        from fish_agent.settings.channels import ChannelSettings
+        groups = ChannelSettings(root).group_ids()
         owner = owner_private_chat(root)
         if chat_id == owner:
             return True, ''
-        if str(chat_id).startswith('group:') and str(chat_id)[6:] in [str(g) for g in allow.get('group_ids', [])]:
+        if str(chat_id).startswith('group:') and str(chat_id)[6:] in groups:
             return True, ''
     except (OSError, ValueError):
         return False, '频道配置不可读'
-    return False, '目标不是程序核验的主人私聊或白名单群，频道会拒绝发送'
+    return False, '目标不是已核验的主人私聊或本窗口配置的群'
 
 
 def policy_check(root, chat_id: str, *, action: str, scheduled: bool = False, context: str = '') -> tuple[bool, str]:
@@ -131,7 +131,9 @@ def _slot(chat_id: str) -> str:
 
 def origin_kind(request_id: str) -> str:
     """Classify program-owned request IDs; these labels confer no authority."""
-    key = str(request_id).removeprefix('scheduled:')
+    key = str(request_id)
+    if key.startswith('instance:'): key = key.split(':', 2)[-1]
+    key = key.removeprefix('scheduled:')
     if key.startswith('group-job-'): return 'group_agent'
     if key.startswith('owner-send:'): return 'owner_delegated'
     if key.startswith(('sched:', 'schedule:')): return 'scheduled'
@@ -154,7 +156,8 @@ def _outbound_box(root):
     from channels.fish_qq.spool import Outbox
     config = read_json(project_path(root, 'channels/fish_qq/config.json'))
     state = Path(config.get('spool_dir', 'channel-state'))
-    if not state.is_absolute(): state = root / state
+    if not state.is_absolute():
+        state = host_root(root) / state
     return Outbox(state) if (state / 'outbox.jsonl').is_file() else None
 
 
@@ -195,7 +198,7 @@ def outbound_source(root, chat_id: str, message_id: str) -> dict | None:
     root = Path(root)
     if not message_id or not chat_id.startswith('group:'): return None
     box = _outbound_box(root)
-    if box and (row := box.find_message(chat_id, message_id)): return public_origin(row)
+    if box and (row := box.find_message(chat_id, message_id, instance_id=instance_context(root).instance_id)): return public_origin(row)
     for row in _owner_receipts(root, chat_id):
         if row['message_id'] == str(message_id): return public_origin(row)
     return None
@@ -207,7 +210,7 @@ def recent_outbound_sources(root, chat_id: str, *, since: float, until: float, l
     if not chat_id.startswith('group:') or until <= since: return []
     limit = max(1, min(limit, 8))
     box = _outbound_box(root)
-    rows = box.recent_confirmed(chat_id, since=since, until=until, limit=limit) if box else []
+    rows = box.recent_confirmed(chat_id, since=since, until=until, limit=limit, instance_id=instance_context(root).instance_id) if box else []
     rows += [row for row in _owner_receipts(root, chat_id, limit=100) if since < row['confirmed_at'] <= until]
     by_id = {}
     for row in rows:

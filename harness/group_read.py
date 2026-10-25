@@ -2,7 +2,7 @@
 
 QQStore migrates on open and GroupHistory creates tables, so both are avoided
 here: every store is opened with mode=ro and nothing is inserted, updated or
-created. A group is readable only when the channel allowlist lists it *and* the
+created. A group is readable only when this instance lists it *and* the
 owner's own stored read switch is on; no caller-supplied identity counts.
 """
 from __future__ import annotations
@@ -73,10 +73,8 @@ def _channel(root):
 
 
 def _allowed(root):
-    allow = _channel(root).get('allowlist')
-    if not isinstance(allow, dict):
-        return set()
-    return {str(group) for group in allow.get('group_ids') or []}
+    from fish_agent.settings.channels import ChannelSettings
+    return set(ChannelSettings(root).group_ids())
 
 
 def _policies(root):

@@ -172,6 +172,10 @@ def _panel(loop):
 
 def _switch(loop, updates):
     chat = _group_chat(loop)
+    updates = dict(updates)
+    if 'reply' in updates:
+        from fish_agent.settings.tools import ToolSettings
+        ToolSettings(loop.root).save({'send': {'groups': {chat.removeprefix('group:'): updates.pop('reply')}}})
     return chat, _policy(loop).configure(chat, updates)
 
 

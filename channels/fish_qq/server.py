@@ -69,10 +69,15 @@ class FishQQApp:
         self.lock.acquire()
         from harness.emoji_store import EmojiStore
         recovered = self.outbox.recover()
-        confirmed={r['id']+':'+s['asset_id']:r['receipt'] for r in self.outbox.all()
+        from harness.locations import InstanceCatalog
+        catalog = InstanceCatalog(self.config.root)
+        for entry in catalog.records():
+            context = catalog.resolve(entry['id'])
+            own = {r['id']+':'+part['asset_id']:r['receipt'] for r in self.outbox.all()
                    if r.get('status')=='confirmed' and r.get('receipt')
-                   for s in (r.get('payload') or {}).get('segments',[]) if s.get('asset_id')}
-        EmojiStore(self.governance.root).recover_sends(confirmed)
+                   and (r.get('payload') or {}).get('instance_id', 'main') == context.instance_id
+                   for part in (r.get('payload') or {}).get('segments',[]) if part.get('asset_id')}
+            EmojiStore(context.root).recover_sends(own)
         self.recovered_queued = recovered["queued"]
         self.onebot = OneBotClient(
             self.config.napcat_url,
@@ -174,6 +179,8 @@ class FishQQApp:
         event = normalize_message(raw, self.config.bot_id, self.bot_message_ids)
         if event is None:
             return
+        from harness.fish_agent.settings.channels import account_groups
+        self.allowlist.group_ids = account_groups(self.config.root, receiving=True)
         if not self.allowlist.is_allowed(event["chat_type"], event["chat_id"], event["sender"]["id"]):
             self.counters.dropped_allowlist += 1
             return
@@ -339,10 +346,16 @@ class FishQQApp:
         chat_id = str(payload.get("chat_id", ""))
         if not (chat_id.startswith("group:") or chat_id.startswith("private:")):
             return {"ok": False, "error": {"code": "bad_request", "message": "bad chat_id"}}
+        from harness.locations import instance_context
+        context = instance_context(self.config.root, payload.get('instance_id'))
+        governance = Governance(context.root, 'qq')
+        payload = {**payload, 'instance_id': context.instance_id}
+        if payload.get('idempotency_key') and context.instance_id != 'main':
+            payload['idempotency_key'] = 'instance:' + context.instance_id + ':' + str(payload['idempotency_key'])
         unlimited = False
         if chat_id.startswith('group:'):
             from .policy import unlimited_group
-            unlimited = unlimited_group(self.config.root, chat_id)
+            unlimited = unlimited_group(context.root, chat_id)
         key = payload.get("idempotency_key")
         if key:
             cached = self.idempotency.get(str(key))
@@ -361,8 +374,8 @@ class FishQQApp:
             return {'ok':False,'error':{'code':'rate_limited','message':'outbound technical limit',
                 'retry_after_ms':retry_after,'may_have_sent':False}}
         try:
-            self._check_delivery(chat_id, segments)
-            self.governance.consume("replies")
+            self._check_delivery(chat_id, segments, instance_root=context.root, source_tools=payload.get('source_tools', []))
+            governance.consume("replies")
         except (PermissionError, OSError, ValueError) as exc:
             return {"ok": False, "error": {"code": "policy_blocked", "message": str(exc), "may_have_sent": False}}
         self.limiter.hit(chat_id)
@@ -371,7 +384,7 @@ class FishQQApp:
         self.outbox.set_status(record["id"], "inflight")
         chat_type, target = chat_id.split(":", 1)
         try:
-            segments = self._resolve_images(segments, chat_id, request_id=record['id'])
+            segments = self._resolve_images(segments, chat_id, request_id=record['id'], instance_root=context.root)
         except (ValueError, PermissionError):
             self.outbox.set_status(record['id'], 'failed')
             return {'ok': False, 'error': {'code': 'emoji_unavailable', 'may_have_sent': False}}
@@ -385,25 +398,32 @@ class FishQQApp:
             action = "send_private_msg"
             params = {"user_id": int(target), "message": message}
         try:
+            from harness.fish_agent.settings.tools import ToolSettings
+            ToolSettings(context.root).require_delivery(chat_id, payload.get('source_tools', []))
+        except PermissionError as error:
+            self._finish_images(segments, 'failed', error=str(error), instance_root=context.root)
+            self.outbox.set_status(record['id'], 'blocked')
+            return {'ok': False, 'error': {'code': 'policy_blocked', 'message': str(error), 'may_have_sent': False}}
+        try:
             assert self.onebot is not None
-            self._finish_images(segments,'sending')
+            self._finish_images(segments,'sending',instance_root=context.root)
             result = await self.onebot.send_action(action, params, timeout=self.config.send_timeout_s)
         except OneBotTimeout as exc:
-            self._finish_images(segments,'unknown',error=str(exc))
+            self._finish_images(segments,'unknown',error=str(exc),instance_root=context.root)
             self.outbox.set_status(record["id"], "unknown")
             self.counters.failed += 1
             return {"ok": False, "error": {
                 "code": "timeout", "message": str(exc), "may_have_sent": True,
             }}
         except OneBotUnavailable as exc:
-            self._finish_images(segments,'failed',error=str(exc))
+            self._finish_images(segments,'failed',error=str(exc),instance_root=context.root)
             self.outbox.set_status(record["id"], "failed")
             self.counters.failed += 1
             return {"ok": False, "error": {
                 "code": "channel_unavailable", "message": str(exc), "may_have_sent": False,
             }}
         except OneBotError as exc:
-            self._finish_images(segments,'failed',error=str(exc))
+            self._finish_images(segments,'failed',error=str(exc),instance_root=context.root)
             self.outbox.set_status(record["id"], "failed")
             self.counters.failed += 1
             return {"ok": False, "error": {
@@ -412,11 +432,11 @@ class FishQQApp:
         message_id = receipt_message_id(result)
         if not message_id:
             self.outbox.set_status(record['id'],'unknown')
-            self._finish_images(segments,'unknown',error='缺少有效QQ消息ID')
+            self._finish_images(segments,'unknown',error='缺少有效QQ消息ID',instance_root=context.root)
             return {'ok':False,'error':{'code':'missing_message_id','may_have_sent':True}}
         result_payload = {"chat_id": chat_id, "message_id": message_id, "sent_at": now_iso()}
         self.outbox.set_status(record["id"], "confirmed", receipt=result_payload)
-        self._finish_images(segments,'sent',receipt=result_payload)
+        self._finish_images(segments,'sent',receipt=result_payload,instance_root=context.root)
         if message_id:
             self.bot_message_ids.add(message_id)
             if len(self.bot_message_ids) > 1000:
@@ -426,42 +446,49 @@ class FishQQApp:
         self.counters.sent += 1
         return {"ok": True, "payload": result_payload}
 
-    def _resolve_images(self, segments, chat_id, *, request_id=''):
+    def _resolve_images(self, segments, chat_id, *, request_id='', instance_root=None):
         from harness.emoji_store import EmojiStore
+        governance = Governance(instance_root or self.config.root, 'qq')
         result = []
         for segment in segments:
             if segment.get('asset_id'):
                 try:
-                    asset = EmojiStore(self.governance.root).reserve_send(segment['asset_id'], chat_id,
+                    asset = EmojiStore(instance_root or self.config.root).reserve_send(segment['asset_id'], chat_id,
                         request_id=request_id+':'+segment['asset_id'] if request_id else None)
                     result.append({'type':'image','url':asset['file'],'emoji_request_id':asset['reservation_id']})
                 except (ValueError, PermissionError):
-                    self.governance.audit('emoji_skipped', '表情不可用或仍在冷却；保留已通过检查的文字回复')
+                    governance.audit('emoji_skipped', '表情不可用或仍在冷却；保留已通过检查的文字回复')
             else:
                 result.append(segment)
         if not result:
             raise ValueError('没有可发送的内容')
         return result
 
-    def _finish_images(self, segments, state, *, receipt=None, error=''):
+    def _finish_images(self, segments, state, *, receipt=None, error='', instance_root=None):
         from harness.emoji_store import EmojiStore
         for segment in segments:
             if segment.get('emoji_request_id'):
-                EmojiStore(self.governance.root).finish_send(segment['emoji_request_id'],state,receipt=receipt,error=error)
+                EmojiStore(instance_root or self.config.root).finish_send(segment['emoji_request_id'],state,receipt=receipt,error=error)
 
-    def _check_delivery(self, chat_id: str, segments: list[dict]) -> None:
+    def _check_delivery(self, chat_id: str, segments: list[dict], *, instance_root=None, source_tools=()) -> None:
+        governance = Governance(instance_root or self.config.root, 'qq')
+        from harness.fish_agent.settings.channels import account_groups
+        from harness.fish_agent.settings.tools import ToolSettings
+        self.allowlist.group_ids = account_groups(self.config.root)
+        ToolSettings(instance_root or self.config.root).require_delivery(chat_id, source_tools)
         kind, target = chat_id.split(":", 1)
-        if kind == "private" and target != (self.governance.owner_id() or self.config.owner_id):
+        if kind == "private" and target != (governance.owner_id() or self.config.owner_id):
             raise PermissionError("不在允许发送的主人私聊范围")
         if kind == "group" and target not in self.allowlist.group_ids:
             raise PermissionError("群不在允许发送范围")
-        self.governance.check_output("\n".join(str(s.get("text", "")) for s in segments))
+        governance.check_output("\n".join(str(s.get("text", "")) for s in segments))
 
     async def _get_group_members(self, payload: dict[str, Any]) -> dict[str, Any]:
         group = str(payload.get('group_id', ''))
         if not group.isascii() or not group.isdigit() or not 5 <= len(group) <= 15:
             return {'ok': False, 'error': {'code': 'bad_request', 'message': '无效群号'}}
-        if group not in self.allowlist.group_ids:
+        from harness.fish_agent.settings.channels import account_groups
+        if group not in account_groups(self.config.root):
             return {'ok': False, 'error': {'code': 'forbidden', 'message': '群不在白名单'}}
         if self.state != 'ready' or self.onebot is None:
             return {'ok': False, 'error': {'code': 'channel_unavailable', 'message': '请先连接 NapCat'}}
@@ -498,15 +525,18 @@ class FishQQApp:
         await self.ready_event.wait()
         for record in self.recovered_queued:
             payload = record.get("payload") or {}
+            from harness.locations import instance_context
+            context = instance_context(self.config.root, payload.get('instance_id'))
+            governance = Governance(context.root, 'qq')
             segments=[]
             try:
                 chat_id = str(payload.get("chat_id", ""))
                 segments = normalize_outbound(payload.get("segments"), self.config.max_text_chars,
                                               self.config.max_segments)
-                self._check_delivery(chat_id, segments)
-                self.governance.consume("replies")
+                self._check_delivery(chat_id, segments, instance_root=context.root, source_tools=payload.get('source_tools', []))
+                governance.consume("replies")
                 chat_type, target = chat_id.split(":", 1)
-                segments=self._resolve_images(segments,chat_id,request_id=record['id'])
+                segments=self._resolve_images(segments,chat_id,request_id=record['id'],instance_root=context.root)
                 message = to_onebot_segments(segments)
                 if payload.get("reply_to"):
                     message = [{"type": "reply", "data": {"id": str(payload["reply_to"])}}] + message
@@ -515,16 +545,19 @@ class FishQQApp:
                 else:
                     action, params = "send_private_msg", {"user_id": int(target), "message": message}
                 self.outbox.set_status(record["id"], "inflight")
-                self._finish_images(segments,'sending')
+                self._finish_images(segments,'sending',instance_root=context.root)
                 result = await self.onebot.send_action(action, params, timeout=self.config.send_timeout_s)
                 message_id=receipt_message_id(result)
                 if not message_id:
                     self.outbox.set_status(record['id'],'unknown')
-                    self._finish_images(segments,'unknown',error='缺少有效QQ消息ID')
+                    self._finish_images(segments,'unknown',error='缺少有效QQ消息ID',instance_root=context.root)
                     continue
                 receipt={'chat_id':chat_id,'message_id':message_id,'sent_at':now_iso()}
                 self.outbox.set_status(record['id'],'confirmed',receipt=receipt)
-                self._finish_images(segments,'sent',receipt=receipt)
+                self._finish_images(segments,'sent',receipt=receipt,instance_root=context.root)
+            except PermissionError as exc:
+                self._finish_images(segments, 'failed', error=str(exc), instance_root=context.root)
+                self.outbox.set_status(record['id'], 'blocked')
             except Exception as exc:
-                self._finish_images(segments,'unknown',error=str(exc))
+                self._finish_images(segments,'unknown',error=str(exc),instance_root=context.root)
                 self.outbox.set_status(record["id"], "unknown")

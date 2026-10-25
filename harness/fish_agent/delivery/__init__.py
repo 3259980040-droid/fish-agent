@@ -94,7 +94,7 @@ class DeliveryModule:
         if cancelled is not None and cancelled.is_set():
             raise InterruptedError('本地已取消等待；晚到结果未发送')
         client = self.runtime.client_qq
-        reference = ('qq:' + str(reply_to)) if reply_to else ('self:' + str(run['id']))
+        reference = ('qq:' + str(message_id)) if message_id and str(message_id) != '0' else ('self:' + str(run['id']))
         try:
             receipt = client.deliver(
                 target=str(chat), bubbles=bubbles, key='group-fish:' + str(run['id']) + ':' + str(reply_to),

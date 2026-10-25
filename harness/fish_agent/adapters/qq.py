@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import requests
@@ -41,7 +42,7 @@ class QQAdapter:
         return self.store().db_path
 
     def inbound(self, message):
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db:
             db.row_factory = sqlite3.Row
             row = db.execute('SELECT * FROM messages WHERE id=?', (int(message),)).fetchone()
         return dict(row) if row else None
