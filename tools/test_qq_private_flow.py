@@ -366,6 +366,44 @@ class QQPrivateFlowTests(unittest.TestCase):
         self.assertFalse(result['ok'])
         self.assertEqual(loop.channel.sent, [])
 
+    def test_the_watcher_reports_the_real_outcome_it_reads(self):
+        from qq_agent_loop import QQAgentLoop
+        loop = QQAgentLoop(self.root)
+        loop.store = self.store
+        loop.conversation = self.conversation
+        loop.channel = FakeChannel()
+        seen = []
+
+        async def fault(source, error, *, stage='model', uncertain=False):
+            seen.append(('fault', stage, error.get('code') if isinstance(error, dict) else str(error), uncertain))
+            return {}
+
+        async def recovered(source, *, stage='model'):
+            seen.append(('recovered', stage))
+
+        loop._fault = fault
+        loop._recovered = recovered
+        loop._silent = lambda source, stage='model': seen.append(('silent', stage))
+        rows = {
+            'run-silent': {'status': 'silent', 'error': ''},
+            'run-failed': {'status': 'failed', 'error': '模型失败'},
+            'run-ok': {'status': 'complete', 'error': '',
+                       'result': json.dumps({'delivery': {'state': 'sent'}})},
+            'run-uncertain': {'status': 'complete', 'error': '',
+                              'result': json.dumps({'delivery': {'state': 'uncertain',
+                                                                 'error': '回执未取得'}})},
+            'run-cancelled': {'status': 'cancelled', 'error': ''},
+        }
+        for execution in rows:
+            with patch('tool_host.request', lambda root, route, body, **kwargs: rows[body['execution']]):
+                asyncio.run(loop._watch_private(execution, {'message_id': 1}))
+        self.assertEqual(seen, [
+            ('silent', 'model'),
+            ('fault', 'model', '模型失败', False),
+            ('recovered', 'model'), ('recovered', 'delivery'),
+            ('recovered', 'model'), ('fault', 'delivery', '回执未取得', True),
+        ])
+
 
 if __name__ == '__main__':
     unittest.main()
