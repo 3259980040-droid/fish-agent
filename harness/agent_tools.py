@@ -248,6 +248,8 @@ class AgentTools:
             await client.start()
             try:
                 await asyncio.wait_for(client.ready.wait(), 15)
+                from fish_agent.settings.tools import ToolSettings
+                ToolSettings(self.root).require('fish_qq_action',args,identity)
                 return await client.send_action(action, args.get('params') or {}, timeout=30)
             finally:
                 await client.stop()

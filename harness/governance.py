@@ -229,9 +229,8 @@ class Governance:
             result['version'] = 3
             if "paused_roles" not in raw:
                 result["paused_roles"] = {role: bool(raw.get("paused", False)) for role in ("qq", "research")}
-            # Missing or older send settings keep their safe defaults; public
-            # group auto-reply is never enabled from this key.
-            result['send_policy'] = normalize_policy(raw)
+        from fish_agent.settings.tools import ToolSettings
+        result['send_policy'] = ToolSettings(self.root).legacy_policy()
         result["paused"] = bool(result["paused_roles"].get(self.agent_id, False))
         result['daily_usage_limits'] = {role: daily_limits_enabled(result, role) for role in ('qq', 'research')}
         return result
@@ -251,16 +250,12 @@ class Governance:
             if not isinstance(values, dict) or any(k not in daily_limits or type(v) is not bool for k, v in values.items()):
                 raise ValueError('每日用量开关必须按 QQ 和研究角色分别设置为开启或关闭')
             daily_limits.update(values)
-        send_policy = cfg['send_policy']
         if 'send_policy' in updates:
-            # Partial update: validate unknown keys/types, then merge per bucket.
-            changes = validate_updates(updates['send_policy'])
-            send_policy = json.loads(json.dumps(send_policy))
-            for bucket, values in changes.items():
-                send_policy[bucket].update(values)
-            send_policy = normalize_policy(send_policy)
+            from fish_agent.settings.tools import ToolSettings
+            ToolSettings(self.root).update_legacy(validate_updates(updates['send_policy']))
         cfg.update({k: v for k, v in updates.items() if k in cfg and k != 'send_policy'})
-        cfg['send_policy'] = send_policy
+        from fish_agent.settings.tools import ToolSettings
+        cfg['send_policy'] = ToolSettings(self.root).legacy_policy()
         cfg['daily_usage_limits'] = daily_limits
         if "paused" in updates:
             cfg["paused_roles"][self.agent_id] = bool(updates["paused"])
@@ -296,7 +291,8 @@ class Governance:
             channel = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
             channel.setdefault("allowlist", {}).update(owner_id=owner_id, private_mode="owner_only")
             write_json(path, channel)
-        stored = {**cfg, "paused": False}
+        stored = {k:v for k,v in cfg.items() if k != "send_policy"}
+        stored["paused"] = False
         write_json(self.path, stored)
         self.audit("settings", "主人权限及本地规则已更新")
         return cfg

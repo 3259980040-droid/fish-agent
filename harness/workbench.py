@@ -1074,21 +1074,63 @@ class Workbench:
             if action == 'models.remove':
                 return model_connections.remove(self.root, role=str(params.get('role') or 'qq'))
             raise ValueError('未知模型操作')
+        if action in ('tools.settings.get','tools.settings.save'):
+            from storage import read_json
+            from fish_agent.settings.tools import ToolSettings
+            from tool_host import builtins, skill_tool
+            settings=ToolSettings(self.root)
+            value=settings.save(params.get('patch',{})) if action.endswith('.save') else settings.get()
+            groups=read_json(project_path(self.root,'channels/fish_qq/config.json'),{}).get('allowlist',{}).get('group_ids',[])
+            return {'instance_id':self.instance_id,'settings':value,
+                    'tools':[dict(name=item['name'],description=item.get('description',''),
+                                  **settings.effective_capability(item['name'])) for item in builtins('qq')+[skill_tool(self.root)]],
+                    'groups':[str(g) for g in groups]}
         if action.startswith('plugins.'):
             from plugin_registry import PluginRegistry
-            registry = PluginRegistry(self.root)
+            from locations import host_root
+            from fish_agent.settings.tools import ToolSettings
+            registry = PluginRegistry(host_root(self.root))
+            preferences=ToolSettings(self.root)
             if action == 'plugins.list':
-                return registry.snapshot()
+                snapshot=registry.snapshot()
+                rows=[]
+                for item in snapshot['plugins']:
+                    aliases={t['name']:'fishp__'+item['id']+'__'+t['name'] for t in item.get('tools',[])}
+                    overrides=preferences.get()['tools']
+                    selected=[name for name,alias in aliases.items() if overrides.get(alias,name in item.get('allowed_tools',[]) if item.get('allowed_tools') is not None else True)]
+                    rows.append({**item,'enabled':preferences.plugin_enabled(item),'shared_enabled':item.get('enabled',False),
+                                 'allowed_tools':None if len(selected)==len(aliases) else selected})
+                return {**snapshot,'plugins':rows}
             if action == 'plugins.save':
                 manifest = params.get('manifest')
                 if not isinstance(manifest, dict):
                     raise ValueError('缺少插件配置对象')
-                return registry.save(manifest)
+                manifest=dict(manifest)
+                requested=manifest.get('enabled',False)
+                selected=manifest.pop('allowed_tools',None)
+                old=next((p for p in registry.entries() if p['id']==manifest.get('id')),None)
+                manifest['allowed_tools']=old.get('allowed_tools') if old else None
+                # Installation metadata is shared; window enablement is one saved preference.
+                manifest['enabled']=bool(old and old.get('enabled'))
+                if old and any(manifest.get(k,old.get(k))!=old.get(k) for k in ('kind','command','args','url','tools')):
+                    manifest['enabled']=False
+                result=registry.save(manifest)
+                registered=next(p for p in registry.entries() if p['id']==manifest['id'])
+                aliases={'fishp__'+manifest['id']+'__'+tool['name']:selected is None or tool['name'] in selected
+                         for tool in registered.get('tools',[])}
+                preferences.save({'plugins':{str(manifest['id']):bool(requested)},'tools':aliases})
+                return result
             if action == 'plugins.remove':
                 return registry.remove(str(params.get('id') or ''))
             if action == 'plugins.enable':
-                return registry.toggle(str(params.get('id') or ''), bool(params.get('enabled', True)),
-                                       params.get('role'))
+                pid=str(params.get('id') or '');enabled=params.get('enabled',True)
+                if type(enabled) is not bool:raise ValueError('扩展开关必须为布尔值')
+                item=next((row for row in registry.entries() if row['id']==pid),None)
+                if not item:raise ValueError('扩展不存在')
+                if enabled and item['kind']!='dsh' and (not item.get('last_test') or item.get('test_ok') is False):
+                    raise ValueError('请先测试并发现工具，再启用')
+                preferences.save({'plugins':{pid:enabled}})
+                return {'ok':True,'instance_id':self.instance_id,'enabled':preferences.plugin_enabled(item)}
             if action == 'plugins.test':
                 return registry.discover(str(params.get('id') or ''), str(params.get('role') or 'research'))
             raise ValueError('未知插件操作')

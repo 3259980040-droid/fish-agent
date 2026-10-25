@@ -29,3 +29,12 @@ QQ操作来自当前Fish账号的真实OneBot/Tulpa接口，不能冒充主人�
 ## 工具执行入口的已知例外
 
 `fish_emoji_search` / `fish_emoji_read` 的**定义**仍只来自 ToolHost `/catalog`，但主执行循环在拿到结果后要为模型附加真实预览图，所以这两个工具在 `fish_agent/execution/runner.py` 内直接调用 `emoji_store`（`EMOJI_TOOLS` 常量与分支）。这是本批保留的既有例外，不是第二套工具注册或第二套身份；其余内置工具与 MCP 一律经 ToolHost `/execute`。清理方向是把预览作为工具结果的受控图像附件回到同一执行入口，已记录为后续工程债。
+
+
+## 本窗口有效能力与原调用结果（R03）
+
+`fish_agent.settings.tools.ToolSettings(instance_root)` 是唯一实例开关读取点；宿主 `PluginRegistry` 仅共用安装、工具定义、连接与受保护凭据。本窗口停用不调用 registry.toggle/cancel，不断开其他窗口的连接。`tools.settings.get/save` 保存 `tools/plugins/send`，返回实际提交的同一实例值；旧 send_policy 私聊/任务结果与群发送字段只是同源投影，退出独立裁决。
+
+`effective_capability(name, arguments, identity, target, plugin)` 返回 enabled/reason/instance_id/target；`require` 被目录、执行和最后可控发送共同使用；`require_delivery(target, source_tools)` 同时核对目的地和已暂存发送工具。通用多目的地工具保留定义，实际调用按具体目的地拒绝；发送关闭不影响输入或思考。已交给外部的结果保持真实回执，不反向取消、不重发。
+
+按需发现返回的完整定义进入同一模型循环，目录在下一请求前重新读取当前实例设置；不再用初始 offered 清单否决后来发现的工具。工具结果沿原 tool_call_id 回原模型，安全的扩展错误与参数错误也在这条结果内。异步任务、进程及投递终态从所属实例原存储读取，作为下一次普通思考的结果材料，不另造回合；原始结果/工作文件不迁到宿主或其他实例。
