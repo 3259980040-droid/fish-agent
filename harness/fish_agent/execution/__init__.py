@@ -8,6 +8,7 @@ could actually stop. New inputs registered while a turn runs stay for the next t
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -92,9 +93,13 @@ class ExecutionModule:
                 'error': row['error'], 'started': row['started'], 'finished': row['finished'],
                 'elapsed_ms': row['elapsed_ms']}
 
-    def cancel(self, conversation):
-        """Cancel this conversation's queued submissions and the turn it is running."""
-        info = self.state.cancel_conversation(conversation)
+    def cancel(self, conversation=None):
+        """Cancel this conversation's queued submissions and the turn it is running.
+
+        An empty conversation is the owner's explicit global stop (QQ /取消): every
+        place's queued work and the one running turn are named in the result.
+        """
+        info = self.state.cancel_conversation(conversation or None)
         stopped = False
         with self._cancels_lock:
             for run_id in info['running']:
@@ -103,8 +108,9 @@ class ExecutionModule:
                     event.set()
                     stopped = True
         return {'queued_cancelled': info['queued'], 'running': len(info['running']),
-                'running_stopped': stopped, 'note': ('已请求取消；未确认服务商是否停止计算' if stopped or info['running']
-                                                     else '没有正在进行的回合；已取消排队的提交')}
+                'running_stopped': stopped, 'requests': info['requests'],
+                'note': ('已请求取消；未确认服务商是否停止计算' if stopped or info['running']
+                         else '没有正在进行的回合；已取消排队的提交')}
 
     def wait(self, run_id, timeout=None, cancelled=None):
         """Block until the turn settles; used only by the legacy blocking client call."""
@@ -188,12 +194,23 @@ class ExecutionModule:
                 origin = 'desktop-chat:' + str(run['conversation'])
             elif source == 'qq-private':
                 origin = 'qq-private-chat:' + str(run['conversation'])
+            elif source == 'qq-group':
+                payload = json.loads((inputs[-1].get('payload') or '{}'))
+                origin = 'group-fish:' + str(payload.get('chat_id') or '')
             else:
                 raise ValueError('未知输入来源，未生成内容：' + source)
             answer = execute(self.root, 'qq', prepare=prepare, origin=origin,
                              cancelled=cancel, output='bubbles', experience=None)
             if source == 'desktop':
                 delivered = runtime.delivery.submit_desktop(run, inputs, answer, cancelled=cancel)
+            elif source == 'qq-group':
+                payload = json.loads((inputs[-1].get('payload') or '{}'))
+                previewed = (materials.get('emoji_state') or {}).get('previewed') or ()
+                delivered = runtime.delivery.submit_group(
+                    run, inputs, answer, chat=str(payload.get('chat_id') or ''),
+                    reply_to=str(payload.get('message_id') or ''), previewed=previewed,
+                    direct=bool(payload.get('mentions_bot') or payload.get('reply_to_bot')),
+                    cancelled=cancel)
             else:
                 previewed = (materials.get('emoji_state') or {}).get('previewed') or ()
                 delivered = runtime.delivery.submit_qq(run, inputs, answer, previewed=previewed,

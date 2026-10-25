@@ -30,6 +30,8 @@ class ExperienceModule:
             return context.desktop_materials(self.runtime, run, inputs, cancelled)
         if run['source'] == 'qq-private':
             return context.qq_private_materials(self.runtime, run, inputs, cancelled)
+        if run['source'] == 'qq-group':
+            return context.group_materials(self.runtime, run, inputs, cancelled)
         raise ValueError('未知输入来源，未生成内容：' + str(run['source']))
 
     def record_result(self, run, status, error=''):
@@ -38,19 +40,22 @@ class ExperienceModule:
         considered = status in ('complete', 'silent')
         self.runtime.state.finish_inputs([row['reference'] for row in rows],
                                          considered=considered, cancelled=status == 'cancelled')
-        if run['source'] == 'qq-private':
+        if run['source'] in ('qq-private', 'qq-group'):
             client = self.runtime.client_qq
             for row in rows:
                 message = str(row['message'])
                 if status == 'silent':
                     client.status(message, 'considered', turn=run['id'])
-                    client.finish_turn(run['id'], 'silent')
+                    if run['source'] == 'qq-private':
+                        client.finish_turn(run['id'], 'silent')
                 elif status == 'failed':
                     client.status(message, 'failed', str(error), turn=run['id'])
-                    client.finish_turn(run['id'], 'failed', str(error))
+                    if run['source'] == 'qq-private':
+                        client.finish_turn(run['id'], 'failed', str(error))
                 elif status == 'cancelled':
                     client.status(message, 'cancelled', cancelled=True, turn=run['id'])
-                    client.finish_turn(run['id'], 'cancelled')
+                    if run['source'] == 'qq-private':
+                        client.finish_turn(run['id'], 'cancelled')
             return
         if run['source'] != 'desktop':
             return

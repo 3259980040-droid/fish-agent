@@ -176,6 +176,68 @@ def desktop_materials(runtime, run, inputs, cancelled=None):
             'conversation': conversation, 'message': message}
 
 
+def group_materials(runtime, run, inputs, cancelled=None):
+    """One group turn's materials, built from the recorded message and the group's own reads.
+
+    The group's address (sender names, @ targets, quotes) and its own memory are the
+    group domain's job: this function only assembles them into one turn's materials.
+    The stored row proves the message exists; the channel payload is not identity.
+    """
+    from group_decide import (_attribution, _current, _experience, _group_memory, _names,
+                              _owner_revision, _persona, _quotes, _speaking_notes)
+    from tool_host import bind_session
+
+    root, role = runtime.root, 'qq'
+    client = runtime.client_qq
+    conversation = str(run['conversation'])
+    if not inputs:
+        raise ValueError('这次提交没有取到已接收的输入，未生成任何内容')
+    event = inputs[-1]
+    try:
+        payload = json.loads(event.get('payload') or '{}')
+    except (TypeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict) or not payload.get('chat_id'):
+        raise ValueError('这次群输入缺少来源，未生成内容')
+    chat = str(payload.get('chat_id') or '')
+    if not chat.startswith('group:'):
+        raise ValueError('群输入来源不正确')
+    sender = str((payload.get('sender') or {}).get('id') or '')
+    if not sender:
+        raise ValueError('群消息缺少发送者，未生成内容')
+    row = client.inbound(event['message'])
+    if (not row or str(row.get('chat_id') or '') != chat
+            or str(row.get('direction') or '') != 'inbound'):
+        raise PermissionError('群消息来源不匹配')
+    persona = _persona(root, _owner_revision(root))
+    names = _names(root, chat)
+    references = _quotes(root, chat, payload, names)
+    current_text = _current(root, chat, payload, names, references)
+    experience_turn = _experience(root, chat, payload)
+    session = 'group-fish:' + chat
+    experience_turn.session = session
+    experience_turn.persona_revision = persona['id']
+    try:
+        history, source = experience_turn.prepare(cancelled)
+    except Exception as exc:
+        experience_turn.finish('failed', str(exc))
+        raise
+    bind_session(root, role, session, 'chat:' + chat, sender)
+    memory_text = _group_memory(root, chat, current_text)
+    references = _speaking_notes(references, True, _attribution(root, chat, payload, names, []))
+    event_body = dict(source['current_event'])
+    quote = event_body.pop('quote', None)
+    current = [{'type': 'text', 'text': '[本轮来信] ' + json.dumps(event_body, ensure_ascii=False) +
+                ('\n引用：' + json.dumps(quote, ensure_ascii=False) if quote else '')},
+               {'type': 'text', 'text': current_text}]
+    return {'persona': persona, 'history': history, 'history_source': source, 'memory': memory_text,
+            'scope': 'chat:' + chat, 'references': references, 'current': current, 'session': session,
+            'emoji_state': {'previewed': set(), 'tools': []}, 'tool_context': 'group',
+            'delivery_required': False, 'experience': experience_turn,
+            'trace_reference': source['current_reference'],
+            'conversation': conversation, 'message': str(event['message']), 'chat': chat}
+
+
 def qq_private_materials(runtime, run, inputs, cancelled=None):
     """One owner private turn's materials, read from the QQ record that was saved on arrival.
 

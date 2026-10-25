@@ -75,6 +75,37 @@ class DeliveryModule:
                 'sent': bool(receipt.get('sent')), 'receipt': receipt.get('receipt') or {},
                 'error': str(receipt.get('error') or ''), 'unknown': str(receipt.get('state') or '') == 'uncertain'}
 
+    def submit_group(self, run, inputs, answer, *, chat, reply_to='', previewed=(), direct=False, cancelled=None):
+        """Hand the decided bubbles to the group's channel adapter and keep its receipt.
+
+        The group's own settings (listen/reply/dive/quiet/limits) and the real send
+        stay in the QQ process; the main execution only decided what to say.
+        """
+        import requests
+        from chat_output import decode_reply
+        root = self.root
+        message = str(inputs[-1]['message'])
+        bubbles = decode_reply(root, answer, previewed=previewed) if answer else []
+        if not bubbles:
+            raise ValueError('模型没有返回聊天内容')
+        if cancelled is not None and cancelled.is_set():
+            raise InterruptedError('本地已取消等待；晚到结果未发送')
+        client = self.runtime.client_qq
+        try:
+            receipt = client.deliver(
+                target=str(chat), bubbles=bubbles, key='group-fish:' + str(run['id']) + ':' + str(reply_to),
+                turn=str(run['id']), message_id=message, reply_to=str(reply_to or ''),
+                reference='qq:' + str(reply_to), direct=bool(direct))
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            return {'bubbles': len(bubbles), 'state': 'uncertain', 'sent': False,
+                    'error': str(exc)[:300], 'unknown': True}
+        except Exception as exc:
+            return {'bubbles': len(bubbles), 'state': 'failed', 'sent': False,
+                    'error': str(exc)[:300], 'unknown': False}
+        return {'bubbles': len(bubbles), 'state': str(receipt.get('state') or ''),
+                'sent': bool(receipt.get('sent')), 'receipt': receipt.get('receipt') or {},
+                'error': str(receipt.get('error') or ''), 'unknown': str(receipt.get('state') or '') == 'uncertain'}
+
     def receipt(self, reference):
         """The real send/receipt times of one turn, or empty fields when absent."""
         import sqlite3
