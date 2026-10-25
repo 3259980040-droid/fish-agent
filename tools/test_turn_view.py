@@ -219,6 +219,13 @@ class TurnViewTests(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.assertEqual(view['trigger']['kind'], 'plan')
+        # The run row is written before the occurrence is closed; wait for the real
+        # settled state instead of racing the closing write.
+        deadline = time.time() + 20
+        while time.time() < deadline and (view['plan'] or {}).get('occurrence', {}).get('state') in (
+                'running', 'queued', 'due'):
+            time.sleep(0.1)
+            view = wb.dispatch('turn.view', {'execution': submitted[0]['execution']})
         self.assertIsNotNone(view['plan'])
         self.assertEqual(view['plan']['schedule_id'], plan['id'])
         self.assertEqual(view['plan']['occurrence']['state'], 'sent')
