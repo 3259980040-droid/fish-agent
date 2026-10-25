@@ -1,9 +1,9 @@
 # Fish 统一Agent系统更新：本地工单索引
 
 <!-- consolidated-spec:20261026 -->
-**当前：to-spec合并及codebase-design完成；本轮改动未实施。** 当前范围只有[已上传R01—R05修复](#repair-tickets-20261026)和最新已通过系统更新，统一见[规格第八节](https://github.com/3259980040-droid/fish-agent/blob/codex/fish-tickets-20261025/project/spec.md#audit-repair-spec-20261026)。结构与Interface见规格§8.9，实际落点与退出对象见[实施对照表§13](https://github.com/3259980040-droid/fish-agent/blob/codex/fish-tickets-20261025/project/implementation-map.md#instance-design-20261026)。原21张为已有实施基础和审查来源，不另列第三批待办。
+**当前：to-spec、codebase-design及to-tickets已完成；本轮未实施。** 已复用R01—R05并补W01—W04，共9张实施子票，均挂在同一总Issue #28；原21张仅是既有实现与审查来源。当前唯一可先领取W01，后续按真实阻塞关系推进。
 
-下一步to-tickets按已完成的实例上下文、资料位置、工具有效设置与回合读面设计，整合旧票/新目标及真实依赖。目前保留R01—R05编号，不新增、合并或关闭子Issue；原五票的范围和无阻塞关系不冒充新目标已经拆票完成。
+需求见[唯一规格§8](https://github.com/3259980040-droid/fish-agent/blob/codex/fish-tickets-20261025/project/spec.md#audit-repair-spec-20261026)，结构见§8.9，代码/退出位置见[对照表§13—14](https://github.com/3259980040-droid/fish-agent/blob/codex/fish-tickets-20261025/project/implementation-map.md#merged-ticket-map-20261026)。本轮只发布子票和文档，保留父Issue正文/状态，运行代码与生产资料不变。
 
 压缩后或交给DeepSeek先读原意与接续入口（本地资料，未公开），再读规格§8和对应票。旧约定替代关系见规格§8.8。源码落点仍由既有实施对照表维护。
 
@@ -219,24 +219,33 @@ G7保留为后续研究，本批不开展多组比较。M01独立延期，本批
 已发布至[fish-agent Issues](https://github.com/3259980040-droid/fish-agent/issues)：6个原父项远端入口＋21张可执行子票，21个原生父子关系、36个原生阻塞关系；21张子票均ready-for-agent、未实施。当前可领取[01-01 #7](https://github.com/3259980040-droid/fish-agent/issues/7)和[09-01 #8](https://github.com/3259980040-droid/fish-agent/issues/8)。原父项正文/历史状态保留，未关闭任何父Issue。文档投影在[codex/fish-tickets-20261025](https://github.com/3259980040-droid/fish-agent/tree/codex/fish-tickets-20261025/project)，原2026-10-24待发布包保留为历史。本轮只发布文档/工单，运行代码、生产数据及部署未变。
 
 <!-- repair-queue:20261026 -->
-## 2026-10-26 已上传修复队列与当前规格承接
-
 <a id="repair-tickets-20261026"></a>
+<a id="merged-tickets-20261026"></a>
 
-规格工单：[Fish 系统更新合并规格：既有修复与多窗口工作台](https://github.com/3259980040-droid/fish-agent/issues/28)。唯一需求仍在实施规格§8，原修复落点在对照表§12，本轮结构与调用者/退出对象在§13。
+## 2026-10-26 当前合并实施队列
 
-| 工单 | 审计项 | 交付 | 状态/前置 |
+总规格：[系统更新合并规格 #28](https://github.com/3259980040-droid/fish-agent/issues/28)。保留原父项内容，以下是最新可执行子票及真实前置。
+
+| 工单 | 完整交付 | 直接前置 | 状态 |
 |---|---|---|---|
-| [R01](https://github.com/3259980040-droid/fish-agent/issues/29) | A1/C1 | 有序输入与独立任务不漏处理 | ready-for-agent，未实施；无新票阻塞 |
-| [R02](https://github.com/3259980040-droid/fish-agent/issues/30) | A4/A5 | 计划共用自主计时与管理员执行日志 | ready-for-agent，未实施；无新票阻塞 |
-| [R03](https://github.com/3259980040-droid/fish-agent/issues/31) | B1/B2 | 扩展完整配置与按需工具实际执行 | ready-for-agent，未实施；无新票阻塞 |
-| [R04](https://github.com/3259980040-droid/fish-agent/issues/32) | C2/C3 | 固定范围记忆整理自动续批到完成 | ready-for-agent，未实施；无新票阻塞 |
-| [R05](https://github.com/3259980040-droid/fish-agent/issues/33) | C4 | 跨场所统一资料检索与原文回查 | ready-for-agent，未实施；无新票阻塞 |
+| [W01](https://github.com/3259980040-droid/fish-agent/issues/34) | 现有Fish归入初始实例与资料接续 | 无 | ready-for-agent，未实施 |
+| [R01](https://github.com/3259980040-droid/fish-agent/issues/29) | 实例内有序输入与独立任务不漏处理 | W01 | ready-for-agent，未实施 |
+| [R02](https://github.com/3259980040-droid/fish-agent/issues/30) | 自主计时、执行记录与正常请求链修复 | W01 | ready-for-agent，未实施 |
+| [R03](https://github.com/3259980040-droid/fish-agent/issues/31) | 窗口工具配置、真实开关与调用结果闭环 | W01 | ready-for-agent，未实施 |
+| [R04](https://github.com/3259980040-droid/fish-agent/issues/32) | 本窗口固定范围记忆整理自动续批到完成 | W01 | ready-for-agent，未实施 |
+| [R05](https://github.com/3259980040-droid/fish-agent/issues/33) | 本窗口跨场所统一检索与原文回查 | W01 | ready-for-agent，未实施 |
+| [W02](https://github.com/3259980040-droid/fish-agent/issues/35) | 新增独立人格窗口与后台常驻 | R03 | ready-for-agent，未实施 |
+| [W03](https://github.com/3259980040-droid/fish-agent/issues/36) | QQ按窗口接入与独立参与 | W02、R02 | ready-for-agent，未实施 |
+| [W04](https://github.com/3259980040-droid/fish-agent/issues/37) | 完整回合工作台与历史思考状态栏 | W03、R01 | ready-for-agent，未实施 |
 
-以下五票保留已上传修复身份，新增目标与结构设计已进入同一规格；实际调用者/退出映射已完成，具体合票和扩大后的真实依赖尚待to-tickets。原修复范围的无阻塞状态不等于新多窗口改造已可直接按旧依赖实施。五票的基础实现已存在，共享路径继续在同一整合分支衔接；不把建议次序当并发主思考或额外测试批次。
+当前前沿：W01。W01完成后R01—R05具备前提；R03完成后W02，W02与R02完成后W03，W03与R01完成后W04。同一整合分支交接共享文件；可领取不表示必须并行启动多个实施者，也不表示每票单独模型实发。
 
-原01—09父工单/历史实施记录保留。远端原27项仍OPEN，不能把本地done声明当远端已关闭或本轮修复已完成。原09-10接整组完成后一次Fish客户端＋主人QQ私聊体验；群只读/临时根，不逐票付费实验。
+原9项全部承接：A1/C1→R01，A4/A5→R02，B1/B2→R03，C2/C3→R04，C4→R05。最新窗口归属/资料→W01/W02，接入分发→W03，真实工具开关/返回→R03，调试副本退出→R02，完整工作台→W04。
 
-当前Fish保持整体，未来新增能力按插件接入，不据此拆分基础结构；C3技术推荐选择程序自动续批，现有内容提炼/小结仍用qq模型API，FTS5只做索引检索。A2/A3不修；B3配置和旧研究迁移暂存。
+前端是同一套工作台，各票只随完整用户能力补接相应控件；W04负责统一回合视图、历史思考、排版与状态栏。必要跨层改动在负责票完成，不先堆纯界面壳再另开后端。
 
-发布回执：`交付/2026-10-26/验收修复工单发布/发布回执.json`；本轮没有运行代码、设备、部署或数据库改动。
+整组9票实施接通后，接续原09-10的一次客户端＋主人QQ私聊体验，群只读/临时根。W04无需人为依赖R04/R05才能开始做界面，但整组验收须等包括它们在内的9票完成；不新增一张重复验收票。
+
+原21张完成记录和历史编号保留，不重新创建它们；本轮未关闭任何原父/子工单。A2/A3保持，B3及M01暂存。实现与验证交付仍答四问、列实际退出路径及未完成/失败/未验证，原始生产记录不公开。
+
+当前发布回执：`交付/2026-10-26/验收修复工单发布/合并工单发布回执.json`。

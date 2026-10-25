@@ -584,3 +584,27 @@ StatsPills的展示和纯计算复用，Fish的数据投影由本实例turn/trac
 ### 13.8 本轮完成与下一步
 
 本次已给出实例装配、数据归属、工具实际能力、QQ分发、回合读取与前端消费的Interface、实际调用者及退出对象。没有新增运行Module、创建实例文件夹、迁移生产库、改代码、调用模型、重载或发送消息。下一步to-tickets依据本节合并/修订原R01—R05与新增目标，列真正前置和完整用户过程；当前不擅自改Issue图。
+
+<a id="merged-ticket-map-20261026"></a>
+
+## 14．2026-10-26 to-tickets：合并工单与具体源码职责
+
+本表把第13节结构落到唯一负责票；只维护代码及承接位置，不增加用户规则。当前九票均未实施，原21张不重做，旧12节五票无阻塞为历史范围。依赖和实际Issue入口以规格8.10/当前索引为准。
+
+| 工单 | 实际应读/改位置，方法详见13.6 | 职责与退出的唯一归属 |
+|---|---|---|
+| W01 | fish_agent/bootstrap、schema及拟instances上下文；storage/core、原Store定位；ToolHost/workbench装配与实例动作；原文件/资源引用与默认工作区；前端绑定调用面和初始实例显示 | 现有Fish归初始实例和所有数据/工具状态路径贯通。此处定义稳定实例定位，其他票消费；退出裸root和活动会话全局归属，不另造程序或双写库。 |
+| R01 | execution/state.claim_next、execution._execute；ExperienceTurn、experience/context各材料；plans实例payload；回合实际输入引用 | A1/C1真实顺序、独立计划和认领范围；退出越序/背景提前结清，不接管时钟或工具能力。 |
+| R02 | execution._finish_clock/_stored_place/_due_wake；qq_agent_loop.watch_turn及周期故障通知调用者；runner.run_model_loop；RequestInspector正常调用点；治理/trace/usage结果读面 | A4/A5、带实例的结果监听Interface、管理员日志和正常请求退出强制capture。W03调用此监听，不另修同一未调度错误；R03负责单次工具结果。 |
+| R03 | settings有效能力、tools/runner工具定义及offered；PluginRegistry/ToolHost执行、身份和各直接发送工具；AgentTools结果；原扩展/工具启停UI及解析 | B1/B2、工具真实开关与返回链的唯一能力来源。最终validate接法由此票提供共用判定，W03只把正确实例带入，不再写群判定算法。 |
+| R04 | memory_curation范围/分批/execute/finish/tick；memory_store学习、memory_digest、原FTS和整理工作台动作/页面 | C2/C3同一程序自动续批；不复制学习队列，数据位置消费W01。 |
+| R05 | knowledge/doc_store/tool_host资料工具及工作台统一检索；KnowledgeSearch/资料原文读取 | C4实例内跨场所查询/原文回查，保留来源；不是R04的内容提炼算法。 |
+| W02 | 实例目录create/list/set_running和Runtime生命周期；SocialContext人格保存/应用；client/workbench-client/contract的实例绑定、顶部窗口UI及相应页面上下文 | 真正新增独立窗口与后台常驻。继承W01位置及R03工具能力，退出切窗切全局人格、错误迟到回写和全局主思考对象。 |
+| W03 | QQAgentLoop.on_event/_on_group/_submit_group/私聊交接；QQStore/QQAdapter；Host /submit/status与投递；原接入管理工作台/页面 | 事件按参与集合分发与逐实例保存、消费R02监听/R03有效能力。群/私聊/计划/MCP发送都接正确实例；退出reply同时阻止思考及共享单行状态。 |
+| W04 | Execution.turn_view及补turns.list；workbench chat.thoughts/reasoning；trace/context usage；FishChatPage/CSS、contract/parsers、状态栏StatsPills及实际宿主装配 | 完整工作台和真实回合读面；退出灰卡/全局latest/20000静默截断。数据已由前序负责票生产，不在页面建新状态机或资料库。 |
+
+### 14.1 规格覆盖与后续领取
+
+§8.3用户故事1—4由R01承接，5—6及9—11由R02/R03/W04按记录职责承接，7—8和15—16由R02/W03保留触发语义；12的明确任务履约沿R01和既有计划/投递保留。13—14及41—49归R03/W03；17—23归R04，24归R05；25—31是全票保留边界，不扩为研究/插件新项目。32—36归W01/W02，37—40归W03/R02；50—59归W04并消费相应管理Interface；60—61归R02，62归R02/W04，63—64由当前同源规格、子票和替换清单落实。
+
+共享文件采用同一整合分支，Interface调用者明确后可从无阻塞前沿领取；不得仅因为同时改一个文件就增加业务依赖。每票保留自己的必要前后端操作；W04最终整体排版不意味着其他票可只做配置壳。最高层必要离线核对及整组一次私聊体验沿唯一规格执行。
