@@ -567,6 +567,11 @@ class Workbench:
         from context_budget import snapshot as context_usage
         session = ('group-fish:group:' + group['group_id']) if group else ''
         result['context_usage'] = context_usage(self.root, session)['latest']
+        # 有效预算、最近整理范围和它真实的结果：页面读这里，不需要自己再解析配置。
+        from fish_agent.experience.compaction import status as compaction_status
+        store = 'desktop-chat.db' if group is None else 'qq.db'
+        result['context_compaction'] = compaction_status(
+            self.root, store + ':' + str(result['conversation_id']))
         from turn_trace import latest as latest_thought
         result['thought'] = latest_thought(self.root)
         task_path = self.root/'data/delegation/tasks.db'
@@ -845,6 +850,15 @@ class Workbench:
             return [{'id': row['id'], 'name': row['name'], 'body': row['body']} for row in rows]
         if action == 'personas.apply':
             return PersonaLibrary(self.root).apply(params['revision'])
+        if action == 'context.status':
+            # 上下文管理的只读接口：有效预算、触发/保留比例，最近一次整理的完整范围和结果。
+            # 09-06 接页面动作时读这里，不再自己解析 harness 配置或猜窗口容量。
+            from context_budget import snapshot as context_usage
+            from fish_agent.experience.compaction import status as compaction_status
+            budget = context_usage(self.root)
+            return {'effective_budget': budget['effective'],
+                    'compaction': compaction_status(self.root, params.get('context_key')),
+                    'latest_request': budget['latest']}
         if action == 'memory.layers':
             # The three layers in one read: what she remembers, what got digested,
             # what is still raw. Read-only; it answers "is the pipeline alive".

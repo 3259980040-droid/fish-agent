@@ -114,7 +114,9 @@ def run_model_loop(root, role, *, persona, history, history_source, memory, scop
             break
         accounting = budget.begin(session, origin, budget_report)
         if experience is not None:
-            experience.requested(budget_report)
+            # The assembled surface already carries its own prices; this counter is the
+            # same one that priced the request, used when a surface has no price yet.
+            experience.requested(budget_report, tokens=getattr(budget, 'tokens', None))
         trace.event('request', {'model': gateway.model,
                                 'estimated_input_tokens': budget_report.get('estimated_input_tokens'),
                                 'input_ceiling': budget_report.get('input_ceiling')})

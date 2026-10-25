@@ -1803,8 +1803,9 @@ class ToolHost:
                     if role == 'qq':
                         from emoji_store import EmojiStore
                         EmojiStore(self.root).learn_one(gateway)
-                        from context_compaction import tick as compact_context, auto_enqueue
-                        auto_enqueue(self.root, gateway)
+                        # 自动压缩只有一条触发路径：请求预算测到压力后由共同经历入队，
+                        # 这里只负责把队列里那一段用一个成功提交整理完。
+                        from fish_agent.experience.compaction import drain as compact_context
                         compact_context(self.root)
                         from history_index import ensure as index_history
                         index_history(self.root)

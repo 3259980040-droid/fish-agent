@@ -121,20 +121,24 @@ class RuntimeFaultTests(unittest.TestCase):
         self.assertIn('Fish',prior['content'])
 
     def test_background_summary_does_not_hold_main_thinking_slot(self):
-        from context_compaction import enqueue, tick
+        from fish_agent.experience.compaction import drain, request
         from model_gateway import ChatResult
         store=QQStore(self.root)
         conv=store.get_or_create_conversation('private:10000','qq')
         mid=store.record_message(conv['id'],'private:10000','10000','inbound','s1',None,[],'要整理的旧记录','processed')
-        enqueue(self.root,store.db_path,conv['id'],mid)
+        request(self.root,source=store.db_path,conversation=conv['id'],through=mid,pressure=1,threshold=0,retain=0)
         entered=threading.Event()
         gateway=Mock()
+        gateway.model='fake-model'
         gateway.chat.side_effect=lambda *a,**kw:(entered.set() or ChatResult('已整理的摘要',{},'stop'))
         budget=Mock(window=65536,ratio=.3)
-        budget.message_tokens.return_value=1
+        budget.message_tokens.return_value=10
+        budget.tokens.return_value=1
+        budget.ceiling.return_value=1000
         budget.fit.return_value={}
+        budget.begin.return_value='ctx'
         with patch('model_gateway.ModelGateway',return_value=gateway),patch('context_budget.ContextBudget',return_value=budget):
-            worker=threading.Thread(target=tick,args=(self.root,))
+            worker=threading.Thread(target=drain,args=(self.root,))
             try:
                 with thinking_slot(self.root,'qq'):
                     worker.start()
