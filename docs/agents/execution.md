@@ -18,3 +18,9 @@
 初始实例`main`归在`data/instances/main`；首次新版本初始化在停服维护时搬接既有可变数据，`data/host/initial-migration.json`记录实际移动及结构化文件引用更新。程序、端口、模型凭据、账号连接、MCP应用保留宿主位置；旧测试space仅保留为初始实例历史资料，不当作新实例。当前票只在临时根执行迁接，生产维护留最终部署。
 
 窗口工作台动作以params.instance_id定位，`instances.list`为宿主动作。所有入口未显式指定时只落稳定初始实例，永远不从当前前端选中值推断目标。
+
+## 固定范围整理
+
+原`memory.curate.run/status`、`fish_memory_curate`与每日tick共用原整理记录。request.source_limits固定原库和学习队列的高水位；运行时progress的learn步骤保存completed/remaining/batch_count，终态result保存相同计数。completed含已完成或明确排除的来源，saved_count和model_calls是本次实际接续数；旧记录没有的逐批字段由前端保持缺失，不推算为零。
+
+普通重新提交先接续原未完成run及其截止；明确force重做才重新处理已有来源。原learning_jobs与原文引用决定跳过或提炼，失败后不再请求下一来源；小结在整个范围学习完成后更新。`ensure_worker(instance_root, stop=生命周期Event)`使用所属实例原停止事件；W02由各Runtime绑定生命周期，不能用共享host.stop替换实例的Event。`execute/run_pending`的cancelled参数沿同一事件检查，未传时保持原同步调用行为。

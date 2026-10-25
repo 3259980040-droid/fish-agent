@@ -28,8 +28,7 @@ from storage import database, role_dir
 
 TZ = timezone(timedelta(hours=8))
 DAY_HOUR = 4
-MAX_RANGE_MESSAGES = 400
-MAX_MODEL_CALLS = 60
+MAX_MODEL_CALLS = 60  # Existing per-batch call budget, never a whole-run completion rule.
 MAX_FAILURE_RETRIES = 2
 LEASE_SECONDS = 1800
 TIDY_HALF_LIFE_HOURS = 24 * 7
@@ -50,7 +49,7 @@ RUNS_INDEX = ('CREATE INDEX IF NOT EXISTS memory_curate_runs_status '
               'ON memory_curate_runs(status,created)')
 STATE = 'CREATE TABLE IF NOT EXISTS memory_curate_state(key TEXT PRIMARY KEY, value TEXT NOT NULL)'
 
-_WORKERS, _EVENTS, _GATEWAYS = {}, {}, {}
+_WORKERS, _EVENTS, _GATEWAYS, _CANCELLED = {}, {}, {}, {}
 _LOCK = threading.RLock()
 
 
@@ -210,6 +209,21 @@ def _revision(root, role='qq'):
     return str(memory_revision) + ':' + str(source_revision)
 
 
+def _source_limits(root, role):
+    """Freeze original-store high water marks; the run never follows new arrivals."""
+    limits = {}
+    for name, path, table, key in (
+            ('qq.db', project_path(root, 'data/qq/qq.db'), 'messages', 'id'),
+            ('desktop-chat.db', project_path(root, 'data', role, 'desktop-chat.db'), 'messages', 'id'),
+            ('learning_jobs', _path(root, role), 'learning_jobs', 'rowid')):
+        limits[name] = 0
+        if path.is_file():
+            with database(path) as db:
+                if db.execute('SELECT 1 FROM sqlite_master WHERE type=\'table\' AND name=?', (table,)).fetchone():
+                    limits[name] = int(db.execute('SELECT COALESCE(MAX(' + key + '),0) FROM ' + table).fetchone()[0])
+    return limits
+
+
 def submit(root, *, day=None, start=None, end=None, force=False, requested_by='tool',
            role='qq', gateway=None, autostart=True, steps=None, range_key=None, window=None):
     """Accept one run and return its real reference without running the model.
@@ -218,10 +232,39 @@ def submit(root, *, day=None, start=None, end=None, force=False, requested_by='t
     reference. A wider range is a new queued run; it is not silently folded into
     or dropped from the active one.
     """
-    root = Path(root)
+    from locations import instance_context
+    root = instance_context(root).root
     role = 'research' if str(role) == 'research' else 'qq'
     now = time.time()
-    if start is not None or end is not None:
+    path = _prepare(root, role)
+    if not force:
+        with database(path) as db:
+            candidates = db.execute("SELECT * FROM memory_curate_runs WHERE role=? "
+                                    "AND status IN ('queued','running','partial','failed') ORDER BY created",
+                                    (role,)).fetchall()
+            for candidate in candidates:
+                same = (start is None and not day) or (
+                    start is not None and end is not None
+                    and float(candidate['range_start']) == _epoch(start)
+                    and float(candidate['range_end']) == _epoch(end))
+                if not same:
+                    continue
+                previous = _record(candidate)
+                if previous['status'] in ('partial', 'failed'):
+                    progress = previous['progress'] + [{'name': 'resume', 'state': 'done', 'at': now,
+                                                       'previous_status': previous['status'],
+                                                       'previous_error': previous['error']}]
+                    db.execute("UPDATE memory_curate_runs SET status='queued',stage='accepted',finished=NULL,"
+                               "error='',progress=? WHERE id=?", (json.dumps(progress, ensure_ascii=False), candidate['id']))
+                    previous.update(status='queued', stage='accepted', finished=None, error='', progress=progress)
+                previous.update(reused=True, note='接续同一固定范围；已完成来源沿原学习状态跳过')
+                if gateway is not None:
+                    _GATEWAYS[previous['id']] = gateway
+                if autostart:
+                    ensure_worker(root)
+                return previous
+    limits = _source_limits(root, role)
+    if start is not None:
         first = _epoch(start, None)
         last = _epoch(end, now)
         if first is None:
@@ -231,16 +274,19 @@ def submit(root, *, day=None, start=None, end=None, force=False, requested_by='t
     elif day:
         first, last = _day_bounds(_day(day))
     else:
-        first = _last_end(root, role) or _day_bounds(_day(now))[0]
-        last = now
+        last = _epoch(end, now)
+        first = _next_start(root, role, last, limits)
     day_value = _day(day) if day else _local(last).strftime('%Y-%m-%d')
     chosen_steps = [step for step in (steps or STEPS) if step in STEPS]
+    if 'learn' in chosen_steps and 'range' not in chosen_steps:
+        chosen_steps.insert(0, 'range')
     if not chosen_steps:
         raise ValueError('整理步骤为空')
     key = str(range_key or '') or (role + ':' + str(int(first)) + ':' + str(int(last)) +
                                    ':' + _revision(root, role))
     request = {'day': day_value, 'start': float(first), 'end': float(last), 'force': bool(force),
-               'steps': chosen_steps, 'requested_by': requested_by}
+               'steps': chosen_steps, 'requested_by': requested_by,
+               'source_limits': limits}
     if window:
         request['window'] = float(window)
     path = _prepare(root, role)
@@ -274,6 +320,20 @@ def submit(root, *, day=None, start=None, end=None, force=False, requested_by='t
     record['note'] = ('已受理，后台整理中；用同一引用查询阶段和结果，不等待模型'
                       if autostart else '已受理；未启动后台线程')
     return record
+
+
+def _next_start(root, role, end, limits):
+    """An end timestamp alone cannot prove every earlier source was processed."""
+    from memory_store import MemoryStore
+    store = MemoryStore(root, role)
+    with database(store.path) as db:
+        finished = {row[0] for row in db.execute("SELECT source FROM learning_jobs WHERE status IN ('done','skipped')")}
+        finished.update(row[0] for row in db.execute('SELECT source FROM exclusions'))
+    rows, _, _ = _collect(root, role, 0, end, limits)
+    pending = [row['ts'] for row in rows
+               if not any(reference in finished for reference in [row['source'], *row.get('source_aliases', [])])]
+    return min(pending) if pending else min(_last_end(root, role) or
+                                           _day_bounds(_local(end).strftime('%Y-%m-%d'))[0], end)
 
 
 def status(root, run_id=None, *, limit=10, role='qq'):
@@ -318,31 +378,38 @@ def _claim(root):
     return _record(row)
 
 
-def run_pending(root, *, gateway=None, limit=10):
+def run_pending(root, *, gateway=None, limit=10, cancelled=None):
     """Claim and execute up to ``limit`` queued runs (the worker's one function)."""
     executed = []
     for _ in range(max(1, int(limit))):
+        if cancelled is not None and cancelled.is_set():
+            break
         row = _claim(Path(root))
         if row is None:
             break
-        executed.append(execute(root, row['id'], gateway=gateway))
+        executed.append(execute(root, row['id'], gateway=gateway, cancelled=cancelled))
     return executed
 
 
-def ensure_worker(root):
+def ensure_worker(root, *, stop=None):
     """One lazy background worker per data root; it never runs inside a turn."""
-    root = Path(root).resolve()
+    from locations import instance_context
+    root = instance_context(root).root
     key = str(root)
     with _LOCK:
+        if stop is not None:
+            _CANCELLED[key] = stop
         thread = _WORKERS.get(key)
         if thread is not None and thread.is_alive():
             return thread
         _EVENTS.setdefault(key, threading.Event())
+        if stop is None and (key not in _CANCELLED or _CANCELLED[key].is_set()):
+            _CANCELLED[key] = threading.Event()
 
         def loop():
-            while True:
+            while not _CANCELLED[key].is_set():
                 try:
-                    run_pending(root)
+                    run_pending(root, cancelled=_CANCELLED[key])
                 except Exception:  # noqa: BLE001 - every run keeps its own failure
                     pass
                 _EVENTS[key].wait(5)
@@ -363,17 +430,34 @@ def _count_rows(rows):
     return counts
 
 
-def _collect(root, role, start, end):
+def _collect(root, role, start, end, source_limits=None):
     """Read new/specified inbound material from the real owning stores."""
     from memory_maintenance import read_desktop_messages, read_qq_messages
     rows = []
-    rows.extend(read_qq_messages(Path(root), role, float(start), 0))
-    rows.extend(read_desktop_messages(Path(root), role, float(start), 0))
+    limits = source_limits if source_limits is not None else _source_limits(root, role)
+    rows.extend(read_qq_messages(Path(root), role, float(start), 0, end=end,
+                                through_id=limits.get('qq.db', 0), limit=None, strict=True))
+    rows.extend(read_desktop_messages(Path(root), role, float(start), 0, end=end,
+                                     through_id=limits.get('desktop-chat.db', 0), limit=None, strict=True))
+    # The live group learner already owns its provenance and gate. Consume its
+    # existing queue as well; do not turn group text into owner-private evidence.
+    if limits.get('learning_jobs'):
+        known = {reference for row in rows for reference in [row['source'], *row.get('source_aliases', [])]}
+        with database(_path(root, role)) as db:
+            queued = db.execute('SELECT rowid AS seq,* FROM learning_jobs WHERE rowid<=? '
+                                'AND created>=? AND created<=? ORDER BY rowid',
+                                (limits['learning_jobs'], float(start), float(end))).fetchall()
+        for job in queued:
+            if job['source'] in known or str(job['scope']).startswith('space:') or ':test:' in str(job['scope']):
+                continue
+            rows.append({'origin': 'learning_jobs', 'row_id': job['seq'], 'ts': job['created'],
+                         'source': job['source'], 'scope': job['scope'], 'subject': job['subject'],
+                         'text': job['text'], 'source_aliases': []})
     rows = [row for row in rows if float(start) <= float(row['ts']) <= float(end)]
     rows.sort(key=lambda item: (float(item['ts']), str(item.get('origin') or ''),
                                 int(item.get('row_id') or 0)))
     total = len(rows)
-    return rows[:MAX_RANGE_MESSAGES], total, total > MAX_RANGE_MESSAGES
+    return rows, total, False
 
 
 def _clean(text):
@@ -405,7 +489,7 @@ def _gateway(root, role):
     return gateway
 
 
-def _learn(root, role, rows, *, gateway, force):
+def _learn(root, role, rows, *, gateway, force, on_batch=None, cancelled=None):
     from memory_store import MemoryStore
     store = MemoryStore(Path(root), role)
     with database(store.path) as db:
@@ -420,20 +504,25 @@ def _learn(root, role, rows, *, gateway, force):
             skipped += 1
             continue
         primary = group['sources'][0]['source']
-        job = jobs.get(primary)
+        job = next((jobs[reference] for reference in references if reference in jobs), None)
         if job is not None and job['status'] in TERMINAL and not force:
             skipped += 1
             continue
-        if job is not None and job['status'] == 'failed' and int(job.get('attempts') or 0) >= MAX_FAILURE_RETRIES and not force:
-            skipped += 1
-            continue
+        if job is not None:
+            primary = job['source']
+        group['primary'] = primary
+        exhausted = bool(job is not None and job['status'] == 'failed'
+                         and int(job.get('attempts') or 0) >= MAX_FAILURE_RETRIES and not force)
+        group['blocked'] = '原学习任务已达失败重试次数；保留未完成，需明确重做' if exhausted else ''
         aliases = [row['source'] for row in group['sources'][1:]]
         aliases.extend(alias for row in group['sources'] for alias in row.get('source_aliases') or [])
         with database(store.path) as db:
+            if job is not None and job['status'] not in TERMINAL:
+                db.execute('UPDATE learning_jobs SET text=? WHERE source=?', (group['text'], primary))
             if force and job is not None:
                 db.execute("UPDATE learning_jobs SET status='pending',error='',started=0,attempts=0 "
                            'WHERE source=?', (primary,))
-            elif job is not None and job['status'] == 'failed':
+            elif job is not None and job['status'] == 'failed' and not exhausted:
                 db.execute("UPDATE learning_jobs SET status='pending',error='',started=0 WHERE source=?",
                            (primary,))
         store.enqueue(primary, group['text'], group['scope'], subject=group['subject'],
@@ -442,23 +531,43 @@ def _learn(root, role, rows, *, gateway, force):
     if not pending:
         return {'state': 'done', 'new_messages': 0, 'saved': [], 'saved_count': 0,
                 'failures': [], 'failure_count': 0, 'model_calls': 0,
-                'skipped_existing': skipped, 'deferred': 0,
+                'skipped_existing': skipped, 'deferred': 0, 'remaining': 0,
+                'completed': skipped, 'total': skipped, 'batch_count': 0, 'batches': [],
                 'note': '没有新的可学习内容，未调用模型'}
-    session = gateway or _gateway(root, role)
+    session = gateway
     saved, failures, calls, deferred, processed = [], [], 0, 0, 0
+    batches, batch_calls, batch_start = [], 0, 0
+
+    def finish_batch():
+        nonlocal batch_calls, batch_start
+        batches.append({'number': len(batches) + 1, 'processed': processed - batch_start,
+                        'model_calls': batch_calls, 'remaining': len(pending) - processed + len(failures)})
+        batch_calls, batch_start = 0, processed
+        if on_batch is not None:
+            on_batch({'batch_count': len(batches), 'batches': list(batches),
+                      'completed': skipped + processed - len(failures), 'total': skipped + len(pending),
+                      'remaining': len(pending) - processed + len(failures),
+                      'model_calls': calls, 'saved_count': len(saved)})
+
     for group in pending:
-        if calls >= MAX_MODEL_CALLS:
-            deferred = len(pending) - processed
-            break
+        if batch_calls >= MAX_MODEL_CALLS:
+            finish_batch()
+        primary = group['primary']
         processed += 1
-        primary = group['sources'][0]['source']
         try:
+            _check_running(root, role, cancelled)
+            if group['blocked']:
+                raise InterruptedError(group['blocked'])
+            if session is None:
+                session = _gateway(root, role)
             outcome = store.extract(session, primary)
         except Exception as exc:  # noqa: BLE001 - one bad source keeps its own failure
             failures.append({'source': primary, 'scope': group['scope'],
                              'reason': type(exc).__name__ + ': ' + str(exc)[:200]})
-            continue
+            # No next source/model request after an actual interruption.
+            break
         calls += int(outcome.get('model_calls') or 0)
+        batch_calls += int(outcome.get('model_calls') or 0)
         if outcome.get('status') == 'done':
             for item in outcome.get('saved') or []:
                 try:
@@ -471,12 +580,33 @@ def _learn(root, role, rows, *, gateway, force):
         elif outcome.get('status') == 'failed':
             failures.append({'source': primary, 'scope': group['scope'],
                              'reason': outcome.get('error') or '模型提炼失败'})
-    return {'state': 'partial' if failures else 'done', 'new_messages': len(pending),
+            break
+        elif outcome.get('status') not in TERMINAL:
+            failures.append({'source': primary, 'scope': group['scope'],
+                             'reason': outcome.get('reason') or outcome.get('error') or '来源未完成处理'})
+            break
+    if processed > batch_start:
+        finish_batch()
+    deferred = len(pending) - processed + len(failures)
+    return {'state': 'partial' if failures or deferred else 'done', 'new_messages': len(pending),
             'saved': saved[:60], 'saved_count': len(saved), 'failures': failures[:60],
             'failure_count': len(failures), 'model_calls': calls, 'skipped_existing': skipped,
-            'deferred': deferred,
+            'deferred': deferred, 'remaining': deferred, 'completed': skipped + processed - len(failures),
+            'total': skipped + len(pending),
+            'batch_count': len(batches), 'batches': batches,
             'note': ('保存 %d 条，失败 %d 条' % (len(saved), len(failures))) if failures
                     else ('保存 %d 条' % len(saved))}
+
+
+def _check_running(root, role, cancelled=None):
+    from governance import Governance
+    from memory_store import MemoryStore
+    if cancelled is not None and cancelled.is_set():
+        raise InterruptedError('后台正在停止；已完成和剩余材料保留')
+    if Governance(root, role).config()['paused']:
+        raise InterruptedError('主人已暂停；已完成和剩余材料保留')
+    if not MemoryStore(root, role).options()['auto_learning']:
+        raise InterruptedError('自动学习已关闭；未处理材料保留')
 
 
 def _auto(row):
@@ -588,7 +718,7 @@ def _index(root, role):
     return result
 
 
-def execute(root, run_id, *, gateway=None, gateway_factory=None):
+def execute(root, run_id, *, gateway=None, gateway_factory=None, cancelled=None):
     """Execute one accepted run to its real result; progress is written per stage."""
     root = Path(root)
     record = _load(root, run_id)
@@ -601,9 +731,14 @@ def execute(root, run_id, *, gateway=None, gateway_factory=None):
         db.execute("UPDATE memory_curate_runs SET status='running',started=COALESCE(started,?) WHERE id=?",
                    (time.time(), run_id))
     request = record.get('request') or {}
+    if 'source_limits' not in request:
+        request['source_limits'] = _source_limits(root, role)
+        with database(_path(root, role)) as db:
+            db.execute('UPDATE memory_curate_runs SET request=? WHERE id=?',
+                       (json.dumps(request, ensure_ascii=False), run_id))
     steps = request.get('steps') or list(STEPS)
     force = bool(request.get('force'))
-    progress = [{'name': 'accepted', 'state': 'done', 'at': record.get('created')}]
+    progress = list(record.get('progress') or []) or [{'name': 'accepted', 'state': 'done', 'at': record.get('created')}]
     _write_progress(root, role, run_id, progress, 'running')
     runtime = {'rows': [], 'range': {}}
     result, failures = {}, []
@@ -612,6 +747,8 @@ def execute(root, run_id, *, gateway=None, gateway_factory=None):
         progress.append({'name': name, 'state': 'running', 'at': time.time()})
         _write_progress(root, role, run_id, progress, name)
         try:
+            if name in ('digest', 'emoji'):
+                _check_running(root, role, cancelled)
             detail = call() or {}
         except Exception as exc:  # noqa: BLE001 - recorded, then the run may fail
             progress[-1] = {'name': name, 'state': 'failed', 'at': time.time(),
@@ -626,7 +763,8 @@ def execute(root, run_id, *, gateway=None, gateway_factory=None):
         return detail
 
     def read_range():
-        rows, total, truncated = _collect(root, role, request['start'], request['end'])
+        rows, total, truncated = _collect(root, role, request['start'], request['end'],
+                                         request.get('source_limits'))
         runtime['rows'] = rows
         runtime['range'] = {'start': request['start'], 'end': request['end'],
                             'day': request.get('day'), 'window': request.get('window')}
@@ -645,14 +783,19 @@ def execute(root, run_id, *, gateway=None, gateway_factory=None):
                 session = gateway or _GATEWAYS.pop(run_id, None)
                 if session is None and gateway_factory is not None:
                     session = gateway_factory(role)
-                return _learn(root, role, runtime['rows'], gateway=session, force=force)
+                def batch_progress(detail):
+                    progress[-1].update(detail)
+                    _write_progress(root, role, run_id, progress, 'learn')
+                return _learn(root, role, runtime['rows'], gateway=session, force=force,
+                              on_batch=batch_progress, cancelled=cancelled)
             result['learn'] = stage('learn', learn)
             failures.extend({'stage': 'learn', **item} for item in result['learn'].get('failures') or [])
-        if 'tidy' in steps:
+        learning_incomplete = bool((result.get('learn') or {}).get('remaining') or
+                                   (result.get('learn') or {}).get('failure_count'))
+        if 'tidy' in steps and not learning_incomplete:
             result['tidy'] = stage('tidy', lambda: tidy_memories(root, role))
         if 'digest' in steps:
-            learn_failed = int((result.get('learn') or {}).get('failure_count') or 0)
-            if learn_failed:
+            if learning_incomplete:
                 # A digest written from a partially failed extraction would mark
                 # the day finished and hide the missing material from the retry.
                 result['digest'] = {'state': 'skipped',
@@ -664,20 +807,21 @@ def execute(root, run_id, *, gateway=None, gateway_factory=None):
                     digest_gateway = session
                     if digest_gateway is None:
                         digest_gateway = gateway or _GATEWAYS.pop(run_id, None)
-                    record_row = daily(root, day, force=force, gateway=digest_gateway, raise_errors=True)
+                    record_row = daily(root, day, force=force or bool((result.get('learn') or {}).get('saved_count')),
+                                       gateway=digest_gateway, raise_errors=True)
                     text = str(record_row.get('text') or '')
                     calls = 0 if record_row.get('skipped') else int(record_row.get('model_calls') or 0)
                     return {'day': day, 'skipped': bool(record_row.get('skipped')),
                             'model_calls': calls,
                             'chars': len(text), 'error': ''}
                 result['digest'] = stage('digest', digest, optional=True)
-        if 'emoji' in steps and role == 'qq':
+        if 'emoji' in steps and role == 'qq' and not learning_incomplete:
             def emoji():
                 from daily_curate import _emoji
                 day = str(request.get('day') or _local(time.time()).strftime('%Y-%m-%d'))
                 return _emoji(root, day, gateway=session or gateway, messages_db=_path(root, 'qq').parent / 'qq.db')
             result['emoji'] = stage('emoji', emoji, optional=True)
-        if 'index' in steps:
+        if 'index' in steps and not learning_incomplete:
             result['index'] = stage('index', lambda: _index(root, role))
     except Exception as exc:  # noqa: BLE001 - a failed range/learn writes a real failure
         result['range'] = {**runtime.get('range', {}),
@@ -694,7 +838,7 @@ def execute(root, run_id, *, gateway=None, gateway_factory=None):
     optional_failed = any(
         isinstance(result.get(name), dict) and result[name].get('state') == 'failed'
         for name in ('tidy', 'digest', 'emoji', 'index'))
-    status = 'partial' if failures or optional_failed else 'done'
+    status = 'partial' if failures or optional_failed or learning_incomplete else 'done'
     result.update({'run': run_id,
                    'range': {**(result.get('range') or {}), 'start': request.get('start'),
                              'end': request.get('end'), 'day': request.get('day'),
@@ -704,11 +848,16 @@ def execute(root, run_id, *, gateway=None, gateway_factory=None):
                    'saved_count': int(learn_result.get('saved_count') or len(learn_result.get('saved') or [])),
                    'failures': failures, 'failure_count': len(failures),
                    'skipped_existing': int(learn_result.get('skipped_existing') or 0),
+                   'completed': int(learn_result.get('completed') or 0),
+                   'remaining': int(learn_result.get('remaining') or 0),
+                   'batch_count': int(learn_result.get('batch_count') or 0),
                    'model_calls': int(sum(int((result.get(name) or {}).get('model_calls') or 0)
                                           for name in ('learn', 'digest'))),
                    'truncated': bool((result.get('range') or {}).get('truncated')),
-                   'note': ('整理完成' if status == 'done' else
-                            '部分完成：有失败记录，未把未完成材料标成已整理')})
+                   'note': ('整理完成' if status == 'done' else '整理中断，未完成材料保留') +
+                           '：已处理%d份，剩余%d份，本次%d批' % (
+                               int(learn_result.get('completed') or 0), int(learn_result.get('remaining') or 0),
+                               int(learn_result.get('batch_count') or 0))})
     _finish(root, role, run_id, status, progress, result,
             '' if status == 'done' else '；'.join(str(item.get('reason') or '') for item in failures)[:500])
     return _load(root, run_id)
@@ -728,8 +877,8 @@ def tick(root, now=None):
     path = _prepare(root, 'qq')
     with database(path) as db:
         rows = [dict(row) for row in db.execute(
-            'SELECT * FROM memory_curate_runs WHERE role=? AND range_start=? ORDER BY created DESC',
-            ('qq', float(window)))]
+            'SELECT * FROM memory_curate_runs WHERE role=? ORDER BY created DESC', ('qq',))
+                if float(json.loads(row['request'] or '{}').get('window') or 0) == float(window)]
         attempt = db.execute('SELECT value FROM memory_curate_state WHERE key=?',
                              ('daily_attempt:' + str(int(window)),)).fetchone()
     for row in rows:
@@ -746,6 +895,6 @@ def tick(root, now=None):
         if now - float(previous.get('at') or 0) < 3600:
             return {'submitted': False, 'skipped': '上次整理失败，一个小时内不重复自动重试',
                     'run': _record(rows[0]) if rows else None}
-    record = submit(root, start=window, end=now, day=_local(now).strftime('%Y-%m-%d'),
+    record = submit(root, end=now,
                     requested_by='daily', window=window, autostart=True)
     return {'submitted': True, 'run': record}

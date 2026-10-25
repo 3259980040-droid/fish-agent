@@ -6,6 +6,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import closing
@@ -21,6 +22,7 @@ import knowledge
 import memory_curation as curation
 from memory_maintenance import MemoryMaintenance
 from memory_store import MemoryStore
+from locations import project_path
 from storage import database, role_dir
 from workbench import Workbench
 
@@ -66,7 +68,7 @@ class CurationTests(unittest.TestCase):
         self.now = time.time()
         self.start = self.now - 3600
         self.end = self.now + 60
-        self.messages = self.root / 'data/qq/qq.db'
+        self.messages = project_path(self.root, 'data/qq/qq.db')
         with closing(sqlite3.connect(self.messages)) as db:
             db.execute(QQ_SCHEMA)
             db.commit()
@@ -96,8 +98,131 @@ class CurationTests(unittest.TestCase):
         with database(role_dir(self.root, 'qq') / 'memory.db') as db:
             return [dict(row) for row in db.execute('SELECT * FROM memory_curate_runs ORDER BY created')]
 
+    def evidence(self, case, record, gateway):
+        print(json.dumps({'case': case, 'run': record['id'], 'status': record['status'],
+            'range': record['range'], 'source_limits': record['request'].get('source_limits'),
+            'created': record['created'], 'started': record['started'], 'finished': record['finished'],
+            'progress': record['progress'], 'result': record['result'],
+            'substitute_model_inputs': [item[1] for item in gateway.calls]}, ensure_ascii=False), flush=True)
+
     # -- one program, one reference ---------------------------------------
+    def test_one_fixed_run_automatically_finishes_61_sources_and_excludes_late_arrivals(self):
+        tail = '超过16000字符的真实尾部标记R04'
+        for number in range(1, 62):
+            text = '第%d份原始资料：主人记下了北门%d号。' % (number, number)
+            if number == 61:
+                text += '很长的原始资料。' * 2000 + tail
+            self.add_message(number, text, at=self.start + number)
+        case = self
+        class BatchedGateway(FakeGateway):
+            def json(self, system, user, **kwargs):
+                if '小结' not in system and len(self.calls) == 60:
+                    case.add_message(62, '执行中新来的资料，留下一范围。', at=case.start + 62)
+                return super().json(system, user, **kwargs)
+        gateway = BatchedGateway()
+        accepted = curation.submit(self.root, start=self.start, end=self.end, autostart=False,
+                                    steps=['range', 'learn', 'digest'])
+        done = curation.execute(self.root, accepted['id'], gateway=gateway)
+        self.assertEqual(done['status'], 'done', done)
+        counts = MemoryStore(self.root, 'qq').learning_status()['counts']
+        self.assertEqual(counts.get('done'), 61, done)
+        self.assertEqual(done['result']['learn']['batch_count'], 2)
+        self.assertEqual(done['result']['learn']['remaining'], 0)
+        self.assertEqual(done['result']['range']['messages'], 61)
+        self.assertEqual(len(gateway.calls), 62, '61次提炼完成后只更新一次小结')
+        self.assertEqual(done['result']['model_calls'], 62)
+        self.assertIn(tail, gateway.calls[60][1], '实际替代API收到完整来源尾部')
+        self.assertTrue(any('北门61' in row['text'] for row in MemoryStore(self.root, 'qq').search('北门61', scope=None)))
+        next_run = curation.submit(self.root, start=self.start, end=self.end, autostart=False,
+                                   steps=['range', 'learn'])
+        next_done = curation.execute(self.root, next_run['id'], gateway=FakeGateway())
+        self.assertEqual(next_done['result']['new_messages'], 1)
+        self.evidence('61_sources_two_batches_full_text', done, gateway)
+
+    def test_real_interruption_keeps_unprocessed_sources_and_resumes_the_same_fixed_run(self):
+        for number in range(1, 5):
+            self.add_message(number, '第%d份北门资料。' % number, at=self.start + number)
+        class InterruptedGateway(FakeGateway):
+            def json(self, system, user, **kwargs):
+                self.calls.append((system, user))
+                if len(self.calls) == 1:
+                    return {'memories': []}  # 正常没有事实也已经实际处理。
+                raise RuntimeError('scripted API quota interruption')
+        gateway = InterruptedGateway()
+        accepted = curation.submit(self.root, start=self.start, end=self.end, autostart=False,
+                                    steps=['range', 'learn', 'digest'])
+        interrupted = curation.execute(self.root, accepted['id'], gateway=gateway)
+        self.assertNotEqual(interrupted['status'], 'done')
+        self.assertEqual(len(gateway.calls), 2, '实际API失败后不能继续逐条调用或暗中重试')
+        self.assertEqual(interrupted['result']['learn']['completed'], 1)
+        self.assertEqual(interrupted['result']['learn']['remaining'], 3)
+        self.assertEqual(MemoryStore(self.root, 'qq').learning_status()['counts'],
+                         {'done': 1, 'failed': 1, 'pending': 2})
+        self.evidence('substitute_API_interruption', interrupted, gateway)
+        self.add_message(5, '中断后新来的原文留下一轮。', at=self.start + 5)
+        resumed = curation.submit(self.root, autostart=False)
+        self.assertEqual(resumed['id'], accepted['id'])
+        self.assertEqual(resumed['range_end'], accepted['range_end'])
+        retry_gateway = FakeGateway()
+        done = curation.execute(self.root, resumed['id'], gateway=retry_gateway)
+        self.assertEqual(done['status'], 'done', done['error'])
+        self.assertEqual(done['result']['new_messages'], 3)
+        self.assertEqual(MemoryStore(self.root, 'qq').learning_status()['counts'], {'done': 4})
+        self.assertEqual(len(retry_gateway.calls), 4, '只续剩余3份，再更新一次小结')
+        self.evidence('resume_same_fixed_run', done, retry_gateway)
+
+    def test_daily_worker_catches_older_sources_and_queued_group_material_then_resumes_after_pause(self):
+        from governance import Governance
+        from group_policy import GroupPolicy
+        self.add_owner_message('昨天还没整理的北门原文。', at=self.now - 20 * 3600)
+        GroupPolicy(self.root).configure('group:123456', {'listen': True, 'learn': True})
+        store = MemoryStore(self.root, 'qq')
+        store.enqueue('qq-group:group:123456:r04', '群友说自己周六会去北门。',
+                      'chat:group:123456', subject='qq:30001')
+        case = self
+        class PausingGateway(FakeGateway):
+            def json(self, system, user, **kwargs):
+                if not self.calls:
+                    self.calls.append((system, user))
+                    Governance(case.root).save({'paused': True})
+                    return {'memories': []}
+                return super().json(system, user, **kwargs)
+        stop = threading.Event()
+        worker = curation.ensure_worker(self.root, stop=stop)
+        def close_worker():
+            stop.set()
+            worker.join(6)
+        self.addCleanup(close_worker)
+        gateway = PausingGateway()
+        with patch('model_gateway.ModelGateway', return_value=gateway):
+            accepted = curation.tick(self.root, self.now + 2)['run']
+            def settled():
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    record = curation.status(self.root, accepted['id'])['run']
+                    if record['status'] not in ('queued', 'running'):
+                        return record
+                    time.sleep(.03)
+                self.fail('每日原后台未结清')
+            partial = settled()
+            self.assertLess(partial['range_start'], self.now - 12 * 3600)
+            self.assertEqual(partial['status'], 'partial')
+            self.assertEqual(partial['result']['completed'], 1)
+            self.assertEqual(partial['result']['remaining'], 1)
+            self.assertEqual(partial['digest']['state'], 'skipped')
+            self.evidence('daily_older_sources_paused', partial, gateway)
+            Governance(self.root).save({'paused': False})
+            resumed = curation.submit(self.root)
+            self.assertEqual(resumed['id'], accepted['id'])
+            done = settled()
+            self.assertEqual(done['status'], 'done', done['error'])
+            self.assertEqual(done['result']['completed'], 2)
+            self.assertEqual(store.learning_status()['counts'], {'done': 2})
+            self.assertEqual(done['result']['range']['sources']['learning_jobs'], 1)
+            self.evidence('daily_same_run_resumed', done, gateway)
+
     def test_daily_tool_and_client_share_one_run_reference(self):
+        self.add_owner_message()
         with patch.object(curation, 'ensure_worker', lambda root: None):
             daily = curation.tick(self.root, self.now)
         self.assertTrue(daily['submitted'], daily)
@@ -117,7 +242,6 @@ class CurationTests(unittest.TestCase):
         self.assertEqual(same_legacy_daily['run']['id'], run['id'])
         self.assertEqual(same_maintenance['run']['id'], run['id'])
         gateway = FakeGateway()
-        self.add_owner_message()
         done = curation.execute(self.root, run['id'], gateway=gateway)
         self.assertEqual(done['status'], 'done', done)
         self.assertGreaterEqual(done['result']['saved_count'], 1)
