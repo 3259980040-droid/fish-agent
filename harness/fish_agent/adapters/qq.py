@@ -65,14 +65,17 @@ class QQAdapter:
     def finish_turn(self, turn, status, error=''):
         self.store().finish_turn(str(turn), status, error=str(error)[:1000])
 
-    def deliver(self, *, target, bubbles, key, turn, message_id, timeout=180):
+    def deliver(self, *, target, bubbles, key, turn, message_id, reply_to='', reference='',
+                direct=False, timeout=180):
         """Ask the QQ process to send already-decided bubbles; return its real receipt.
 
         The request itself being accepted is not a delivery: ``state`` says what the
         channel actually confirmed, and ``sent`` is that same fact in one field.
         """
         body = json.dumps({'target': target, 'bubbles': bubbles, 'key': key, 'turn': turn,
-                           'message_id': message_id}, ensure_ascii=False).encode()
+                           'message_id': message_id, 'reply_to': reply_to,
+                           'reference': reference, 'direct': bool(direct)},
+                          ensure_ascii=False).encode()
         from governance import control_token
         response = requests.post(
             f'http://127.0.0.1:{control_port()}/deliver', data=body,

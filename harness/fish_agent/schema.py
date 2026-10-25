@@ -41,6 +41,11 @@ RUNS = """CREATE TABLE IF NOT EXISTS agent_runs(
     result TEXT NOT NULL DEFAULT '',
     inputs TEXT NOT NULL DEFAULT '[]')"""
 
+STATE = """CREATE TABLE IF NOT EXISTS agent_state(
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT '',
+    updated REAL NOT NULL)"""
+
 WAKES = """CREATE TABLE IF NOT EXISTS agent_wakes(
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -48,7 +53,7 @@ WAKES = """CREATE TABLE IF NOT EXISTS agent_wakes(
     created REAL NOT NULL,
     claimed_run TEXT NOT NULL DEFAULT '')"""
 
-TABLES = (INPUTS, RUNS, WAKES)
+TABLES = (INPUTS, RUNS, WAKES, STATE)
 
 
 def path(root) -> Path:
@@ -60,4 +65,9 @@ def ensure(root) -> Path:
     with database(target) as db:
         for statement in TABLES:
             db.execute(statement)
+        # Older agent_runs rows predate the trigger reason/place; add them in place.
+        columns = {row[1] for row in db.execute('PRAGMA table_info(agent_runs)')}
+        for name, decl in (('reason', "TEXT NOT NULL DEFAULT ''"), ('place', "TEXT NOT NULL DEFAULT ''")):
+            if name not in columns:
+                db.execute('ALTER TABLE agent_runs ADD COLUMN ' + name + ' ' + decl)
     return target

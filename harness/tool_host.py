@@ -254,8 +254,8 @@ def builtins(role):
          'parameters': schema({'target': string, 'texts': {'type': 'array', 'items': string, 'minItems': 1}}, ['target','texts'])},
         {'name': 'fish_tool_list', 'description': '按关键词列出你可以调用、但目录里没有直接公布的其余工具，返回名字、用途与参数；找到后直接用这个名字调用。<b>清单为空表示没有更多匹配工具。</b>',
          'parameters': schema({'query': string}, ['query'])}, 
-        {'name': 'fish_think_again', 'description': '本轮说完之后，给自己安排一次“再看一眼”这个群：只在真的感兴趣时调用，不打断当前思考。interest 必须 ≥0.7（你对这话题的兴趣），topic 一句话说在聊什么。连续自唤醒超过 3 次会被拒绝；这期间没有新消息也不会真的醒。',
-         'parameters': schema({'interest': {'type': 'number', 'minimum': 0, 'maximum': 1, 'description': '兴趣 0–1，低于 0.7 会被拒绝'}, 'topic': string, 'delay': {'type': 'integer', 'minimum': 3, 'maximum': 600, 'description': '多少秒后再看一眼，默认 3'}}, ['interest', 'topic'])}, 
+        {'name': 'fish_think_again', 'description': '本轮结束后再想一次：对刚看到的事真的还有兴趣、想继续看或做点什么时调用。interest 是你此刻的兴趣（0–1），低于 0.7 不受理；topic 一句话写你在关注什么。程序在本轮正常结束 3 秒后安排同一次思考，不打断当前回合，没有新消息也会醒。连续受理最多 3 次，重复提交同一次调用不重复计数；新的消息、@ 或 45 分钟触发会解除这个上限。返回是否受理、连续第几次和实际安排。',
+         'parameters': schema({'interest': {'type': 'number', 'minimum': 0, 'maximum': 1, 'description': '此刻的兴趣，0–1；低于 0.7 不受理'}, 'topic': string}, ['interest', 'topic'])}, 
         {'name':'fish_capabilities','description':'查询当前实际模型、模式、思考强度、展示方式、可用工具、联网工具及用量开关。历史工具名与人格描述不能代替本轮真实能力。','parameters':schema({})},
         {'name':'fish_owner_admin','description':'已核验主人可实际管理 Fish，群聊和私聊均可用。action：status、pause、resume；message_send 参数 target(owner或group:白名单群号),text，真实单次发送并返回消息编号；file_send 参数 target(owner或group:白名单群号),path(已存在文件的绝对路径)，通过QQ上传真实文件，不能用chat_files能力标志推断QQ不支持文件；qzone_draft 参数 content,images(图片路径或URL数组),ugc_right(1公开/4好友/64自己)，保存动态草稿但不发布；qzone_publish 参数 draft_id，在客户端空间发布开关开启后调用NapCat真实发布并返回tid；personas 列出版本；persona_import 参数 text/name/source；persona_apply 参数 revision,target(owner或group:群号),new(默认false保留历史)；memory_search 参数query；memory_save 参数text/category/evidence(owner_quote、image_observation、web_source、model_inference)/source_message_id/source_quote/source_url；主人原话必须逐字引用并给实际消息编号，网络资料及模型推测保存为候选，工具身份不代表主人确认；memory_delete 参数id（群里只管理本群记忆，私聊管理主人记忆）；group_get/group_set 参数 group_id/settings(如reply、mode、debounce_s、reply_limits)；schedule_list；schedule_create 参数 target,title,prompt 及一个时间选择 after_seconds/every_seconds/at/daily；at={date,time,time_zone}，daily={time,time_zone}，时区Asia/Shanghai，周期使用实际时间参数，不另设第二套频率规则；schedule_update 参数 id,title,prompt,change；schedule_delete 参数id。先查询实际编号，再执行并按回执报告。',
          'parameters':schema({'action':string,'params':{'type':'object','description':'对应 action 的参数对象，结构见工具说明'}},['action'])},
@@ -639,15 +639,14 @@ class ToolHost:
                 raise
             return self.unbound(role, session, name)
         if name == 'fish_think_again':
-            from group_proactive import request_self_wake as _self_wake
-            scope = str(identity.get('scope') or '')
-            if not scope.startswith('chat:group:'):
-                raise ValueError('只有群聊里才需要“再看一眼”')
-            chat = scope[len('chat:'):]
-            out = _self_wake(self.root, chat, arguments.get('interest'), arguments.get('topic', ''),
-                             arguments.get('delay', 3))
-            return {**out, 'delay_s': max(3.0, min(600.0, float(arguments.get('delay', 3) or 3))),
-                    'note': '已安排；本轮说完之后才会再看，不会打断当前思考'}
+            # The one main execution owns the agent's clock: this is a request to it,
+            # not a second scheduler. The program checks the fixed 0.7 interest floor.
+            runtime = getattr(self, 'runtime', None)
+            if runtime is None:
+                raise ValueError('主执行尚未启动，暂时不能安排续醒；请重载后台后再试')
+            out = runtime.execution.request_followup(arguments.get('interest'), arguments.get('topic', ''),
+                                                     call_id=str(call_id or ''))
+            return {**out, 'trigger': 'followup', 'note': out.get('note', '')}
         if name == 'fish_tool_list':
             # The shortlist trims what is advertised, never what can be executed; this
             # is how she finds the rest without paying for every schema every turn.
@@ -1722,7 +1721,7 @@ class ToolHost:
             if runtime is None:
                 raise PermissionError('主执行尚未启动，请重载后台')
             source = str(body.get('source') or '')
-            if source not in ('desktop', 'qq-private'):
+            if source not in ('desktop', 'qq-private', 'qq-group', 'plan'):
                 raise ValueError('未知输入来源')
             return runtime.execution.submit(
                 source=source, conversation=str(body.get('conversation') or ''),

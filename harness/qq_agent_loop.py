@@ -22,6 +22,7 @@ from dsh_web import DSHWebClient
 from qq_store import QQStore
 from multimodal import MediaService
 from governance import Governance, control_token
+from storage import database
 
 
 # Housekeeping is independent of the Fish-owned wake queue.
@@ -212,10 +213,6 @@ class QQAgentLoop:
             self.group_ids = {str(x) for x in (cfg.get("allowlist", {}).get("group_ids", []) or [])}
         except Exception:
             self.governance.fault('qq-channel', ValueError('QQ 通道配置无法读取'), stage='configuration')
-        self.group_locks: dict[str, asyncio.Lock] = {}
-        self.group_tasks: set[asyncio.Task] = set()
-        self.group_inbox: dict[str, dict] = {}
-        self.group_pumps: dict[str, asyncio.Task] = {}
         self.control_token = control_token(root)
         self._runtime_lock = asyncio.Lock()
         self.active_test_session = None
@@ -300,7 +297,7 @@ class QQAgentLoop:
         if self.maintenance_task:
             self.maintenance_task.cancel()
             await asyncio.gather(self.maintenance_task,return_exceptions=True)
-        tasks = list(self.group_tasks | self._notice_tasks)
+        tasks = list(self._notice_tasks)
         for task in tasks: task.cancel()
         if tasks: await asyncio.gather(*tasks, return_exceptions=True)
         if self.control_server is not None:
@@ -335,13 +332,8 @@ class QQAgentLoop:
                 await asyncio.to_thread(DataRetention(self.root).run)
             except Exception as exc:
                 self.governance.audit('data_maintenance_failed',type(exc).__name__)
-            try:
-                # 自主回合：原来没人调用（重构后断了线），这里接回同一个维护循环。
-                # 节拍与退避由 group_proactive 自己按 context-settings.json 判断。
-                from group_proactive import tick as autonomous_round
-                await autonomous_round(self)
-            except Exception as exc:
-                self.governance.audit('autonomous_round_failed', type(exc).__name__)
+            # 自主开口的旧节拍已退出：群消息的默认触发放在唯一主执行里，
+            # 45 分钟定时与三秒自唤醒由 06-01 接回同一条思考（不再另建生成路径）。
             try:
                 # 每日整理唯一入口：清理记忆 + 当天小结 + 挑表情；
                 # 小结由它内部调用 memory_digest.daily，这里不再单独调一遍，
@@ -432,54 +424,120 @@ class QQAgentLoop:
         sender = str((payload.get('sender') or {}).get('id') or '')
         if not sender or sender == str((self.channel.bot or {}).get('id') or ''):
             return
-        seen = GroupPolicy(self.root).observe(payload)
+        policy = GroupPolicy(self.root)
+        seen = policy.observe(payload)
         if not seen.get('accepted'):
             return
         text = ''.join(str(part.get('text') or '') for part in payload.get('segments') or [] if part.get('type') == 'text')
-        self._fish_record(chat, payload, text=text, direction='inbound', status='observed', reply_to=str(payload.get('reply_to') or ''))
-        self._fish_start({**payload, '_fish_observed': seen}, chat)
-
-    def _fish_start(self, payload: dict[str, Any], chat: str) -> None:
-        # All records are saved on arrival. The next thought snapshots their actual
-        # prefix, so a busy group never needs a silence window to make progress.
-        self.group_inbox[chat] = payload
-        current = self.group_pumps.get(chat)
-        if current is not None and not current.done():
+        message = self._fish_record(chat, payload, text=text, direction='inbound', status='observed',
+                                    reply_to=str(payload.get('reply_to') or ''))
+        if not message:
             return
-        async def drain():
-            while chat in self.group_inbox and not self._stop.is_set():
-                latest = self.group_inbox.pop(chat)
-                await self._fish_reply(latest, chat)
-        task = asyncio.create_task(drain(), name='fish-group-inbox:' + chat)
-        self.group_pumps[chat] = task
-        self.group_tasks.add(task)
-        task.add_done_callback(self._group_task_done)
+        try:
+            self._fish_remember(chat, payload, text)
+        except Exception as exc:  # noqa: BLE001 - a memory miss never costs a group reply
+            self.governance.audit('group_fish_memory_failed', type(exc).__name__ + ': ' + str(exc)[:200])
+        # The group's own settings decide whether she may speak here at all. A group
+        # with reply switched off still records and learns, but nothing is submitted
+        # for a turn; a group that may reply hands the stored event to the one main
+        # execution exactly like the private and client entries do.
+        try:
+            config = policy.config(chat)
+        except Exception as exc:  # noqa: BLE001 - an unreadable policy proves nothing
+            self.governance.audit('group_fish_config_unreadable', type(exc).__name__ + ' ' + chat)
+            return
+        if not (config.get('listen') and config.get('reply') and str(config.get('engine')) == 'fish'):
+            return
+        await self._submit_group(payload, chat, message, text)
 
-    def _group_task_done(self, task: asyncio.Task) -> None:
-        self.group_tasks.discard(task)
-        if not task.cancelled() and task.exception() is not None:
-            # Reading it keeps asyncio from reporting an exception nobody awaits.
-            log('group fish task ended: ' + type(task.exception()).__name__)
+    async def _submit_group(self, payload: dict[str, Any], chat: str, message: int, text: str = '') -> None:
+        """Hand one stored group message to the host's one main execution."""
+        from tool_host import request
+        body = {'source': 'qq-group',
+                'conversation': self._group_conversation(chat),
+                'message': message, 'text': text,
+                'reference': 'qq:' + str(message), 'kind': 'message',
+                'payload': {key: payload.get(key) for key in
+                            ('chat_id', 'message_id', 'sender', 'segments', 'reply_to', 'text',
+                             'mentions_bot', 'reply_to_bot')}}
+        try:
+            submission = await asyncio.to_thread(request, self.root, '/submit', body,
+                                                 role='qq', admin=True, timeout=30)
+        except Exception as exc:  # noqa: BLE001 - the ledger keeps the real reason
+            self.store.update_message(message, status='failed', error='未能提交给 Fish 主执行：' + str(exc)[:300])
+            await self._fault('group-fish:' + chat, exc, stage='binding')
+            return
+        self.store.update_message(message, status='submitted',
+                                  runtime_turn_id=submission.get('execution', ''))
+        self._watch_turn(submission.get('execution', ''), source='group-fish:' + chat, chat=chat)
 
-    def _fish_live(self, policy, token) -> bool:
-        """Still allowed to send: the owner has not paused and the reservation is mine.
+    def _group_conversation(self, chat: str) -> str:
+        return str(self.store.get_or_create_conversation(chat, 'qq')['id'])
 
-        Deliberately not policy.valid(): a message that arrived while this reply was
-        generating would fail that check, and no reply would ever leave. The single
-        sender is still guaranteed - no other task can reserve this chat meanwhile.
+    def watch_turn(self, execution: str, *, source: str, chat: str = '') -> None:
+        if not execution:
+            return
+        task = asyncio.create_task(self._watch_turn(execution, source=source, chat=chat),
+                                   name='fish-turn:' + str(execution))
+        self._private_watches.add(task)
+        task.add_done_callback(self._private_watches.discard)
 
-        policy.live() re-reads the chat's authorisation as well (engine=fish, listen,
-        reply), so this one predicate also answers 'was the engine rolled back or a
-        switch withdrawn while I was generating?'. Every send point asks it again:
-        before the reply is released and once per segment inside _deliver_reply.
+    async def _watch_turn(self, execution: str, *, source: str, chat: str = '') -> None:
+        """Report what actually happened to one submitted turn; never invent a result.
+
+        The turn, its tools and its reply run in the background host. This watcher
+        only reads the real ledger, so silence, failure and an unconfirmed send stay
+        distinguishable and still reach the owner through the existing fault notices.
         """
-        return not self.governance.config()['paused'] and bool(policy.live(token))
+        row: dict[str, Any] = {}
+        deadline = time.monotonic() + 900
+        self.active_turn = execution
+        while not self._stop.is_set() and time.monotonic() < deadline:
+            try:
+                row = await self._turn_row(execution)
+            except Exception as exc:  # noqa: BLE001 - a transient read never invents a state
+                self.governance.audit('owner_turn_status_unavailable', type(exc).__name__)
+                await asyncio.sleep(1)
+                continue
+            if str(row.get('status') or '') not in ('queued', 'running'):
+                break
+            await asyncio.sleep(0.5)
+        if self.active_turn == execution:
+            self.active_turn = None
+        status = str(row.get('status') or '')
+        result = row.get('result') or ''
+        if isinstance(result, str):
+            try:
+                result = json.loads(result or '{}')
+            except ValueError:
+                result = {}
+        result = result if isinstance(result, dict) else {}
+        delivery = result.get('delivery') if isinstance(result.get('delivery'), dict) else {}
+        if status == 'complete':
+            await self._recovered(source, stage='model')
+            state = str(delivery.get('state') or '')
+            if state == 'uncertain':
+                await self._fault(source, {'code': delivery.get('error') or '投递结果未确认',
+                                           'may_have_sent': True}, stage='delivery', uncertain=True)
+            elif state in ('failed', 'blocked'):
+                await self._fault(source, delivery.get('error') or '投递失败', stage='delivery')
+            else:
+                await self._recovered(source, stage='delivery')
+        elif status == 'silent':
+            self._silent(source)
+        elif status == 'failed':
+            await self._fault(source, row.get('error') or '这一轮没有完成', stage='model')
+        elif status == 'cancelled':
+            self.governance.audit('turn_cancelled', str(row.get('error') or '') + ' ' + chat)
+        else:
+            await self._fault(source, '等待本轮结果超时，记录保留，未冒充完成', stage='model')
 
     def _fish_record(self, chat, payload, *, text, direction, status, remote='', reply_to=''):
         """What came in and what the channel accepted, in the group's own ledger.
 
         Only a row the group really saw may become history ('sent'), so an outbound
         whose receipt is unknown is stored as pending and never enters the next view.
+        Returns the ledger row id, which is the reference a turn is submitted with.
         """
         try:
             conversation = self.store.get_or_create_conversation(chat, 'qq')
@@ -491,10 +549,11 @@ class QQAgentLoop:
                 sender = str((payload.get('sender') or {}).get('id') or '')
                 channel_id = str(payload.get('message_id') or '')
                 segments = [s for s in (payload.get('segments') or []) if isinstance(s, dict)]
-            self.store.record_message(conversation['id'], chat, sender, direction, channel_id,
-                                      reply_to or None, segments, text, status)
+            return int(self.store.record_message(conversation['id'], chat, sender, direction, channel_id,
+                                                 reply_to or None, segments, text, status))
         except Exception as exc:  # a ledger miss must not undo a reply that already happened
             log('group fish ledger skipped: ' + type(exc).__name__)
+            return 0
 
     def _fish_remember(self, chat: str, payload: dict[str, Any], text: str) -> dict:
         """Queue one observed group message for learning, in this chat's own scope.
@@ -564,205 +623,6 @@ class QQAgentLoop:
             outcome.update(learned=False, reason=str(stored['skipped']))
         return outcome
 
-    async def _fish_reply(self, payload: dict[str, Any], chat: str, cancelled=None) -> None:
-        """engine=fish: one generated reply for one group cursor, sent once.
-
-        The single sender is GroupPolicy.reserve/finish: one live reservation per
-        chat and one per cursor, so of two inbound messages in one window, a
-        redelivered copy or a competing worker, exactly one wins and the others
-        return before any model call. The text leaves through _deliver_reply, the
-        group's only send path, quoted to the inbound message_id, and a receipt
-        that may have landed is finished as uncertain and never retried.
-        """
-        from group_policy import GroupPolicy
-        # 接力点名的放行由群策略判定，但它要留痕在群审计里：把记账口交进去，判定和
-        # 记账就发生在同一个决定上，不需要在主循环里把同一条规则再算一遍。
-        policy = GroupPolicy(self.root, audit=self.governance.audit)
-        cancel = cancelled if cancelled is not None else threading.Event()
-
-        def audit(kind, reason):
-            self.governance.audit(kind, reason[:250] + ' ' + chat)
-
-        def stopped():
-            return bool(cancel.is_set() or self.cancel_event.is_set())
-
-        if self.governance.config()['paused']:
-            return audit('group_fish_skipped', 'paused')
-        sender = str((payload.get('sender') or {}).get('id', ''))
-        if not sender or sender == str((self.channel.bot or {}).get('id', '')):
-            return audit('group_fish_skipped', 'own-or-missing-sender')
-        if stopped():
-            return audit('group_fish_skipped', 'cancelled')
-        seen = payload.get('_fish_observed') or policy.observe(payload)
-        if not seen.get('accepted'):
-            return  # duplicate copy, or this group is not listening: nothing to answer
-        cursor = int(seen['cursor'])
-        kind = 'direct' if (payload.get('mentions_bot') or payload.get('reply_to_bot')) else 'active'
-        inbound_text = ''.join(str(s.get('text') or '') for s in (payload.get('segments') or [])
-                               if isinstance(s, dict) and s.get('type') == 'text')
-        if not payload.get('_fish_observed'):
-            self._fish_record(chat, payload, text=inbound_text, direction='inbound',
-                              status='observed', reply_to=str(payload.get('reply_to') or ''))
-        # After this group accepted the message and before any generation: what the
-        # group said becomes this group's memory when it is learning. A memory miss
-        # is audited and costs the group nothing it was otherwise going to get.
-        try:
-            self._fish_remember(chat, payload, inbound_text)
-        except Exception as exc:  # noqa: BLE001 - a memory miss never costs a reply
-            audit('group_fish_memory_failed', type(exc).__name__ + ': ' + str(exc)[:200])
-        # 没有字不等于没有内容：纯图/纯表情/语音这一条的字是空的，图还在段里。她"看
-        # 不见"的正是这种消息，所以先问一句这条到底有没有带东西，再决定要不要把"只 @
-        # 了你，没有写正文"交下去——带了图就不是"没写正文"。
-        from group_decide import media_line
-        media = media_line([s for s in (payload.get('segments') or []) if isinstance(s, dict)],
-                           str((payload.get('sender') or {}).get('display_name')
-                               or (payload.get('sender') or {}).get('name') or ''))
-        if kind == 'direct' and not inbound_text.strip() and not media:
-            # A bare @ carries no words, so the model used to see an empty turn and
-            # answer nothing: being called out was treated as having nothing to say.
-            # Tell it what actually happened instead of leaving the turn empty.
-            payload = {**payload, 'segments': [*(payload.get('segments') or []),
-                                               {'type': 'text', 'text': '[对方只 @ 了你，没有写正文]'}]}
-        token = policy.reserve(chat, cursor, kind)
-        refused: dict = {}
-        if not token:
-            # A newer message took the cursor during the merge window. The old DSH
-            # path had a later tick that answered the newest message; the fish path
-            # runs once per inbound, so without this retarget a burst is answered by
-            # nobody and the group goes silent. Answer the newest message instead.
-            snapshot = policy.snapshot(chat, limit=1)
-            candidate = policy.candidate(chat)
-            refused = candidate
-            if candidate.get('action') == 'candidate':
-                token = policy.reserve(chat, int(candidate['cursor']), candidate['kind'])
-                if token:
-                    cursor, kind = int(candidate['cursor']), candidate['kind']
-                    newest = (snapshot.get('messages') or [None])[-1]
-                    if isinstance(newest, dict) and newest.get('message_id'):
-                        payload = {
-                            'chat_id': chat, 'message_id': newest.get('message_id'),
-                            'sender': newest.get('sender') or {},
-                            'segments': newest.get('segments') or [],
-                            'reply_to': newest.get('reply_to') or '',
-                            'mentions_bot': bool(newest.get('direct')),
-                            'reply_to_bot': False,
-                        }
-        if not token:
-            reason = skip_reason(refused)
-            if reason == 'dive':
-                self.governance.audit('group_fish_dived', '潜水期间被叫到也没开口 ' + chat)
-            return audit('group_fish_skipped', reason)
-        sent = uncertain = False
-        try:
-            outcome = await self._fish_turn(policy, chat, payload, token, kind, cancel, sender, audit)
-            sent, uncertain = outcome['sent'], outcome['uncertain']
-        finally:
-            policy.finish(token, sent, uncertain=uncertain)
-    async def _fish_turn(self, policy, chat: str, payload: dict[str, Any], token: str, kind: str,
-                         cancel, sender: str, audit) -> dict:
-        """Generate, judge and deliver the reply one live reservation allows.
-
-        Shared by the first answer and by the single catch-up answer of the followup
-        window, so both go through the same _fish_live rechecks and worth_speaking:
-        the window adds a turn, never a bypass.
-        """
-        from group_decide import STICKER_ONLY, fish_candidate
-
-        def stopped():
-            return bool(cancel.is_set() or self.cancel_event.is_set())
-
-        def outcome(sent=False, uncertain=False):
-            return {'sent': sent, 'uncertain': uncertain}
-
-        source, stage = 'group-fish:' + chat, 'binding'
-        try:
-            if stopped() or self.governance.config()['paused']:
-                audit('group_fish_skipped', 'paused-or-cancelled'); return outcome()
-            # The group's own tool identity, bound before the model runs: /execute then
-            # answers for this chat's scope only. A binding that cannot be made means
-            # no tools and no reply, never a silent fall back to an owner identity.
-            from tool_host import bind_session
-            try:
-                from social_context import SocialContext
-                SocialContext(self.root).active_persona('qq')
-                bind_session(self.root, 'qq', 'group-fish:' + chat, 'chat:' + chat, sender)
-            except Exception as exc:  # noqa: BLE001 - fail closed, the group goes unanswered
-                await self._fault(source, exc, stage='binding')
-                audit('group_fish_skipped',
-                      'no-tool-identity: ' + type(exc).__name__ + ': ' + str(exc)[:120]); return outcome()
-            await self._recovered(source, stage='binding')
-            stage = 'model'
-            self.governance.consume('calls')  # the same paid-call accounting the DSH group path uses
-            candidate = await asyncio.to_thread(fish_candidate, self.root, chat, payload=payload, cancelled=cancel)
-            candidate = candidate if isinstance(candidate, dict) else {}
-            text = str(candidate.get('text') or '').strip()
-            # 这一轮要发的是候选自己组好的段：文字在前，表情在后。没给段就退回纯文字。
-            segments = [s for s in (candidate.get('segments') or []) if isinstance(s, dict)]
-            if str(candidate.get('error') or '').startswith('TurnSilent'):
-                # 她这一轮没有调用发送工具：turn_no_send 已经由决策层写进审计，这里
-                # 只结束这次预留——不算失败，也不算发过，更不会把她的正文送出去。
-                audit('group_fish_no_send', '她这一轮选择不开口，没有发出任何消息')
-                self._silent(source)
-                return outcome()
-            if candidate.get('error') or candidate.get('skipped') or not (text or segments):
-                if candidate.get('error') or not candidate.get('skipped'):
-                    await self._fault(source, candidate.get('error') or ValueError('模型没有返回可用结果'))
-                audit('group_fish_failed',
-                      str(candidate.get('error') or candidate.get('skipped') or 'empty-reply')[:200])
-                return outcome()
-            await self._recovered(source, stage='model')
-            if stopped() or not self._fish_live(policy, token):
-                audit('group_fish_skipped', 'cancelled-or-invalid-before-speaking'); return outcome()
-            audit('group_fish_decided', '同一 Fish 回合决定发送，未经过第二次模型打分或否决')
-            if stopped() or not self._fish_live(policy, token):
-                audit('group_fish_skipped', 'cancelled-or-invalid-before-deliver'); return outcome()
-            key = 'group-fish:' + str(payload.get('message_id') or uuid.uuid4().hex)
-            # 她要说的每一句都是她自己交出来的一条气泡：按顺序一条一条发，不把几条
-            # 拼回去——她分成两句说的，群里看到的就该是两句。
-            from chat_output import delivery_plan
-            bubbles = [bubble for bubble in (candidate.get('bubbles') or []) if isinstance(bubble, dict)]
-            plan = delivery_plan(bubbles) if bubbles else None
-            stage = 'delivery'
-            from experience import delivery
-            reference = candidate.get('source_reference', '')
-            if reference:
-                delivery(self.root, reference, sending=True)
-            delivered = await self._deliver_reply(
-                chat, segments or [{'type': 'text', 'text': text}], key, cancelled=cancel,
-                validate=lambda: self._fish_live(policy, token),
-                reply_to=str(payload.get('message_id') or ''), bubble_plan=plan)
-            sent = bool(delivered.get('ok'))
-            error = delivered.get('error') or {}
-            uncertain = not sent and bool(error.get('may_have_sent'))
-            if reference:
-                delivery(self.root, reference, outcome='sent' if sent else 'uncertain' if uncertain else 'failed')
-            self._fish_record(chat, payload, text=text, direction='outbound',
-                              status='sent' if sent else 'uncertain' if uncertain else 'failed',
-                              remote=str((delivered.get('payload') or {}).get('message_id') or ''),
-                              reply_to=str(payload.get('message_id') or ''))
-            if not sent:  # an unknown receipt is recorded here and never resent
-                await self._fault(source, error, stage='delivery', uncertain=uncertain)
-                audit('group_fish_uncertain' if uncertain else 'group_fish_failed',
-                      str(error.get('code') or 'send-failed')[:200])
-            else:
-                await self._recovered(source, stage='delivery')
-            if sent and kind == 'active':
-                # Only a line the channel really accepted costs energy: a generation
-                # that was judged not worth saying, or a send that failed, is free.
-                try:
-                    cfg = policy.config(chat)
-                    if cfg['energy_enabled']:
-                        policy.spend_energy(chat, float(cfg['energy_cost']))
-                except Exception as exc:  # noqa: BLE001 - the bubble already left; a ledger miss must not undo it
-                    audit('group_energy_failed', type(exc).__name__ + ': ' + str(exc)[:160])
-            return outcome(sent, uncertain)
-        except TimeoutError:
-            await self._fault(source, TimeoutError('本轮等待超时'), stage=stage)
-            audit('group_fish_timeout', '实际模型请求或工具等待超时，未冒充沉默'); return outcome()
-        except Exception as exc:  # noqa: BLE001 - one failed reply never breaks the group path
-            await self._fault(source, exc, stage=stage)
-            audit('group_fish_failed', type(exc).__name__ + ': ' + str(exc)[:200]); return outcome()
-
     # ------------------------------------------------------- owner private wiring
     def watch_private(self, execution: str, item: dict[str, Any]) -> None:
         """Follow one submitted turn to its real outcome; the host owns the turn."""
@@ -828,6 +688,93 @@ class QQAgentLoop:
         else:
             await self._fault('owner-private', '等待本轮结果超时，记录保留，未冒充完成', stage='model')
 
+    async def group_deliver(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Send decided bubbles into one group; the group's own settings own the gate.
+
+        This is the transport end of the delivery module for groups. The group policy
+        still decides whether this chat may receive a reply at all (listen/reply/
+        engine/dive/quiet/hourly limit); the turn itself was already made.
+        """
+        from chat_output import delivery_plan
+        from chat_output import segments as bubble_segments
+        from group_policy import GroupPolicy
+        chat = str(data.get('target') or '')
+        bubbles = data.get('bubbles') or []
+        if not chat.startswith('group:') or not isinstance(bubbles, list) or not bubbles:
+            return {'ok': False, 'error': '群投递目标或气泡无效'}
+        policy = GroupPolicy(self.root, audit=self.governance.audit)
+        direct = bool(data.get('direct'))
+        blocked = self._group_blocked(policy, chat, direct=direct)
+        if blocked:
+            return {'ok': True, 'sent': False, 'state': 'blocked', 'error': blocked, 'receipt': {}}
+        plan = delivery_plan(bubbles)
+        parts = [segment for bubble in bubbles for segment in bubble_segments(bubble)]
+        text = ''.join(str(part.get('text') or '') for part in parts if part.get('type') == 'text')
+        key = str(data.get('key') or ('group-fish:' + uuid.uuid4().hex))
+        reply_to = str(data.get('reply_to') or '')
+        reference = str(data.get('reference') or '')
+        from experience import delivery
+        if reference:
+            delivery(self.root, reference, sending=True)
+        delivered = await self._deliver_reply(
+            chat, parts, key, validate=lambda: self._group_blocked(policy, chat, direct=direct) is None,
+            validation_error='群设置已改变，未继续发送', reply_to=reply_to, bubble_plan=plan)
+        sent = bool(delivered.get('ok'))
+        error = delivered.get('error') or {}
+        interrupted = bool(error.get('validation_failed') or error.get('cancelled'))
+        state = ('sent' if sent else 'uncertain' if error.get('may_have_sent')
+                 else 'cancelled' if interrupted else 'blocked' if error.get('blocked') else 'failed')
+        if reference:
+            delivery(self.root, reference, outcome=state, error=str(error.get('code') or ''))
+        self._fish_record(chat, {'message_id': reply_to}, text=text, direction='outbound',
+                          status=state, remote=str((delivered.get('payload') or {}).get('message_id') or ''),
+                          reply_to=reply_to)
+        if not sent:
+            await self._fault('group-fish:' + chat,
+                              {'code': error.get('code') or '群投递失败',
+                               'may_have_sent': bool(error.get('may_have_sent'))},
+                              stage='delivery', uncertain=state == 'uncertain')
+        return {'ok': True, 'sent': sent, 'state': state, 'error': str(error.get('code') or ''),
+                'receipt': {'message_id': str((delivered.get('payload') or {}).get('message_id') or ''),
+                            'message_ids': (delivered.get('payload') or {}).get('message_ids') or []}}
+
+    def _group_blocked(self, policy, chat: str, *, direct: bool = False):
+        """The real reason this group cannot receive a reply now, or None."""
+        try:
+            if self.governance.config()['paused']:
+                return '主人已暂停回复'
+            config = policy.config(chat)
+        except Exception as exc:  # noqa: BLE001 - an unreadable policy refuses, never guesses
+            return '群设置无法读取：' + type(exc).__name__
+        if not config.get('listen'):
+            return '这个群没有开启接收'
+        if not config.get('reply'):
+            return '这个群没有开启 Fish 回复'
+        if str(config.get('engine')) != 'fish':
+            return '这个群当前不是 Fish 回复引擎'
+        if float(config.get('dive_until') or 0) > time.time():
+            return '潜水期间不发送'
+        try:
+            if policy._quiet({**config}, time.time()):
+                return '免打扰时段不发送'
+        except Exception:  # noqa: BLE001 - a quiet-hours miss must not block a reply
+            pass
+        if not direct and config.get('reply_limits'):
+            limit = int(config.get('max_active_hour') or 0)
+            if limit > 0 and self._active_last_hour(chat) >= limit:
+                return '这个群每小时的主动消息已达到上限'
+        return None
+
+    def _active_last_hour(self, chat: str) -> int:
+        since = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() - 3600))
+        try:
+            with database(self.store.db_path) as db:
+                return int(db.execute(
+                    "SELECT COUNT(*) FROM messages WHERE chat_id=? AND direction='outbound' "
+                    "AND status IN ('sent','done') AND ts>=?", (chat, since)).fetchone()[0])
+        except Exception:  # noqa: BLE001 - a count that cannot be read is not proof of a limit
+            return 0
+
     async def private_deliver(self, data: dict[str, Any]) -> dict[str, Any]:
         """Send what the host's turn decided to say; the channel owns the receipt.
 
@@ -860,14 +807,14 @@ class QQAgentLoop:
     async def cancel(self) -> dict[str, Any]:
         self.cancel_event.set()
         self.private_cancel.set()
-        for task in list(self.group_tasks):
-            task.cancel()
         info: dict[str, Any] = {}
         if self.conversation:
             try:
                 from tool_host import request
+                # The owner's explicit stop covers every place, not only the
+                # conversation the command arrived on.
                 info = await asyncio.to_thread(request, self.root, '/turn/cancel',
-                                               {'conversation': self.conversation['id']},
+                                               {'conversation': ''},
                                                role='qq', admin=True, timeout=20)
             except Exception as exc:  # noqa: BLE001 - report the real failure below
                 self.governance.audit('owner_turn_cancel_unavailable', type(exc).__name__)
@@ -1096,7 +1043,11 @@ class QQAgentLoop:
                 if not isinstance(payload, dict):
                     body, status = b'{"ok":false,"error":"deliver body is not JSON"}', "400 Bad Request"
                 else:
-                    body = json.dumps(await self.private_deliver(payload), ensure_ascii=False).encode()
+                    if str(payload.get('target') or '').startswith('group:'):
+                        result = await self.group_deliver(payload)
+                    else:
+                        result = await self.private_deliver(payload)
+                    body = json.dumps(result, ensure_ascii=False).encode()
                     status = "200 OK"
             elif path == "/status":
                 body = json.dumps({
@@ -1105,7 +1056,7 @@ class QQAgentLoop:
                     "active_turn": self.active_turn,
                     "owner_mode": self.owner_mode().get(),
                     "private_turns": len(self._private_watches),
-                    "group_tasks": sum(not task.done() for task in self.group_tasks),
+                    "group_tasks": 0,
                     "source_mode": not getattr(sys, 'frozen', False),
                     "language_layer_version": 1,
                     "group_reply_style_version": 2,
@@ -1119,7 +1070,7 @@ class QQAgentLoop:
                     "event_queue": self.channel._events.qsize(),
                     "event_busy": self.channel._processing,
                     "runtime_follow_max_bytes": getattr(self.dsh, 'follow_max_bytes', None),
-                    "group_topic_jobs": len(self.group_tasks),
+                    "group_topic_jobs": 0,
                     "bot": self.channel.bot,
                     "counts": self.store.counts(),
                 }, ensure_ascii=False).encode()

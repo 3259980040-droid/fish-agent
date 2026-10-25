@@ -184,7 +184,8 @@ class DesktopChat:
                                  (cid, 'outbound', str(bubble.get('text') or ''),
                                   json.dumps(local_segments(self.root, bubble), ensure_ascii=False),
                                   'done', '', stamp))
-                conn.execute("UPDATE messages SET status='done',error='' WHERE id=?", (mid,))
+                if mid not in (None, 0, '0', ''):
+                    conn.execute("UPDATE messages SET status='done',error='' WHERE id=?", (mid,))
                 conn.execute('UPDATE conversations SET updated_at=? WHERE id=?', (stamp, cid))
                 conn.commit()
             self._committed = True

@@ -22,6 +22,7 @@ class FishRuntime:
         from .delivery import DeliveryModule
         from .execution import AgentState, ExecutionModule
         from .experience import ExperienceModule
+        from .plans import PlansModule
         from .settings import SettingsModule
         from .tools import ToolsModule
         self.state = AgentState(self.root)
@@ -30,6 +31,7 @@ class FishRuntime:
         self.experience = ExperienceModule(self)
         self.settings = SettingsModule(self)
         self.tools = ToolsModule(self)
+        self.plans = PlansModule(self)
         self.delivery = DeliveryModule(self)
         self.execution = ExecutionModule(self)
         self._started = False
