@@ -842,7 +842,7 @@ class ToolHost:
             if reference:
                 delivery(self.root, reference, sending=True)
             result = control.deliver_bubbles(target, [{'kind': 'text', 'text': text} for text in arguments['texts']],
-                prefix + ':tool:' + call_id, source='owner-reminder' if reminder else 'fish-autonomous',
+                prefix + ':tool:' + call_id, source_tools=[name], source='owner-reminder' if reminder else 'fish-autonomous',
                 scheduled=reminder, context='owner:schedule' if reminder else 'fish:autonomous')
             if reference:
                 delivery(self.root, reference, outcome=result['state'].lower())

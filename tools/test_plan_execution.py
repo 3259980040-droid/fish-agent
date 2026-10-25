@@ -88,7 +88,7 @@ class FakeTransport:
     sent = []
 
     @classmethod
-    def __call__(cls, target, text, request_id, segments=None):
+    def __call__(cls, target, text, request_id, segments=None, source_tools=()):
         cls.sent.append({'target': target, 'text': text, 'request_id': request_id})
         return {'ok': True, 'payload': {'message_id': 'fake-send-' + str(len(cls.sent))}}
 

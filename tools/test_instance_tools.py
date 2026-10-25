@@ -95,4 +95,21 @@ class InstanceToolTests(Fixture):
         self.assertEqual(json.loads(returned[2]['content'])['echo'],'成功')
         self.assertEqual([e['value']['call_id'] for e in trace.events if e['kind']=='tool_result'],['find','failed','good'])
 
+    def test_message_send_keeps_its_tool_name_until_each_local_bubble_leaves(self):
+        from unittest.mock import patch
+        from bot_control import BotControl
+        from fish_agent.settings.tools import ToolSettings
+        host=ToolHost(self.root);host.bind('qq','message-tool','owner',self.owner)
+        self.addCleanup(host.computer.interaction.close)
+        sent=[]
+        def transport(target,text,key,**options):
+            sent.append(text)
+            ToolSettings(self.root).save({'tools':{'fish_message_send':False}})
+            return {'ok':True,'payload':{'message_id':'receipt-'+str(len(sent))}}
+        with patch.object(BotControl,'_channel_transport',staticmethod(transport)):
+            result=host.execute('qq','message-tool','fish_message_send',{'target':'private:'+self.owner,'texts':['第一段','第二段']},'two-local-bubbles')
+        self.assertEqual(sent,['第一段'])
+        self.assertEqual(result['state'],'BLOCKED')
+        self.assertIn('fish_message_send',str(result))
+
 if __name__=='__main__':unittest.main()
