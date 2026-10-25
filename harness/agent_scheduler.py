@@ -37,8 +37,8 @@ class AgentScheduler:
         if seeded:
             return
         seeds = [
-            {'title': '两小时活动巡查', 'every_seconds': 7200, 'configuration_key': 'autonomy-patrol',
-             'prompt': '看看从上次交流后到现在的共同经历，重点关注最近两小时有人活动的群与主人近况。结合最近话题，决定是否接话、接梗、关心、整理记忆或做其他自己的事。无人活动的群不要打扰。说不说、去哪个场所，由你选择。'},
+            # 两小时巡查由主执行的 45 分钟默认触发取代（06-01）：新的自主机会不再
+            # 另建计划、另起一次生成；早晚问候仍是主人可见的明确计划。
             {'title': '早晨自主问候机会', 'daily': {'time': '07:00', 'time_zone': 'Asia/Shanghai'},
              'configuration_key': 'autonomy-morning', 'prompt': '现在是早晨，结合共同经历与真实近况，自己决定是否找主人或去有人的群问候、接话，或先做别的事。不要固定话术，休息中的群不打扰。'},
             {'title': '晚间自主问候机会', 'daily': {'time': '22:00', 'time_zone': 'Asia/Shanghai'},

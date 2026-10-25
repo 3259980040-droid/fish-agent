@@ -26,6 +26,8 @@ class ExperienceModule:
 
     def prepare(self, run, inputs, cancelled=None):
         """Assemble the materials of one claimed turn, with their real source references."""
+        if str(run.get('kind') or '') in ('timer', 'followup'):
+            return context.self_wake_materials(self.runtime, run, inputs, cancelled)
         if run['source'] == 'desktop':
             return context.desktop_materials(self.runtime, run, inputs, cancelled)
         if run['source'] == 'qq-private':

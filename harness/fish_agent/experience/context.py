@@ -312,3 +312,105 @@ def qq_private_materials(runtime, run, inputs, cancelled=None):
             'delivery_required': False, 'experience': experience_turn,
             'trace_reference': source['current_reference'],
             'conversation': conversation, 'message': message}
+
+
+def self_wake_materials(runtime, run, inputs, cancelled=None):
+    """A clock or follow-up turn: think about its place without pretending a message came.
+
+    The note is the only "current" content. Group material stays group-only (its own
+    dialogue), while the owner's private places keep their existing common-experience
+    view. Nothing here sends anything: she decides, using the same tools as always.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from desktop_context import DesktopContext
+    from experience import ExperienceTurn
+    from governance import Governance
+    from memory_store import MemoryStore
+    from conversation_style import private_context
+    from tool_host import bind_session
+
+    root, role = runtime.root, 'qq'
+    source = str(run['source'])
+    conversation = str(run['conversation'])
+    place = str(run.get('place') or '')
+    persona = runtime.settings.snapshot(role)['persona']
+    now = datetime.now(ZoneInfo('Asia/Shanghai'))
+    stamp = now.strftime('%Y-%m-%d %H:%M:%S')
+    kind = str(run['kind'])
+    reason = str(run.get('reason') or '')
+    note = ('[自主思考机会] ' + ('45 分钟到了' if kind == 'timer' else '你刚才请求 3 秒后再看一眼')
+            + (('（' + reason + '）') if reason and reason != '45分钟到了' else '')
+            + '。现在是 ' + stamp + '（北京时间）。看看最近的共同经历，决定说点什么、做点事，'
+              '或者什么都不做；没有新消息也可以继续想。想开口就调用这个场所的发送工具，不开口就不要调用。')
+    event = {'reference': 'self:' + str(run['id']), 'created_at': stamp, 'text': note, 'reply_to': ''}
+    if source == 'qq-group':
+        from group_decide import _dialogue, _group_memory, _names
+        chat = place
+        if not chat.startswith('group:'):
+            raise ValueError('自主回合缺少群场所，未生成内容')
+        path = root / 'data/qq/qq.db'
+        names = _names(root, chat)
+        history = []
+        for item in _dialogue(root, chat, names)[-12:]:
+            try:
+                message = json.loads(item.get('message') or '{}')
+            except (TypeError, ValueError):
+                continue
+            if isinstance(message, dict) and message.get('role') in ('user', 'assistant'):
+                history.append({'role': message['role'], 'content': message.get('content') or '',
+                                '_fish_layer': 1})
+        session = 'group-fish:' + chat
+        bind_session(root, role, session, 'chat:' + chat, '')
+        experience_turn = ExperienceTurn(root, path, conversation, None, channel=chat, event=event)
+        experience_turn.session = session
+        experience_turn.persona_revision = persona['id']
+        _, source_info = experience_turn.prepare(cancelled)
+        return {'persona': persona, 'history': history, 'history_source': source_info,
+                'memory': _group_memory(root, chat, note), 'scope': 'chat:' + chat,
+                'references': '', 'current': [{'type': 'text', 'text': note}], 'session': session,
+                'emoji_state': {'previewed': set(), 'tools': []}, 'tool_context': 'group',
+                'delivery_required': False, 'experience': experience_turn,
+                'trace_reference': source_info['current_reference'],
+                'conversation': conversation, 'message': '', 'chat': chat}
+    if source == 'qq-private':
+        path = root / 'data/qq/qq.db'
+        owner = str(Governance(root, role).owner_id())
+        if not owner:
+            raise ValueError('尚未配置主人账号，未生成自主回合')
+        session = 'qq-private:' + conversation
+        bind_session(root, role, session, 'owner', owner, False, chat_mode='owner')
+        memory = MemoryStore(root, role)
+        experience_turn = ExperienceTurn(root, path, conversation, None, channel='qq', event=event)
+        experience_turn.session = session
+        experience_turn.persona_revision = persona['id']
+        history, source_info = experience_turn.prepare(cancelled)
+        references = library_references(root, private_context(root, '', conversation=conversation),
+                                       'owner-private', [])
+        return {'persona': persona, 'history': history, 'history_source': source_info,
+                'memory': memory.context(note, 'owner'), 'scope': 'owner',
+                'references': references, 'current': [{'type': 'text', 'text': note}], 'session': session,
+                'emoji_state': {'previewed': set(), 'tools': []}, 'tool_context': 'owner-private',
+                'delivery_required': False, 'experience': experience_turn,
+                'trace_reference': source_info['current_reference'],
+                'conversation': conversation, 'message': ''}
+    if source == 'desktop':
+        path = root / 'data/qq/desktop-chat.db'
+        session = 'desktop:' + conversation
+        bind_session(root, role, session, 'owner', '', True)
+        memory = MemoryStore(root, role)
+        experience_turn = ExperienceTurn(root, path, conversation, None, channel='desktop', event=event)
+        experience_turn.session = session
+        experience_turn.persona_revision = persona['id']
+        history, source_info = experience_turn.prepare(cancelled)
+        references = library_references(root, private_context(root, '', conversation=conversation, desktop=True),
+                                       'owner-desktop', [])
+        return {'persona': persona, 'history': history, 'history_source': source_info,
+                'memory': memory.context(note, 'owner'), 'scope': 'owner',
+                'references': references, 'current': [{'type': 'text', 'text': note}], 'session': session,
+                'emoji_state': {'previewed': set(), 'tools': []}, 'tool_context': 'owner-desktop',
+                'delivery_required': False, 'experience': experience_turn,
+                'trace_reference': source_info['current_reference'],
+                'conversation': conversation, 'message': ''}
+    raise ValueError('自主回合没有可思考的场所：' + (source or '(空)'))

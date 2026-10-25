@@ -114,15 +114,38 @@ class AgentState:
                                   values).fetchone()[0])
 
     # ------------------------------------------------------------------ runs
-    def create_run(self, *, kind, source, conversation='', request='', input_reference=''):
+    def create_run(self, *, kind, source, conversation='', request='', input_reference='',
+                   reason='', place=''):
         run_id = uuid.uuid4().hex
         now = time.time()
         with database(self.path) as db:
-            db.execute('INSERT INTO agent_runs(id,kind,source,conversation,request,status,created,inputs)'
-                       ' VALUES(?,?,?,?,?,?,?,?)',
+            db.execute('INSERT INTO agent_runs(id,kind,source,conversation,request,status,created,inputs,reason,place)'
+                       ' VALUES(?,?,?,?,?,?,?,?,?,?)',
                        (run_id, kind, source, str(conversation), str(request), QUEUED, now,
-                        json.dumps([input_reference] if input_reference else [], ensure_ascii=False)))
+                        json.dumps([input_reference] if input_reference else [], ensure_ascii=False),
+                        str(reason)[:500], str(place)))
         return run_id
+
+    # ------------------------------------------------------------- agent clock
+    def get_state(self, key, default=''):
+        with database(self.path) as db:
+            row = db.execute('SELECT value FROM agent_state WHERE key=?', (str(key),)).fetchone()
+        return row['value'] if row is not None else default
+
+    def set_state(self, key, value):
+        with database(self.path) as db:
+            db.execute('INSERT INTO agent_state(key,value,updated) VALUES(?,?,?) '
+                       'ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated=excluded.updated',
+                       (str(key), str(value), time.time()))
+
+    def queued_or_running(self):
+        with database(self.path) as db:
+            return db.execute("SELECT 1 FROM agent_runs WHERE status IN ('queued','running') LIMIT 1").fetchone() is not None
+
+    def latest_place(self):
+        with database(self.path) as db:
+            row = db.execute('SELECT source,conversation,place FROM agent_inputs ORDER BY seq DESC LIMIT 1').fetchone()
+        return dict(row) if row is not None else None
 
     def run(self, run_id):
         """The real state of one turn; a merged turn answers with the run that covered it."""
