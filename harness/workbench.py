@@ -1189,8 +1189,27 @@ class Workbench:
             if action == 'attachments.batches':
                 source = str(params.get('source') or 'desktop')
                 place = source + ':' + cid
-                return {'place': place, 'batches': self.runtime().experience.batches.state(place),
-                        'limits': store.limits()}
+                batches = self.runtime().experience.batches.state(place)
+                # One batch row keeps the registration/window/read facts of this layer;
+                # each file's download, parse and index state is the attachment record's
+                # own truth, attached here by resource so it is not copied or guessed.
+                for batch in batches:
+                    for item in batch['items']:
+                        resource = str(item.get('resource') or '').split('#')[0]
+                        if not resource:
+                            continue
+                        try:
+                            record = store.get(resource)
+                        except Exception:  # noqa: BLE001 - a missing record leaves the ref visible
+                            record = None
+                        if record:
+                            item['attachment'] = {
+                                'id': record['id'], 'size': record['size'], 'type': record.get('type'),
+                                'processing': record.get('processing'),
+                                'indexed': bool((record.get('processing') or {}).get('indexed')),
+                                'preview': bool((record.get('processing') or {}).get('preview')),
+                            }
+                return {'place': place, 'batches': batches, 'limits': store.limits()}
             if action == 'attachments.list':
                 return store.list(cid)
             if action == 'attachments.search':
