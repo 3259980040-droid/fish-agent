@@ -429,7 +429,7 @@ def builtins(role):
          'parameters': schema({'resource_id': {'type': 'string'}, 'question': {'type': 'string'}}, ['resource_id', 'question'])},
         {'name': 'fish_image_view', 'description': '按图片resource_id查看真实原图、动图指定帧或局部。mode=original/crop/frame；box为原图像素[x0,y0,x1,y1]；frame从0开始。返回图像给当前主回合，不调用另一个描述模型。原动图不被覆盖。',
          'parameters': schema({'resource_id': {'type': 'string'}, 'mode': {'type': 'string', 'enum': ['original','crop','frame']}, 'box': {'type': 'array', 'items': {'type': 'integer'}, 'minItems': 4, 'maxItems': 4}, 'frame': {'type': 'integer', 'minimum': 0}}, ['resource_id'])},
-        {'name': 'fish_doc_search', 'description': '搜索当前范围已归档的资料：网页、文档和已索引附件共用真实资源登记。返回相关子块、必要上文、原件/URL来源和实际词法/语义模式。可按完整长问句查找，不仅匹配句首。',
+        {'name': 'fish_doc_search', 'description': '搜索本Fish实例各场所已归档的资料：网页、文档和已索引附件共用真实资源登记。返回相关子块、必要上文、来源场所、原件/URL和实际词法/语义模式。可按完整长问句查找，不仅匹配句首。',
          'parameters': schema({'query': {'type': 'string'}, 'limit': {'type': 'integer', 'minimum': 1, 'maximum': 50}}, ['query'])},
         {'name': 'fish_doc_read', 'description': '按真实资料编号取回原件位置与指定连续切片；使用next_ord继续读，不能把局部切片说成已读完整资料。',
          'parameters': schema({'doc_id': {'type': 'string'}, 'start': {'type': 'integer', 'minimum': 1}, 'count': {'type': 'integer', 'minimum': 1}}, ['doc_id'])},
@@ -976,12 +976,11 @@ class ToolHost:
             return store.search(str(arguments['query'])) if name.endswith('search') else store.detail(str(arguments['bvid']))
         if name in ('fish_knowledge_search', 'fish_knowledge_open'):
             # The graded entry reads the one Fish experience; its hits name the
-            # owning store. A bound group may search what she knows, while the
-            # document channel stays inside that group's own shelf.
+            # owning store and source place inside this instance.
             from knowledge import open as knowledge_open
             from knowledge import search as knowledge_search
             if group:
-                self.scope_allowed(identity, role, name, '统一检索：命中逐条标注来源，资料只读本群书架')
+                self.scope_allowed(identity, role, name, '统一检索：读取本Fish实例资料，命中逐条保留来源场所')
             elif not owner_main:
                 self.scope_refused(identity, role, name, '统一检索仅用于主人私聊、本地控制台或已授权的群')
             if name == 'fish_knowledge_search':
@@ -1454,10 +1453,10 @@ class ToolHost:
         scope = chat if group else 'owner'
         if name == 'fish_doc_search':
             from doc_store import search
-            return search(self.root, arguments['query'], scope=scope, limit=int(arguments.get('limit', 5)), with_status=True)
+            return search(self.root, arguments['query'], scope=None, limit=int(arguments.get('limit', 5)), with_status=True)
         if name == 'fish_doc_read':
             from doc_store import doc_detail
-            return doc_detail(self.root, arguments['doc_id'], scope=scope, start=int(arguments.get('start', 1)), count=int(arguments.get('count', 5)))
+            return doc_detail(self.root, arguments['doc_id'], scope=None, start=int(arguments.get('start', 1)), count=int(arguments.get('count', 5)))
         if name == 'fish_doc_save':
             from web_knowledge import WebKnowledge
             fetched = WebKnowledge(self.root).fetch_tool(str(arguments.get('url', '')))

@@ -336,8 +336,14 @@ def ingest(root, name, body, *, kind='txt', scope='owner', source='upload', url=
 
 
 def _resolve(db, doc_id, scope):
-    row = db.execute('SELECT doc_id FROM document_aliases WHERE alias=? AND scope=?', (doc_id, scope)).fetchone()
-    return row['doc_id'] if row else doc_id
+    if db.execute('SELECT 1 FROM document_docs WHERE doc_id=?', (doc_id,)).fetchone():
+        return doc_id
+    rows = db.execute('SELECT DISTINCT doc_id FROM document_aliases WHERE alias=?' +
+                      (' AND scope=?' if scope is not None else ''),
+                      (doc_id, scope) if scope is not None else (doc_id,)).fetchall()
+    if len(rows) > 1:
+        raise ValueError('旧资料别名对应多个来源，请用检索返回的真实资料编号读取')
+    return rows[0]['doc_id'] if rows else doc_id
 
 
 def list_docs(root, *, limit=200, scope='owner'):
@@ -391,11 +397,15 @@ def _score(text, tokens, phrase):
 
 def _pool(root, scope):
     with database(_prepare(root)) as db:
-        return [dict(row) for row in db.execute('SELECT c.*,d.source,d.url,d.original_path,d.scope,d.digest AS document_digest,d.fetched_at,s.heading '
+        versions = _versions(db)
+        return [{**dict(row), 'metadata': json.loads(row['metadata'] or '{}'), 'version': versions[row['doc_id']]}
+                for row in db.execute('SELECT c.*,d.source,d.url,d.original_path,d.scope,d.metadata,d.parent_version,d.resource_key,d.digest AS document_digest,d.fetched_at,s.heading '
                 'FROM document_chunks c JOIN document_docs d ON c.doc_id=d.doc_id '
-                'LEFT JOIN document_sections s ON s.id=c.parent WHERE d.active=1 AND d.scope=? '
+                'LEFT JOIN document_sections s ON s.id=c.parent WHERE d.active=1 '
+                + ('AND d.scope=? ' if scope is not None else '') +
                 'AND NOT EXISTS(SELECT 1 FROM document_docs newer WHERE newer.scope=d.scope AND newer.resource_key=d.resource_key '
-                'AND (newer.created>d.created OR (newer.created=d.created AND newer.rowid>d.rowid)))', (scope,))]
+                'AND (newer.created>d.created OR (newer.created=d.created AND newer.rowid>d.rowid)))',
+                (scope,) if scope is not None else ())]
 
 
 def retrieval_status(root, *, scope='owner'):
@@ -405,13 +415,19 @@ def retrieval_status(root, *, scope='owner'):
     model = _config(Path(root))['model']
     with database(_prepare(root)) as db:
         vectors = {r['id']: dict(r) for r in db.execute('SELECT id,model,dim,digest FROM document_embeddings WHERE model=?', (model,))}
-        last = db.execute('SELECT state FROM document_search_state WHERE scope=?', (scope,)).fetchone()
+        last = db.execute('SELECT state FROM document_search_state WHERE scope=?', (scope if scope is not None else '*',)).fetchone()
+        counts = db.execute('SELECT COUNT(*),COALESCE(SUM(d.chunks=0),0) FROM document_docs d WHERE d.active=1 '
+                            + ('AND d.scope=? ' if scope is not None else '') +
+                            'AND NOT EXISTS(SELECT 1 FROM document_docs newer WHERE newer.scope=d.scope AND newer.resource_key=d.resource_key '
+                            'AND (newer.created>d.created OR (newer.created=d.created AND newer.rowid>d.rowid)))',
+                            (scope,) if scope is not None else ()).fetchone()
     valid = sum(1 for row in pool if row['id'] in vectors and vectors[row['id']]['digest'] == text_digest(row['text']) and
                 worker is not None and vectors[row['id']]['dim'] == worker.dim)
     encoder = bool(worker and worker.status == 'ready' and worker.alive())
     ready = encoder and valid > 0
     reason = ('' if ready else '资料索引尚无有效向量' if encoder else worker.detail or '本地语义模型未就绪' if worker else '语义配置已关闭')
     return {'ready': ready, 'encoder_ready': encoder, 'model': model, 'indexed': valid, 'eligible': len(pool),
+            'documents': int(counts[0]), 'unindexed': int(counts[1]),
             'pending': len(pool) - valid, 'mode': 'hybrid' if ready else 'lexical', 'detail': reason,
             'fts5': True, 'last_query': json.loads(last['state']) if last else None}
 
@@ -440,12 +456,15 @@ def maintain(root, *, batch=64):
 
 
 def search(root, query, *, limit=5, scope='owner', with_status=False, document_ids=None):
+    """Search current revisions; None reads every source in this physical instance."""
+    import_legacy_web(root)
     tokens, phrase = tokens_of(query)
     sync_index(root)
     rows = _pool(root, scope)
     if document_ids is not None:
         rows = [row for row in rows if row['doc_id'] in document_ids]
     candidates = _fts_candidates(root, query) if tokens else {row['id'] for row in rows}
+    fts5 = candidates is not None
     if candidates is None:
         # No usable FTS index: stay lexical over the same pool, never blank.
         candidates = {row['id'] for row in rows}
@@ -484,17 +503,24 @@ def search(root, query, *, limit=5, scope='owner', with_status=False, document_i
         with database(_prepare(root)) as db:
             nearby = db.execute('SELECT ord,text FROM document_chunks WHERE doc_id=? AND ord BETWEEN ? AND ? ORDER BY ord',
                                 (row['doc_id'], row['ord']-1, row['ord']+1)).fetchall()
+            links = [dict(link) for link in db.execute('SELECT reference,created FROM document_links WHERE doc_id=?', (row['doc_id'],))]
         hits.append({'doc_id': row['doc_id'], 'doc_name': row['doc_name'], 'ord': row['ord'], 'text': row['text'],
                      'score': lexical.get(ident, 0.), 'semantic': semantic.get(ident), 'fused': fused[ident],
+                     'matched_by': ('fts5' if fts5 else 'lexical') + ('+semantic' if ident in semantic else ''),
                      'heading': row.get('heading') or '', 'parent': row['parent'], 'context': [dict(r) for r in nearby],
-                     'source': row['source'], 'url': row['url'], 'original_path': row['original_path'], 'fetched_at': row['fetched_at']})
+                     'source': row['source'], 'scope': row['scope'], 'metadata': row['metadata'],
+                     'version': row['version'], 'parent_version': row['parent_version'], 'resource_key': row['resource_key'],
+                     'links': links, 'url': row['url'], 'original_path': row['original_path'], 'fetched_at': row['fetched_at']})
     used = bool(semantic)
-    state = {'mode': 'hybrid' if used else 'lexical', 'label': '词法＋语义' if semantic else '仅词法：语义未就绪',
-             'ready': bool(semantic), 'model': status['model'], 'detail': '' if semantic else reason or '当前范围无有效语义命中',
+    label = '词法＋语义' if used else '仅词法：本次语义未命中' if status['ready'] else '仅词法：语义未就绪'
+    state = {'mode': 'hybrid' if used else 'lexical', 'label': label,
+             'ready': status['ready'], 'model': status['model'], 'detail': '' if semantic else reason or '本次语义未命中',
+             'status': 'matched' if hits else 'not-indexed' if status['documents'] and not rows else 'no-match',
+             'documents': status['documents'], 'eligible': status['eligible'], 'unindexed': status['unindexed'],
              'indexed': status['indexed'], 'pending': status['pending'], 'query_used_semantic': bool(semantic),
-             'fts5': True, 'lexical_candidates': len(candidates)}
+             'fts5': fts5, 'lexical_candidates': len(candidates)}
     with database(_prepare(root)) as db:
-        db.execute('INSERT OR REPLACE INTO document_search_state VALUES(?,?,?)', (scope, json.dumps(state, ensure_ascii=False), time.time()))
+        db.execute('INSERT OR REPLACE INTO document_search_state VALUES(?,?,?)', (scope if scope is not None else '*', json.dumps(state, ensure_ascii=False), time.time()))
     return {'results': hits, 'retrieval': state} if with_status else hits
 
 

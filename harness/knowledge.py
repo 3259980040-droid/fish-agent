@@ -93,6 +93,7 @@ def _message_item(root, hit):
     return {
         'reference': reference, 'kind': 'message', 'level': 'index', 'channel': 'messages',
         'snippet': hit['text'], 'store': hit['source'], 'place': hit['place'],
+        'source': hit['source'], 'sender': hit.get('sender') or '', 'quote': hit.get('quote') or '',
         'time': hit['time'], 'direction': hit['direction'], 'score': hit.get('rank'),
         'levels': {
             'index': {'level': 'index', 'kind': 'message', 'reference': reference,
@@ -110,6 +111,7 @@ def _catalog_item(entry):
     return {
         'reference': reference, 'kind': 'catalog', 'level': 'overview', 'channel': 'catalogs',
         'snippet': entry.get('gist') or '', 'store': entry.get('source') or '',
+        'source': entry.get('source') or '', 'place': entry.get('place') or '',
         'time': entry.get('start_time') or '', 'score': None,
         'levels': {
             'index': {'level': 'index', 'kind': 'catalog', 'reference': reference,
@@ -136,20 +138,23 @@ def _document_item(hit):
     ordinal = hit['ord']
     chunk_reference = doc_reference(hit['doc_id'], ordinal)
     doc_reference_value = doc_reference(hit['doc_id'])
-    matched = 'fts5+semantic' if hit.get('semantic') is not None else 'fts5'
+    matched = hit.get('matched_by') or ('fts5+semantic' if hit.get('semantic') is not None else 'fts5')
+    origin = {key: hit.get(key) for key in ('scope', 'source', 'metadata', 'version', 'parent_version', 'links')}
     return {
+        **origin,
         'reference': chunk_reference, 'kind': 'document', 'level': 'index', 'channel': 'documents',
         'snippet': str(hit.get('text') or '')[:200], 'store': 'doc:' + str(hit['doc_id']),
         'time': hit.get('fetched_at') or '', 'score': hit.get('fused'),
         'levels': {
             'index': {'level': 'index', 'kind': 'document_chunk', 'reference': chunk_reference,
-                      'snippet': str(hit.get('text') or '')[:200], 'matched_by': matched},
-            'overview': {'level': 'overview', 'kind': 'document_chunk', 'reference': chunk_reference,
+                      'snippet': str(hit.get('text') or '')[:200], 'matched_by': matched,
+                      'semantic': hit.get('semantic')},
+            'overview': {**origin, 'level': 'overview', 'kind': 'document_chunk', 'reference': chunk_reference,
                          'text': hit.get('text') or '', 'heading': hit.get('heading') or '',
                          'context': hit.get('context') or [], 'doc_name': hit.get('doc_name'),
                          'open': _open_tool(chunk_reference)},
-            'original': {'level': 'original', 'kind': 'document', 'reference': doc_reference_value,
-                         'available': bool(hit.get('original_path')),
+            'original': {**origin, 'level': 'original', 'kind': 'document', 'reference': doc_reference_value,
+                         'available': bool(hit.get('original_path') and Path(hit['original_path']).is_file()),
                          'original_path': hit.get('original_path') or '', 'url': hit.get('url') or '',
                          'open': _open_tool(doc_reference_value)},
         },
@@ -161,6 +166,7 @@ def _memory_item(hit):
     matched = str(hit.get('matched_by') or 'lexical')
     return {
         'reference': reference, 'kind': 'memory', 'level': 'index', 'channel': 'memories',
+        'scope': hit.get('scope') or '', 'source': hit.get('source') or '',
         'snippet': str(hit.get('text') or '')[:200], 'store': 'memory',
         'time': hit.get('observed_at') or '', 'score': hit.get('relevance'),
         'levels': {
@@ -183,6 +189,7 @@ def _digest_item(hit):
     return {
         'reference': reference, 'kind': 'digest', 'level': 'overview', 'channel': 'digests',
         'snippet': str(hit.get('text') or '')[:200], 'store': 'memory_digest',
+        'scope': hit.get('scope') or '', 'source': 'memory_digest',
         'time': hit.get('period') or '', 'score': hit.get('rank'),
         'levels': {
             'index': {'level': 'index', 'kind': 'digest', 'reference': reference,
@@ -196,31 +203,15 @@ def _digest_item(hit):
     }
 
 
-def _document_hits(root, query, limit, scope):
-    scopes = ['owner']
-    if scope and str(scope).startswith('chat:group:'):
-        scopes.append(str(scope))
-    hits, retrieval = [], []
-    for current in dict.fromkeys(scopes):
-        try:
-            result = doc_store.search(root, query, limit=limit, scope=current, with_status=True)
-        except Exception as exc:  # noqa: BLE001 - a broken library channel is reported, not fatal
-            retrieval.append({'scope': current, 'mode': 'lexical', 'ready': False,
-                              'detail': type(exc).__name__ + ': ' + str(exc)[:160], 'fts5': True})
-            continue
-        for hit in result.get('results') or []:
-            if hit['doc_id'] not in {item['doc_id'] for item in hits}:
-                hits.append(hit)
-        state = result.get('retrieval') or {}
-        retrieval.append({'scope': current, **state})
-    used = any(state.get('query_used_semantic') for state in retrieval)
-    reason = '；'.join(str(state.get('detail') or '') for state in retrieval if state.get('detail'))
-    mode = 'hybrid' if used else 'lexical'
-    return hits, {'mode': mode, 'used': used, 'scope': scopes,
-                  'indexed': sum(int(state.get('indexed') or 0) for state in retrieval),
-                  'pending': sum(int(state.get('pending') or 0) for state in retrieval),
-                  'detail': '' if used else reason or '资料语义向量未就绪',
-                  'fts5': True}
+def _document_hits(root, query, limit):
+    try:
+        result = doc_store.search(root, query, limit=limit, scope=None, with_status=True)
+    except Exception as exc:  # noqa: BLE001 - a broken library channel is reported, not fatal
+        return [], {'mode': 'lexical', 'used': False, 'ready': False,
+                    'status': 'read-failed', 'detail': type(exc).__name__ + ': ' + str(exc)[:160],
+                    'fts5': False}
+    state = result.get('retrieval') or {}
+    return result.get('results') or [], {**state, 'used': bool(state.get('query_used_semantic'))}
 
 
 def _memory_hits(root, query, limit):
@@ -231,8 +222,9 @@ def _memory_hits(root, query, limit):
         semantic = recalled.get('semantic') or {}
         used = semantic.get('status') == 'fused' and any(row.get('semantic') is not None for row in results)
         return results, {'mode': 'hybrid' if used else 'lexical', 'used': used,
+                         'ready': bool(semantic.get('ready')),
                          'status': semantic.get('status') or 'lexical-only',
-                         'detail': semantic.get('detail') or ('' if used else '记忆语义向量未就绪'),
+                         'detail': semantic.get('detail') or ('' if used else '本次语义未命中' if semantic.get('ready') else '记忆语义向量未就绪'),
                          'pending': semantic.get('pending') or 0, 'fts5': True}
     except Exception as exc:  # noqa: BLE001 - lexical memory remains usable
         rows = store.search(query, scope=None, limit=limit)
@@ -243,6 +235,7 @@ def _memory_hits(root, query, limit):
 
 def _semantic_summary(documents, memories):
     used = bool(documents.get('used') or memories.get('used'))
+    ready = bool(documents.get('ready') or memories.get('ready'))
     reasons = []
     if not documents.get('used'):
         reasons.append('资料：' + str(documents.get('detail') or '语义未就绪'))
@@ -251,7 +244,7 @@ def _semantic_summary(documents, memories):
     return {
         'used': used, 'status': 'fused' if used else 'lexical-only',
         'mode': 'hybrid' if used else 'lexical',
-        'label': '词法＋语义' if used else '仅词法：语义未就绪',
+        'label': '词法＋语义' if used else '仅词法：本次未使用语义' if ready else '仅词法：语义未就绪',
         'reason': '' if used else '；'.join(reasons),
         'query_used_semantic': used,
         'channels': {
@@ -266,7 +259,7 @@ def _semantic_summary(documents, memories):
 
 
 def search(root, query, *, limit=12, scope=None):
-    """Search every owning store, then present index/overview/original levels."""
+    """Search this instance's stores across places; scope is an originating-place hint."""
     root = Path(root)
     query = ' '.join(str(query or '').split())
     limit = max(1, min(50, int(limit)))
@@ -278,7 +271,7 @@ def search(root, query, *, limit=12, scope=None):
             'channels': {}, 'truncated': False, 'limit': limit}}
     message_hits = history_index.search(root, query, limit=max(6, limit * 2))
     catalogs = history_catalog.search_catalog(root, query, limit=max(3, limit // 2))
-    documents, document_state = _document_hits(root, query, max(3, limit), scope)
+    documents, document_state = _document_hits(root, query, max(3, limit))
     memories, memory_state = _memory_hits(root, query, max(3, limit))
     digests = memory_digest.search_digests(root, query, limit=max(2, limit // 3)).get('results') or []
 
@@ -364,11 +357,8 @@ def _open_catalog(root, ref, *, level, page, count):
 
 def _open_document(root, ref, *, level, page, count):
     start = ref['ord'] if ref.get('ord') is not None else max(1, int(page))
-    try:
-        detail = doc_store.doc_detail(root, ref['id'], scope=None, start=start, count=count)
-    except ValueError:
-        raise ValueError('资料不存在或已由主人删除') from None
-    reference = doc_reference(ref['id'], ref.get('ord')) if ref.get('ord') is not None else doc_reference(ref['id'])
+    detail = doc_store.doc_detail(root, ref['id'], scope=None, start=start, count=count)
+    reference = doc_reference(detail['doc_id'], ref.get('ord'))
     original = Path(str(detail.get('original_path') or ''))
     payload = {'reference': reference, 'kind': 'document', 'level': level,
                'doc_id': detail['doc_id'], 'doc_name': detail.get('name'),
@@ -376,7 +366,8 @@ def _open_document(root, ref, *, level, page, count):
                'chars': detail.get('chars'), 'url': detail.get('url') or '',
                'original_path': str(original) if detail.get('original_path') else '',
                'original_exists': bool(detail.get('original_path') and original.is_file()),
-               'preview': detail.get('preview') or [], 'next_ord': detail.get('next_ord')}
+               'preview': detail.get('preview') or [], 'next_ord': detail.get('next_ord'),
+               **{key: detail.get(key) for key in ('scope', 'source', 'metadata', 'parent_version', 'links')}}
     chunk = (detail.get('preview') or [None])[0]
     if chunk is not None:
         payload['chunk'] = chunk
@@ -385,6 +376,9 @@ def _open_document(root, ref, *, level, page, count):
     else:
         payload['note'] = ('原件保存在资料目录，按切片分页读取；本回答不声称已读完整文件'
                            if detail.get('original_path') else '这份资料只保存了切片，没有可打开的原件')
+    payload['original_status'] = 'available' if payload['original_exists'] else 'missing' if detail.get('original_path') else 'not-stored'
+    if payload['original_status'] == 'missing':
+        payload['note'] = '原件读取失败：登记的文件已不存在或不可访问；保留的切片仍可读取'
     return payload
 
 
