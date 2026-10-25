@@ -12,6 +12,7 @@ references a turn was already going to use.
 """
 from __future__ import annotations
 from locations import project_path
+from contextlib import closing
 
 import json
 import sqlite3
@@ -166,7 +167,7 @@ def load_segments(root, reference):
     if not path.is_file():
         return []
     try:
-        with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as db:
+        with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
             row = db.execute('SELECT segments FROM messages WHERE id=?', (int(ident),)).fetchone()
     except sqlite3.Error:
         return []

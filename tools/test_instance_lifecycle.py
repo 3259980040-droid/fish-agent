@@ -15,6 +15,11 @@ from fish_agent import get_runtime,reset_runtime
 from storage import read_json,write_json
 
 class InstanceLifecycle(Fixture):
+    def setUp(self):
+        super().setUp()
+        guard=patch('model_gateway.ModelGateway',side_effect=AssertionError('离线验收禁止真实模型'))
+        guard.start();self.addCleanup(guard.stop)
+
     def tearDown(self):
         self.doCleanups()
         super().tearDown()
@@ -22,7 +27,9 @@ class InstanceLifecycle(Fixture):
     def test_create_route_parallel_pause_and_reopen_real_windows(self):
         wb=Workbench(self.root)
         first=wb.dispatch('instances.create',{'name':'一号','persona':{'name':'甲','body':'人格甲唯一正文'},'running':False})
-        second=wb.dispatch('instances.create',{'name':'二号','persona':{'name':'乙','body':'人格乙唯一正文'},'running':False})
+        preset=wb.dispatch('personas.create',{'name':'乙','body':'人格乙唯一正文'})
+        self.assertTrue(any(p['revision']==preset['id'] for p in wb.dispatch('instances.presets',{})['presets']))
+        second=wb.dispatch('instances.create',{'name':'二号','persona':{'instance_id':'main','revision':preset['id']},'running':False})
         ids=[first['id'],second['id']]
         self.assertNotEqual(*ids)
         catalog=InstanceCatalog(self.root)
@@ -45,6 +52,7 @@ class InstanceLifecycle(Fixture):
         self.addCleanup(released.set)
         class Gateway:
             base='https://fake.invalid';model='fake-model'
+            def __init__(self,*args):pass
             def chat(self,messages,**options):
                 encoded=json.dumps(messages,ensure_ascii=False);requests.append(encoded)
                 if messages[-1]['role']=='tool':return ChatResult('',{},'stop')
@@ -61,7 +69,7 @@ class InstanceLifecycle(Fixture):
             cid_a=wb.dispatch('chat.new',{'instance_id':ids[0],'title':'甲对话'})['id']
             cid_b=wb.dispatch('chat.new',{'instance_id':ids[1],'title':'乙对话'})['id']
             a=wb.dispatch('chat.send',{'instance_id':ids[0],'id':cid_a,'text':'甲的私有原文'})
-            self.assertTrue(entered.wait(5),'第一窗口未进入替代模型')
+            self.assertTrue(entered.wait(5),str(wb.dispatch('chat.job',{'instance_id':ids[0],'job_id':a['job_id']})))
             b=wb.dispatch('chat.send',{'instance_id':ids[1],'id':cid_b,'text':'乙的私有原文'})
             deadline=time.monotonic()+5
             while time.monotonic()<deadline:
@@ -77,6 +85,23 @@ class InstanceLifecycle(Fixture):
                 if job['status'] not in ('queued','running'):break
                 time.sleep(.02)
             self.assertEqual(job['status'],'complete',job)
+        from tool_host import request
+        for iid in ids:
+            context=catalog.resolve(iid)
+            request(context.root,'/bind',{'role':'qq','session':'same-tools','scope':'owner','sender':self.owner,'desktop':True},role='qq')
+            def use(name,args):
+                return request(context.root,'/execute',{'session':'same-tools','name':name,'arguments':args,'call_id':name},role='qq',admin=False)
+            workspace=use('fish_workspace',{})
+            self.assertTrue(Path(workspace['files']).is_relative_to(context.workspace))
+            written=use('fish_file_write',{'path':str(Path(workspace['files'])/'result.txt'),'text':iid})
+            self.assertEqual(Path(written['path']).read_text(encoding='utf-8'),iid)
+            process=use('fish_shell',{'command':"[Console]::Write('instance-output')",'wait_seconds':5})
+            self.assertEqual(process['status'],'completed',process)
+            self.assertIn('instance-output',process['output'])
+            self.assertEqual(Path(process['workdir']),Path(workspace['files']))
+            self.assertTrue(Path(process['output_path']).is_relative_to(context.workspace))
+            persisted=use('fish_process',{'id':process['id'],'action':'status'})
+            self.assertEqual(persisted['output_path'],process['output_path'])
         for encoded in requests:
             self.assertFalse('人格甲唯一正文' in encoded and '人格乙唯一正文' in encoded)
             self.assertFalse('甲的私有原文' in encoded and '乙的私有原文' in encoded)

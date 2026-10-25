@@ -295,7 +295,7 @@ class Governance:
         stored["paused"] = False
         write_json(self.path, stored)
         self.audit("settings", "主人权限及本地规则已更新")
-        if 'paused' in updates or 'paused_roles' in updates:
+        if ('paused' in updates and self.agent_id=='qq') or 'qq' in updates.get('paused_roles',{}):
             from fish_agent.bootstrap import loaded_runtime
             runtime=loaded_runtime(self.root)
             if runtime is not None:

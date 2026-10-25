@@ -329,7 +329,7 @@ class InstanceCatalog:
         with _catalog_lock(self.host_root):
             directory.mkdir()
             _write(directory/'instance.json',{'id':instance_id,'host_root':str(self.host_root)})
-            for part in ('config','social','qq','resources','workspace','indexes'):(directory/part).mkdir()
+            for part in ('config','social','qq','resources','workspace'):(directory/part).mkdir()
             raw=_json(self.path,{})
             raw['instances'].append({'id':instance_id,'name':title,'initial':False,'created':time.time()})
             _write(self.path,raw)
