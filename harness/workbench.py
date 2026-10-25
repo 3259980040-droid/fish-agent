@@ -953,7 +953,9 @@ class Workbench:
                            ('merged_into:' + keep, _time.time(), drop))
             return {'keep': keep, 'drop': drop, 'drop_status': 'merged'}
         if action == 'memory.search':
-            return MemoryStore(self.root, 'qq').search(params.get('query', ''), scope='owner', limit=60, include_candidates=True)
+            # The page reads the one memory; each row keeps its source scope.
+            return MemoryStore(self.root, 'qq').search(params.get('query', ''), scope=None, limit=60,
+                                                      include_candidates=True)
         if action == 'memory.save':
             store = MemoryStore(self.root, 'qq')
             memory_id = params.get('id')
