@@ -295,6 +295,26 @@ class GroupExecutionTests(unittest.TestCase):
         self.assertEqual(len(FakeQQControl.received), 2)
         self.assertIn('等待第9句', fake.renders(2))
 
+    def test_the_host_transport_accepts_every_standard_source(self):
+        # Every entry submits through this one route; a missing stored record must
+        # fail the turn honestly instead of the route rejecting the source.
+        self.host.runtime = get_runtime(self.root)
+        cases = [
+            ('desktop', 'conv-x', {'message': 999999, 'reference': 'desktop:999999'}),
+            ('qq-private', self.conversation['id'], {'message': 999998, 'reference': 'qq:999998'}),
+            ('qq-group', self.conversation['id'], {'message': 999997, 'reference': 'qq:999997',
+                                                   'payload': {'chat_id': CHAT, 'message_id': 'x', 'mentions_bot': True}}),
+            ('plan', self.conversation['id'], {'message': 999996, 'reference': 'plan:x:y',
+                                               'kind': 'plan', 'payload': {}}),
+        ]
+        for source, conversation, extra in cases:
+            body = {'source': source, 'conversation': conversation, 'text': '', **extra}
+            result = self.host.dispatch('/submit', body, role='qq', admin=True)
+            self.assertTrue(result.get('execution'), (source, result))
+            settled = self.wait_run(get_runtime(self.root), result['execution'])
+            self.assertEqual(settled['status'], st.FAILED, (source, settled))
+            self.assertNotIn('未知输入来源', settled['error'])
+
     def test_a_paused_or_reply_off_group_never_reaches_a_turn(self):
         from qq_agent_loop import QQAgentLoop
         loop = QQAgentLoop(self.root)
