@@ -729,7 +729,7 @@ class MemoryMaintenance:
         return {'ok': True, 'conflicts': len(conflicts)}
 
 
-def start_background(host, root=None, *, interval: float = 60.0, embed_interval: float = 300.0):
+def start_background(host, root=None, *, interval: float = 60.0, embed_interval: float = 300.0, stop=None):
     """Host hook: one daemon thread running ``tick`` and embedding top-ups.
 
     ``host`` is the ToolHost (its ``stop`` event ends the loop). ``tick``
@@ -742,7 +742,7 @@ def start_background(host, root=None, *, interval: float = 60.0, embed_interval:
     existing = started.get('thread')
     if existing is not None and existing.is_alive():
         return existing                      # exactly one warm thread per root
-    stop = getattr(host, 'stop', None)
+    stop = stop if stop is not None else getattr(host, 'stop', None)
     if stop is None:
         stop = threading.Event()
     last_embed = 0.0

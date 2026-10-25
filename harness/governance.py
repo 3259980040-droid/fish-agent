@@ -295,6 +295,11 @@ class Governance:
         stored["paused"] = False
         write_json(self.path, stored)
         self.audit("settings", "主人权限及本地规则已更新")
+        if 'paused' in updates or 'paused_roles' in updates:
+            from fish_agent.bootstrap import loaded_runtime
+            runtime=loaded_runtime(self.root)
+            if runtime is not None:
+                runtime.stop() if cfg['paused_roles'].get('qq',False) else runtime.start()
         return cfg
 
     def is_owner(self, sender_id: str, *, private: bool = True) -> bool:

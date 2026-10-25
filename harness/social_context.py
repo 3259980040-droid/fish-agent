@@ -22,6 +22,10 @@ def identifier(value):
     return str(value)
 
 
+class PersonaNotConfigured(ValueError):
+    """A new instance has no owner-selected persona; no host default is borrowed."""
+
+
 class SocialContext:
     def __init__(self, root):
         self.root = Path(root)
@@ -129,6 +133,10 @@ class SocialContext:
             else:
                 default = db.execute('SELECT revision FROM default_personas WHERE role=?', (role,)).fetchone()
                 revision = default['revision'] if default else ''
+        if not revision:
+            from locations import instance_context, INITIAL_INSTANCE_ID
+            if role=='qq' and instance_context(self.root).instance_id!=INITIAL_INSTANCE_ID:
+                raise PersonaNotConfigured('这个Fish窗口尚未配置人格，请填写或选择人格后启动')
         persona = self.persona(revision) if revision else self.ensure_default(role)
         with database(self.path) as db:
             db.execute('INSERT OR IGNORE INTO agent_profiles VALUES(?,?,?)', (role, persona['id'], time.time()))
@@ -152,6 +160,9 @@ class SocialContext:
             row = db.execute('SELECT id FROM personas WHERE role=? ORDER BY created,id LIMIT 1', (role,)).fetchone()
         if row:
             return self.persona(row['id'])
+        from locations import instance_context, INITIAL_INSTANCE_ID
+        if role=='qq' and instance_context(self.root).instance_id!=INITIAL_INSTANCE_ID:
+            raise PersonaNotConfigured('这个Fish窗口尚未配置人格，请填写或选择人格后启动')
         from core import HarnessConfig
         agent = HarnessConfig(self.root).agent(role)
         if agent is None:
@@ -234,6 +245,10 @@ class SocialContext:
     def create_space(self, role, name='独立测试', *, revision='', origin='desktop'):
         if origin not in ('desktop', 'owner-qq', 'group'):
             raise ValueError('无效的会话入口')
+        if not revision:
+            from locations import instance_context, INITIAL_INSTANCE_ID
+            if role=='qq' and instance_context(self.root).instance_id!=INITIAL_INSTANCE_ID:
+                raise PersonaNotConfigured('这个Fish窗口尚未配置人格，请填写或选择人格后启动')
         persona = self.persona(revision) if revision else self.ensure_default(role)
         if persona['role'] != role:
             raise ValueError('人格版本不属于当前角色')
