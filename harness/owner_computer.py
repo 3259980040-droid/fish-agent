@@ -12,6 +12,7 @@ Identity and permission are two separate questions:
   reintroduces local file tools or project instructions, even while the owner
   remains authorized for future work.
 """
+from locations import project_path
 from pathlib import Path
 import requests
 from governance import Governance,control_token
@@ -20,8 +21,8 @@ from storage import read_json,database
 
 def workspace(root):
     root=Path(root)
-    value=read_json(root/'harness/owner-computer.json',{}).get('workspace','')
-    path=Path(value).resolve() if value else root/'qq-work/owner-files'
+    value=read_json(project_path(root, 'harness/owner-computer.json'),{}).get('workspace','')
+    path=Path(value).resolve() if value else project_path(root, 'qq-work/owner-files')
     path.mkdir(parents=True,exist_ok=True)
     return path
 
@@ -55,11 +56,11 @@ def authorized(root,identity):
                     and selected['session']==identity['session'])
     if scope.startswith('control:'):
         target = scope[8:]
-        cfg = read_json(Path(root)/'channels/fish_qq/config.json', {})
+        cfg = read_json(project_path(Path(root), 'channels/fish_qq/config.json'), {})
         allowed = target == 'private:' + policy.owner_id() or (
             target.startswith('group:') and target[6:] in [str(value) for value in cfg.get('allowlist', {}).get('group_ids', [])])
         if not allowed: return False
-        path=Path(root)/'data/social/owner-control.db'
+        path=project_path(Path(root), 'data/social/owner-control.db')
         if not path.exists():return False
         with database(path) as db:
             return bool(db.execute('SELECT 1 FROM sessions WHERE session=? AND target=?',

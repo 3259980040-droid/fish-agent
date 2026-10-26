@@ -15,6 +15,7 @@
 一条消息也不发。她的正文从此只是她的思考，和回复路径是同一个规矩。
 """
 from __future__ import annotations
+from locations import project_path
 
 import asyncio
 import json
@@ -98,7 +99,7 @@ def _take_self_wake(root, chat, now):
     try:
         import sqlite3 as _sqlite3
         from contextlib import closing as _closing
-        with _closing(_sqlite3.connect((Path(root) / 'data/qq/qq.db').resolve().as_uri() + '?mode=ro', uri=True)) as _db:
+        with _closing(_sqlite3.connect((project_path(Path(root), 'data/qq/qq.db')).resolve().as_uri() + '?mode=ro', uri=True)) as _db:
             fresh = int(_db.execute("SELECT COUNT(*) FROM messages WHERE chat_id=? AND direction='inbound' "
                                     "AND ts > datetime(?,'unixepoch','localtime')", (str(chat), last_attempt)).fetchone()[0])
     except Exception:
@@ -109,8 +110,8 @@ def _take_self_wake(root, chat, now):
 def _backoff(root):
     """Owner-tunable pacing: base/cap/start_after plus a busy-chat bypass."""
     from storage import read_json
-    settings = dict(read_json(Path(root) / 'harness/control.json'))
-    settings.update(read_json(Path(root) / 'harness/context-settings.json', {}) or {})
+    settings = dict(read_json(project_path(Path(root), 'harness/control.json')))
+    settings.update(read_json(project_path(Path(root), 'harness/context-settings.json'), {}) or {})
     return (float(settings.get('round_backoff_base', 15)),
             float(settings.get('round_backoff_cap', 300)),
             int(settings.get('round_backoff_start_after', 2)),
@@ -144,7 +145,7 @@ NOTES = ('这一轮没有谁在说话，是她自己想开口。别假装有人�
 
 
 def _path(root):
-    return Path(root) / 'data/social/group-policy.db'
+    return project_path(Path(root), 'data/social/group-policy.db')
 
 
 def _read(path, sql, args=()):
@@ -183,8 +184,8 @@ def _interval(config, root=None):
     override = {}
     if root is not None:
         from storage import read_json
-        merged = dict(read_json(Path(root) / 'harness/control.json'))
-        merged.update(read_json(Path(root) / 'harness/context-settings.json', {}) or {})
+        merged = dict(read_json(project_path(Path(root), 'harness/control.json')))
+        merged.update(read_json(project_path(Path(root), 'harness/context-settings.json'), {}) or {})
         override = {k: v for k, v in merged.items() if k in ('proactive_check_min_s', 'proactive_check_max_s')}
     source = {**config, **override}
     low = float(source.get('proactive_check_min_s') or DEFAULTS['proactive_check_min_s'])
@@ -234,7 +235,7 @@ def claim(root, chat, now=None):
             try:
                 import sqlite3 as _sqlite3
                 from contextlib import closing as _closing
-                with _closing(_sqlite3.connect((Path(root) / 'data/qq/qq.db').resolve().as_uri() + '?mode=ro', uri=True)) as _db:
+                with _closing(_sqlite3.connect((project_path(Path(root), 'data/qq/qq.db')).resolve().as_uri() + '?mode=ro', uri=True)) as _db:
                     burst = int(_db.execute("SELECT COUNT(*) FROM messages WHERE chat_id=? AND direction='inbound' "
                                             "AND ts > datetime(?,'unixepoch','localtime')", (str(chat), last_attempt)).fetchone()[0])
             except Exception:
@@ -272,7 +273,7 @@ def mark_sent(root, chat, now=None):
 
 def _quiet_since(root, chat, now):
     """Seconds since the group's last inbound line, or None when it has none."""
-    rows = _read(Path(root) / 'data/qq/qq.db',
+    rows = _read(project_path(Path(root), 'data/qq/qq.db'),
                  "SELECT ts FROM messages WHERE chat_id=? AND direction='inbound' ORDER BY id DESC LIMIT 1",
                  (str(chat),))  # 入站时间只从群消息账本读：安静多久是 qq.db 的事实
     if not rows:
@@ -283,7 +284,7 @@ def _quiet_since(root, chat, now):
 
 def _her_hour(root, chat, now):
     """(how many lines she delivered this hour, when the last one was)."""
-    rows = _read(Path(root) / 'data/qq/qq.db',
+    rows = _read(project_path(Path(root), 'data/qq/qq.db'),
                  "SELECT ts FROM messages WHERE chat_id=? AND direction='outbound' "
                  "AND COALESCE(status,'')='sent' ORDER BY id DESC LIMIT 40", (str(chat),))
     stamps = [stamp for stamp in (_stamp(row['ts']) for row in rows) if stamp > 0]

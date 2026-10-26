@@ -2,10 +2,11 @@
 
 QQStore migrates on open and GroupHistory creates tables, so both are avoided
 here: every store is opened with mode=ro and nothing is inserted, updated or
-created. A group is readable only when the channel allowlist lists it *and* the
+created. A group is readable only when this instance lists it *and* the
 owner's own stored read switch is on; no caller-supplied identity counts.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import re
@@ -66,26 +67,24 @@ def _object(value):
 
 def _channel(root):
     try:
-        return json.loads((Path(root) / 'channels/fish_qq/config.json').read_text(encoding='utf-8'))
+        return json.loads((project_path(Path(root), 'channels/fish_qq/config.json')).read_text(encoding='utf-8'))
     except (OSError, ValueError, TypeError):
         return {}
 
 
 def _allowed(root):
-    allow = _channel(root).get('allowlist')
-    if not isinstance(allow, dict):
-        return set()
-    return {str(group) for group in allow.get('group_ids') or []}
+    from fish_agent.settings.channels import ChannelSettings
+    return set(ChannelSettings(root).group_ids())
 
 
 def _policies(root):
     """Stored group rows, read directly: GroupPolicy.config() would insert one."""
-    rows = _query(Path(root) / 'data/social/group-policy.db', 'SELECT chat,config FROM groups')
+    rows = _query(project_path(Path(root), 'data/social/group-policy.db'), 'SELECT chat,config FROM groups')
     return {str(row['chat']): _object(row['config']) for row in rows}
 
 
 def _state(root, chat):
-    path = Path(root) / 'data/social/group-policy.db'
+    path = project_path(Path(root), 'data/social/group-policy.db')
     rows = _query(path, 'SELECT config FROM groups WHERE chat=?', (chat,))
     config = {**DEFAULTS, **_object(rows[0]['config'])} if rows else dict(DEFAULTS)
     seen = _query(path, 'SELECT COUNT(*) n FROM observations WHERE chat=?', (chat,))
@@ -153,19 +152,19 @@ def _space_stores(root, group, chat, message_ids):
     opened read-only; a missing or unreadable one simply contributes nothing.
     """
     routed = ''
-    rows = _query(Path(root) / 'data/social/context.db',
+    rows = _query(project_path(Path(root), 'data/social/context.db'),
                   'SELECT space FROM group_test_routes WHERE group_id=?', (str(group),))
     if rows and rows[0]['space']:
         routed = str(rows[0]['space'])
     windows = [str(row['space']) for row
-               in _query(Path(root) / 'data/social/context.db',
+               in _query(project_path(Path(root), 'data/social/context.db'),
                          'SELECT space FROM group_test_spaces WHERE group_id=? ORDER BY rowid DESC',
                          (str(group),))
                if str(row['space'] or '')]
     windows.sort(key=lambda sid: sid != routed)
     stores = []
     for space in windows:
-        path = Path(root) / 'data/qq/spaces' / space / 'group-policy.db'
+        path = project_path(Path(root), 'data/qq/spaces', space, 'group-policy.db')
         count = _observed_count(path, chat)
         if not count:
             continue
@@ -176,7 +175,7 @@ def _space_stores(root, group, chat, message_ids):
 
 def _roster_names(root, chat):
     """Group roster names: the group card first, then the QQ nickname."""
-    rows = _query(Path(root) / 'data/social/people.db',
+    rows = _query(project_path(Path(root), 'data/social/people.db'),
                   'SELECT user_id,nickname,card FROM members WHERE group_id=?', (chat[6:],))
     names = {}
     for row in rows:
@@ -192,7 +191,7 @@ def _names(root, chat, stores, message_ids):
     for store in stores:
         for mid, name in store['names'].items():
             snapshots.setdefault(mid, (name, store['label']))
-    return {'message': _observed(Path(root) / 'data/social/group-policy.db', chat, message_ids),
+    return {'message': _observed(project_path(Path(root), 'data/social/group-policy.db'), chat, message_ids),
             'snapshot': snapshots, 'sender': _roster_names(root, chat),
             'bot': str((bot or {}).get('display_name') or '').strip() if isinstance(bot, dict) else ''}
 
@@ -289,14 +288,14 @@ def _page(root, chat, start, end, before, limit):
         args.append(before)
     sql += ' ORDER BY id DESC LIMIT ?'
     args.append(limit + 1)
-    return _query(Path(root) / 'data/qq/qq.db', sql, tuple(args))
+    return _query(project_path(Path(root), 'data/qq/qq.db'), sql, tuple(args))
 
 
 def _quoted(root, chat, wanted):
     """Bounded lookup of quoted messages inside the same group."""
     found = {}
     for mid in wanted[:MAX_REFERENCES]:
-        rows = _query(Path(root) / 'data/qq/qq.db',
+        rows = _query(project_path(Path(root), 'data/qq/qq.db'),
                       'SELECT ' + _COLUMNS + ' FROM messages WHERE chat_id=? AND channel_message_id=? '
                       'ORDER BY id DESC LIMIT 1', (chat, mid))
         if rows:
@@ -326,7 +325,7 @@ def _current_space(root, group):
     space. Nothing is created or opened for writing, so listing permissions can
     never write.
     """
-    contexts = Path(root) / 'data/social/context.db'
+    contexts = project_path(Path(root), 'data/social/context.db')
     if not contexts.is_file():
         return ''
     routes = _query(contexts, 'SELECT space,owner FROM group_test_routes WHERE group_id=?', (str(group),))
@@ -383,12 +382,12 @@ def authorized_groups(root) -> list:
         routed = bool(space) and engine != 'fish'
         effective = merged
         if routed:
-            rows = _query(root / 'data/qq/spaces' / space / 'group-policy.db',
+            rows = _query(project_path(root, 'data/qq/spaces', space, 'group-policy.db'),
                           'SELECT config FROM groups WHERE chat=?', (chat,))
             # A routed window without a row for this group runs on DEFAULTS, which
             # GroupPolicy would also report; the main switches stay out of play.
             effective = {**DEFAULTS, **_object(rows[0]['config'])} if rows else dict(DEFAULTS)
-        stat = _query(root / 'data/qq/qq.db',
+        stat = _query(project_path(root, 'data/qq/qq.db'),
                       'SELECT COUNT(*) n,MAX(ts) last FROM messages WHERE chat_id=?', (chat,))
         row = stat[0] if stat else None
         main_on = bool(merged['listen'] or merged['learn'] or merged['reply'])
@@ -502,7 +501,7 @@ def read_group(root, group_id, *, minutes=30, limit=50, before=None) -> dict:
     messages = [_message(root, chat, row, names) for row in page]
     references = [_message(root, chat, row, names) for row in ordered]
     gaps = []
-    if not (root / 'data/qq/qq.db').is_file():
+    if not (project_path(root, 'data/qq/qq.db')).is_file():
         gaps.append('本地没有 QQ 消息数据库，无法读取任何记录')
     if not messages:
         gaps.append('该时间窗内没有记录到群消息')
@@ -585,7 +584,7 @@ def _readable(text, segments):
 
 def _newest(root, chat, start, end, limit):
     """The newest rows of one chat inside a window, newest first."""
-    rows = _query(Path(root) / 'data/qq/qq.db',
+    rows = _query(project_path(Path(root), 'data/qq/qq.db'),
                   'SELECT ' + _COLUMNS + ' FROM messages WHERE chat_id=? AND ts>=? AND ts<=? '
                   'ORDER BY id DESC LIMIT ?', (chat, start, end, limit + 1))
     return [row for row in rows if str(row['status'] or '') not in DEAD_STATUSES]

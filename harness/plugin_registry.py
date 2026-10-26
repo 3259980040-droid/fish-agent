@@ -1,5 +1,6 @@
 """User-approved MCP, CLI and HTTP bridges. Runtime checks remain authoritative."""
 from __future__ import annotations
+from locations import project_path
 import asyncio
 import json
 import os
@@ -43,6 +44,10 @@ def tool_allowed(plugin, tool):
     return selected is None or tool['name'] in selected
 
 
+class PluginExecutionError(RuntimeError, ValueError):
+    """A safe execution reason that the original tool result may display."""
+
+
 def failure_reason(exc):
     """Flatten SDK task groups without leaking URLs, headers or stderr."""
     children = getattr(exc, 'exceptions', None)
@@ -77,8 +82,8 @@ def health_details(item):
 class PluginRegistry:
     def __init__(self, root: Path, manager=None):
         self.root = root
-        self.path = root / 'harness/plugins/registry.json'
-        self.log = root / 'data/plugin-events.db'
+        self.path = project_path(root, 'harness/plugins/registry.json')
+        self.log = project_path(root, 'data/plugin-events.db')
         self.active = {}
         self.lock = threading.RLock()
         self.tulpa_call_lock = threading.Lock()
@@ -146,12 +151,24 @@ class PluginRegistry:
             item['secret_env'] = {**old.get('secret_env', {}), **item.get('secret_env', {})}
             # A changed executable/config needs another discovery, no stale schema.
             if any(item.get(k) != old.get(k) for k in ('kind', 'command', 'args', 'url')):
-                item['tools'] = []
+                if item['kind'] not in ('cli','http'):item['tools'] = []
                 item['last_test'] = None; item['test_ok'] = False; item.pop('server_info', None)
             elif item.get('tools', old.get('tools')) == old.get('tools'):
                 for key in ('last_test', 'test_ok', 'last_error', 'server_info'):
                     if key in old: item[key] = old[key]
         item.setdefault('tools', old.get('tools', []) if old else [])
+        if item['kind'] in ('cli','http'):
+            from jsonschema import Draft202012Validator
+            names=set()
+            for tool in item['tools']:
+                if not isinstance(tool,dict) or not re.fullmatch('[a-zA-Z0-9_-]{1,100}',str(tool.get('name',''))):
+                    raise ValueError('CLI/HTTP工具名称不合法')
+                if tool['name'] in names:raise ValueError('工具名称重复：'+tool['name'])
+                names.add(tool['name'])
+                schema=tool.get('inputSchema')
+                if not isinstance(schema,dict):raise ValueError('工具需要JSON参数定义inputSchema')
+                Draft202012Validator.check_schema(schema)
+
         if item['enabled'] and item['kind'] != 'dsh' and (not item.get('last_test') or item.get('test_ok') is False):
             raise ValueError('请先保存并测试插件，再启用')
         write_json(self.path, {'version': 1, 'plugins': [e for e in entries if e['id'] != pid] + [item]})
@@ -198,21 +215,21 @@ class PluginRegistry:
             logs = [dict(r) for r in db.execute('SELECT * FROM events ORDER BY id DESC LIMIT 80')]
         return {'plugins': self.entries(), 'events': logs, 'active': list(self.active)}
 
-    def _env(self, item, role='research'):
+    def _env(self, item, role='research', policy_root=None):
         from secrets_store import SecretStore
         secrets = {key: SecretStore(self.root).get(ref) for key, ref in item.get('secret_env', {}).items()}
-        directory = role_dir(self.root, role) / 'plugin-work' / item['id']
+        directory = role_dir(policy_root or self.root, role) / 'plugin-work' / item['id']
         home = directory / 'home'; home.mkdir(parents=True, exist_ok=True)
         temporary = directory / 'tmp'; temporary.mkdir(exist_ok=True)
         return {**__import__('network_config').environment(self.root, safe_environment(secrets)), 'HOME': str(home), 'USERPROFILE': str(home),
                 'APPDATA': str(home / 'AppData/Roaming'), 'LOCALAPPDATA': str(home / 'AppData/Local'),
                 'FISH_PLUGIN_ROLE': role, 'FISH_DATA_DIR': str(directory), 'TEMP': str(temporary), 'TMP': str(temporary)}
 
-    def _args(self, item, role):
-        directory = role_dir(self.root, role) / 'plugin-work' / item['id']
+    def _args(self, item, role, policy_root=None):
+        directory = role_dir(policy_root or self.root, role) / 'plugin-work' / item['id']
         return [value.replace('{role}', role).replace('{data_dir}', str(directory)) for value in item['args']]
 
-    async def _mcp(self, item, method, tool='', arguments=None, role='research'):
+    async def _mcp(self, item, method, tool='', arguments=None, role='research', policy_root=None, before_call=None):
         from contextlib import AsyncExitStack
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
@@ -220,9 +237,9 @@ class PluginRegistry:
         from mcp.client.sse import sse_client
         async with AsyncExitStack() as stack:
             if item['kind'] == 'mcp_stdio':
-                cwd = role_dir(self.root, role) / 'plugin-work' / item['id']
+                cwd = role_dir(policy_root or self.root, role) / 'plugin-work' / item['id']
                 cwd.mkdir(parents=True, exist_ok=True)
-                params = StdioServerParameters(command=item['command'], args=self._args(item, role), env=self._env(item, role), cwd=str(cwd))
+                params = StdioServerParameters(command=item['command'], args=self._args(item, role, policy_root), env=self._env(item, role, policy_root), cwd=str(cwd))
                 errlog = stack.enter_context(tempfile.TemporaryFile(mode='w+', encoding='utf-8'))
                 read, write = await stack.enter_async_context(stdio_client(params, errlog=errlog))
             else:
@@ -252,6 +269,7 @@ class PluginRegistry:
                     if not cursor:
                         return tools
                 raise ValueError('工具列表分页过多')
+            if before_call is not None:before_call()
             result = await session.call_tool(tool, arguments or {})
             if result.isError:
                 raise RuntimeError('MCP 工具报告执行失败；可检查插件自身日志')
@@ -281,19 +299,20 @@ class PluginRegistry:
                 except BaseException:
                     pass
 
-    def _run(self, item, method, tool='', arguments=None, role='research', cancel=None):
+    def _run(self, item, method, tool='', arguments=None, role='research', cancel=None, policy_root=None, before_call=None):
         if item.get('id')=='tulpa_owner':
             # The UI and ToolHost use separate processes and SDK connections.
             # One cross-process queue also covers persona stop/start batches.
             from storage import settings_lock
-            with settings_lock(self.root/'data/integrations/tulpa/call-queue',timeout=120):
-                return self._run_unlocked(item,method,tool,arguments,role,cancel)
-        return self._run_unlocked(item,method,tool,arguments,role,cancel)
+            with settings_lock(project_path(self.root, 'data/integrations/tulpa/call-queue'),timeout=120):
+                return self._run_unlocked(item,method,tool,arguments,role,cancel,policy_root,before_call)
+        return self._run_unlocked(item,method,tool,arguments,role,cancel,policy_root,before_call)
 
-    def _run_unlocked(self, item, method, tool='', arguments=None, role='research', cancel=None):
+    def _run_unlocked(self, item, method, tool='', arguments=None, role='research', cancel=None, policy_root=None, before_call=None):
         cancel = cancel or threading.Event()
+        if method != 'discover' and before_call is not None:before_call()
         if item['kind'].startswith('mcp_'):
-            return asyncio.run(self._run_cancellable(self._mcp(item, method, tool, arguments, role), item['timeout'], cancel))
+            return asyncio.run(self._run_cancellable(self._mcp(item, method, tool, arguments, role, policy_root, before_call), item['timeout'], cancel))
         if item['kind'] in ('http', 'cli'):
             if method == 'discover':
                 tools = item.get('tools', [])
@@ -315,13 +334,13 @@ class PluginRegistry:
                     if len(output) > 2 * 1024 * 1024:
                         raise ValueError('插件输出超过 2MB')
                 return json.loads(output)
-            cwd = role_dir(self.root, role) / 'plugin-work' / item['id']
+            cwd = role_dir(policy_root or self.root, role) / 'plugin-work' / item['id']
             cwd.mkdir(parents=True, exist_ok=True)
             from process_tools import OwnedJob
             job_scope = OwnedJob()
             with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as error:
-                proc = subprocess.Popen([item['command'], *self._args(item, role)], stdin=subprocess.PIPE, stdout=output, stderr=error,
-                    cwd=cwd, env=self._env(item, role), creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                proc = subprocess.Popen([item['command'], *self._args(item, role, policy_root)], stdin=subprocess.PIPE, stdout=output, stderr=error,
+                    cwd=cwd, env=self._env(item, role, policy_root), creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
                 try:
                     job_scope.attach(proc)
                     proc.stdin.write(json.dumps({'tool': tool, 'arguments': arguments or {}}, ensure_ascii=False).encode('utf-8'))
@@ -379,14 +398,14 @@ class PluginRegistry:
             self.event(pid, role, 'discover', False, reason)
             raise RuntimeError(reason) from None
 
-    def catalog(self, role):
+    def catalog(self, role, *, include_disabled=False):
         return [{'name': f"fishp__{p['id']}__{t['name']}", 'description': f"{p['name']}：{t.get('description', '')}"[:4000],
                  'parameters': t.get('inputSchema', {'type': 'object', 'properties': {}}), 'owner_only': p['owner_only']}
-                for p in self.entries() if p['enabled'] and role in p['roles'] and p['kind'] != 'dsh' for t in p.get('tools', []) if tool_allowed(p, t)]
+                for p in self.entries() if (include_disabled or p['enabled']) and role in p['roles'] and p['kind'] != 'dsh' for t in p.get('tools', []) if include_disabled or tool_allowed(p, t)]
 
-    def native_catalog(self, role):
+    def native_catalog(self, role, *, include_disabled=False):
         return [{'name': t['name'], 'owner_only': p['owner_only'], 'plugin': p['id']}
-                for p in self.entries() if p['kind'] == 'dsh' and p['enabled'] and role in p.get('installed_roles', []) and role in p['roles'] for t in p.get('native_tools_by_role', {}).get(role, []) if tool_allowed(p, t)]
+                for p in self.entries() if p['kind'] == 'dsh' and (include_disabled or p['enabled']) and role in p.get('installed_roles', []) and role in p['roles'] for t in p.get('native_tools_by_role', {}).get(role, []) if include_disabled or tool_allowed(p, t)]
 
     def _runtime(self):
         if self.manager is None:
@@ -473,26 +492,29 @@ class PluginRegistry:
 
     def publish(self):
         for role in ('qq', 'research'):
-            write_json(self.root / f'harness/runtime/{role}.tools.json', {'tools': self.catalog(role)})
+            write_json(project_path(self.root, f'harness/runtime/{role}.tools.json'), {'tools': self.catalog(role)})
 
-    def execute(self, alias, arguments, role, *, owner=False, cancel=None, chat_authorized=False):
+    def execute(self, alias, arguments, role, *, owner=False, cancel=None, chat_authorized=False, policy_root=None, effective_enabled=None, before_call=None):
         _, pid, tool = alias.split('__', 2)
         if pid == 'tulpa_owner' and not chat_authorized:
             raise PermissionError('Tulpa MCP 需要已核验的 Fish 主人授权')
         item = next((p for p in self.entries() if p['id'] == pid), None)
-        if not item or not item['enabled'] or role not in item['roles']:
+        if not item or not (item['enabled'] if effective_enabled is None else effective_enabled) or role not in item['roles']:
             raise PermissionError('插件已禁用或未授权给当前角色')
         if item['owner_only'] and not owner:
             raise PermissionError('此插件仅允许主人私聊和本地控制台调用')
         schema = next((t for t in item.get('tools', []) if t['name'] == tool), None)
         if schema is None:
             raise PermissionError('工具未注册')
-        if not tool_allowed(item, schema):
+        if effective_enabled is None and not tool_allowed(item, schema):
             raise PermissionError('此工具未被插件当前配置选中')
-        from jsonschema import validate
-        validate(arguments, schema.get('inputSchema', {}))
+        from jsonschema import validate, ValidationError
+        try:
+            validate(arguments, schema.get('inputSchema', {}))
+        except ValidationError as exc:
+            raise ValueError('工具参数不符合定义：'+exc.message[:300]) from None
         from governance import Governance
-        policy = Governance(self.root, role)
+        policy = Governance(policy_root or self.root, role)
         if policy.config()['paused']:
             raise PermissionError('此角色已暂停')
         if pid == 'tulpa_owner':
@@ -515,11 +537,11 @@ class PluginRegistry:
                 # connections, so concurrent calls must use its single queue.
                 with self.tulpa_call_lock:
                     if cancel.is_set(): raise InterruptedError('插件调用已停止')
-                    result = self._run(item, 'call', tool, arguments, role, cancel)
+                    result = self._run(item, 'call', tool, arguments, role, cancel,policy_root,before_call)
             else:
-                result = self._run(item, 'call', tool, arguments, role, cancel)
+                result = self._run(item, 'call', tool, arguments, role, cancel,policy_root,before_call)
             from plugin_media import normalize_result
-            result = normalize_result(self.root, role, result)
+            result = normalize_result(policy_root or self.root, role, result)
             if len(json.dumps(result, ensure_ascii=False).encode()) > 2 * 1024 * 1024:
                 raise ValueError('插件结果超过 2MB，请在插件配置中减少返回内容')
             if pid != 'tulpa_owner':
@@ -529,8 +551,8 @@ class PluginRegistry:
         except Exception as exc:
             reason = failure_reason(exc)
             self.event(pid, role, tool, False, reason)
-            if isinstance(exc, InterruptedError): raise
-            raise RuntimeError(reason) from None
+            if isinstance(exc, (InterruptedError,PermissionError)): raise
+            raise PluginExecutionError(reason) from None
         finally:
             with self.lock:
                 self.active.pop(key, None)

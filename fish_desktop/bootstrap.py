@@ -1,4 +1,5 @@
 """First-run data roots and sanitized defaults; application files stay separate."""
+from locations import project_path
 import json
 import os
 from pathlib import Path
@@ -12,7 +13,7 @@ def resources():
 
 def initialize(root):
     root = Path(root).resolve()
-    if (root / 'harness/agents.json').is_file():
+    if (project_path(root, 'harness/agents.json')).is_file():
         # Backups contain files, so a never-started role has no home entries.
         # Recreate required empty homes after restore/migration before preflight.
         for role in ('qq', 'research'):
@@ -30,9 +31,9 @@ def initialize(root):
             if not target.exists(): shutil.copy2(path, target)
     control = resources() / 'harness/runtime/fish-control'
     if control.is_dir():
-        shutil.copytree(control, root / 'harness/runtime/fish-control', dirs_exist_ok=True)
+        shutil.copytree(control, project_path(root, 'harness/runtime/fish-control'), dirs_exist_ok=True)
     safety = resources() / 'harness/safety'
-    if safety.is_dir(): shutil.copytree(safety, root / 'harness/safety', dirs_exist_ok=True)
+    if safety.is_dir(): shutil.copytree(safety, project_path(root, 'harness/safety'), dirs_exist_ok=True)
     for role in ('qq', 'research'):
         (root / 'homes' / role).mkdir(parents=True, exist_ok=True)
     return root
@@ -41,7 +42,7 @@ def initialize(root):
 def sync_control(root):
     """Internal enforcement code follows the installed application on upgrade."""
     control = resources() / 'harness/runtime/fish-control'
-    target = Path(root) / 'harness/runtime/fish-control'
+    target = project_path(Path(root), 'harness/runtime/fish-control')
     if not control.is_dir() or control.resolve() == target.resolve(): return
     for relative in ('package.json', 'cordis.patch.yml', 'lib/index.js'):
         source, destination = control / relative, target / relative
@@ -57,7 +58,7 @@ def repair_runtime_paths(root):
     """Recover old-machine runtime paths after migration, keeping valid choices."""
     from storage import settings_lock, read_json, write_json
     from core import resolve
-    path = Path(root) / 'harness/agents.json'
+    path = project_path(Path(root), 'harness/agents.json')
     bundle = resources() / ('runtime' if getattr(sys, 'frozen', False) else 'vendor/runtime')
     if not (bundle / 'manifest.json').is_file(): return
     with settings_lock(root):
@@ -136,7 +137,7 @@ def refresh_desktop_entry(root):
         result['ok'] = True
     except (OSError, subprocess.SubprocessError) as exc:
         result['error'] = type(exc).__name__
-    write_json(Path(root) / 'data/diagnostics/desktop-entry.json', result)
+    write_json(project_path(Path(root), 'data/diagnostics/desktop-entry.json'), result)
 
 
 def location_file():
@@ -152,5 +153,5 @@ def selected_root():
 def select_root(root):
     from storage import write_json
     root = Path(root).resolve()
-    if not (root / 'harness/agents.json').is_file(): raise ValueError('数据目录初始化尚未完成')
+    if not (project_path(root, 'harness/agents.json')).is_file(): raise ValueError('数据目录初始化尚未完成')
     write_json(location_file(), {'root': str(root)})

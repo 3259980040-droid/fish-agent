@@ -1,4 +1,5 @@
 """Owner-console member sync and narrowly selected, model-safe person context."""
+from locations import project_path
 import asyncio
 import hashlib
 import json
@@ -11,7 +12,7 @@ from group_reply_style import MIN_CHARS, MAX_CHARS
 
 
 def allowed_group(root, group):
-    groups = read_json(Path(root) / 'channels/fish_qq/config.json').get('allowlist', {}).get('group_ids', [])
+    groups = read_json(project_path(Path(root), 'channels/fish_qq/config.json')).get('allowlist', {}).get('group_ids', [])
     if str(group) not in {str(g) for g in groups}:
         raise PermissionError('请选择白名单中的目标群')
 
@@ -24,7 +25,7 @@ def sync_from_channel(root, group):
         raise ValueError('请先保存此群为当前管理群')
     from secrets_store import SecretStore
     from websockets.asyncio.client import connect
-    config = read_json(Path(root) / 'channels/fish_qq/config.json')
+    config = read_json(project_path(Path(root), 'channels/fish_qq/config.json'))
     token = SecretStore(root).get('channel-core', config.get('listen', {}).get('token_env', 'FISH_QQ_TOKEN'))
     if not token:
         raise ValueError('请先配置 QQ 频道并启动 QQ 角色')

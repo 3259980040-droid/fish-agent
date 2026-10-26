@@ -1,5 +1,6 @@
 """Small cross-process transactions for configuration and role-private SQLite."""
 from __future__ import annotations
+from locations import project_path
 import contextlib
 import json
 import os
@@ -26,13 +27,14 @@ def locked_settings(function):
 
 @contextlib.contextmanager
 def settings_lock(root: Path, timeout: float = 12):
-    key = str(root.resolve())
+    from locations import instance_context
+    key = str(instance_context(root).root)
     with _mutex:
         held = getattr(_local, 'held', {})
         if key in held:
             yield
             return
-        path = root / 'harness' / 'settings.lock'
+        path = project_path(root, 'harness', 'settings.lock')
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open('a+b') as handle:
             if path.stat().st_size == 0:
@@ -112,7 +114,7 @@ def commit_files(root: Path, files: dict):
 def role_dir(root: Path, role: str) -> Path:
     if role not in ('qq', 'research'):
         raise ValueError('未知角色')
-    path = root / 'data' / role
+    path = project_path(root, 'data', role)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -134,7 +136,7 @@ def database(path: Path):
 @contextlib.contextmanager
 def _file_thinking_slot(root, role, cancelled=None, *, key=None):
     """Serialize the same Fish's main turns across desktop and QQ processes."""
-    path = Path(root) / 'data/social' / (str(key or role) + '-thinking.lock')
+    path = project_path(Path(root), 'data/social', str(key or role) + '-thinking.lock')
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('a+b') as handle:
         if path.stat().st_size == 0:
@@ -179,7 +181,8 @@ def _file_thinking_slot(root, role, cancelled=None, *, key=None):
 @contextlib.contextmanager
 def thinking_slot(root, role, cancelled=None, *, key=None):
     """FIFO within the unified process; the existing file lock also excludes other processes."""
-    queue_key = (str(Path(root).resolve()), str(key or role))
+    from locations import instance_context
+    queue_key = (str(instance_context(root).root), str(key or role))
     with _thinking_queue_mutex:
         condition, queue = _thinking_queues.setdefault(queue_key, (threading.Condition(), []))
     ticket = object()
@@ -205,11 +208,3 @@ def thinking_slot(root, role, cancelled=None, *, key=None):
         with condition:
             queue.remove(ticket)
             condition.notify_all()
-
-
-def serial_thinking(function):
-    @functools.wraps(function)
-    def run(root, role, *args, **kwargs):
-        with thinking_slot(root, role, kwargs.get('cancelled'), key=kwargs.get('execution_key')):
-            return function(root, role, *args, **kwargs)
-    return run

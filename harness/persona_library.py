@@ -3,6 +3,7 @@
 Formats follow AstrBot persona exports, MaiBot personality configuration and
 plain character Markdown. Source prompts never grant runtime tool authority.
 """
+from locations import project_path
 import json
 from contextlib import closing
 from pathlib import Path
@@ -96,8 +97,8 @@ class PersonaLibrary:
                         protect([spaces[row['space']]['revision']],'正在使用的窗口')
             # These references cross database boundaries; never create/migrate a
             # database just to inspect it, or treat a read error as zero references.
-            for kind,path in (('desktop',self.root/'data/qq/desktop-chat.db'),
-                              ('tools',self.root/'data/tool-host.db')):
+            for kind,path in (('desktop',project_path(self.root, 'data/qq/desktop-chat.db')),
+                              ('tools',project_path(self.root, 'data/tool-host.db'))):
                 if not path.exists():continue
                 try:
                     with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True,timeout=20)) as refs:
@@ -164,7 +165,7 @@ class PersonaLibrary:
         return [{'id':p['id'],'name':p['name'],'source':sources.get(p['id'],'Fish 本地人格')} for p in self.contexts.personas('qq')]
 
     def install_presets(self):
-        rows=json.loads((self.root/'vendor/integrations/community-personas/personas.json').read_text(encoding='utf-8'))
+        rows=json.loads((project_path(self.root, 'vendor/integrations/community-personas/personas.json')).read_text(encoding='utf-8'))
         result=[]
         for row in rows:
             source=row['source']+'#'+row['key']

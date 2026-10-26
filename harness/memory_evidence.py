@@ -1,4 +1,5 @@
 """Bind model-written memory to actual user messages, never to tool authority."""
+from locations import project_path
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,7 +33,7 @@ def _desktop_quote(root, role, identity, message_id, quote):
     """
     if not message_id:
         raise ValueError('桌面原话需提供本条对话的真实桌面消息编号source_message_id')
-    path = Path(root) / 'data' / role / 'desktop-chat.db'
+    path = project_path(Path(root), 'data', role, 'desktop-chat.db')
     if not path.is_file():
         raise ValueError('桌面消息库不存在，无法核实这条原话')
     resolved = str(identity.get('scope') or '')
@@ -73,7 +74,7 @@ def save_from_tool(root, identity, params, *, scope, role='qq', call_id=''):
             # stand-in for a desktop one.
             source, source_text, text = _desktop_quote(root, role, identity, message_id, quote)
         else:
-            path = Path(root) / 'data' / role / 'qq.db'
+            path = project_path(Path(root), 'data', role, 'qq.db')
             with database(path) as db:
                 row = db.execute("SELECT * FROM messages WHERE direction='inbound' AND sender_id=? AND (CAST(id AS TEXT)=? OR channel_message_id=?) ORDER BY id DESC LIMIT 1",
                     (str(identity.get('sender', '')), message_id, message_id)).fetchone()
@@ -94,7 +95,7 @@ def save_from_tool(root, identity, params, *, scope, role='qq', call_id=''):
                         (str(params['image_message_id']),str(params['image_message_id']))).fetchone()
                 images=[s for s in json.loads(image_row['segments'] or '[]') if s.get('type')=='image'] if image_row else []
                 local=Path(images[0].get('local_path','')) if images else Path('')
-                if not local.is_file() or not local.resolve().is_relative_to((Path(root)/'data').resolve()):
+                if not local.is_file() or not local.resolve().is_relative_to((project_path(Path(root), 'data')).resolve()):
                     raise ValueError('该消息的原图尚无本地记录，请先让当前会话读取原图')
                 from image_knowledge import ImageKnowledge
                 ImageKnowledge(root).confirm(local,source_row['id'],row['id'],quote)

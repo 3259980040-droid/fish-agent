@@ -1,5 +1,6 @@
 """Private QQ meme collection, classification, deduplication and cooldowns."""
 from __future__ import annotations
+from locations import project_path
 import base64
 import hashlib
 import json
@@ -42,7 +43,7 @@ class EmojiStore:
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS emoji_send_request ON sends(request_id) WHERE request_id<>''")
 
     def config(self):
-        return {**DEFAULTS, **read_json(self.root / 'harness/emoji.json')}
+        return {**DEFAULTS, **read_json(project_path(self.root, 'harness/emoji.json'))}
 
     def configure(self, values):
         with settings_lock(self.root):
@@ -53,7 +54,7 @@ class EmojiStore:
                 if not low <= cfg[key] <= high:
                     raise ValueError(f'{key} 超出允许范围 {low}–{high}')
             cfg['auto_collect'], cfg['auto_reply'] = bool(cfg['auto_collect']), bool(cfg['auto_reply'])
-            write_json(self.root / 'harness/emoji.json', cfg)
+            write_json(project_path(self.root, 'harness/emoji.json'), cfg)
         return {'ok': True}
 
     @staticmethod

@@ -1,4 +1,5 @@
 """Validate declared task outputs and reuse the existing attachment archive."""
+from locations import project_path
 import base64
 import json
 import mimetypes
@@ -11,7 +12,7 @@ def download(root, artifact, *, offset=0):
     if not record:
         raise ValueError('成果附件记录不存在')
     path = Path(record['path']).resolve()
-    archive = (root / 'data/qq/attachments').resolve()
+    archive = (project_path(root, 'data/qq/attachments')).resolve()
     if not path.is_relative_to(archive):
         raise ValueError('成果附件归档位置无效')
     if type(offset) is not int or not 0 <= offset <= path.stat().st_size:

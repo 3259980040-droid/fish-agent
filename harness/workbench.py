@@ -1,7 +1,7 @@
 """Native DSH Fish panel operations, backed by the existing Fish services."""
 from __future__ import annotations
+from locations import project_path, integration_settings, save_integration_option
 
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import json
 import os
@@ -52,7 +52,7 @@ def _life_reminder(root):
     else:
         source = '未开启（用户环境变量 FISH_MEMORY_REMINDER 未设置）'
     state = {'on': on, 'source': source, 'ledger_count': 0, 'last_state': '', 'last_receipt': ''}
-    path = root / 'data/qq/memory.db'
+    path = project_path(root, 'data/qq/memory.db')
     if not path.is_file():
         return state
     conn = _query_only(path)
@@ -73,7 +73,7 @@ def _life_memory(root):
     state = {'kinds': {kind: 0 for kind in LIFE_KINDS},
              'social': {kind: 0 for kind in LIFE_SOCIAL},
              'open_events': 0, 'next_due': 0.0, 'next_due_text': ''}
-    path = root / 'data/qq/memory.db'
+    path = project_path(root, 'data/qq/memory.db')
     if not path.is_file():
         return state
     now = time.time()
@@ -204,21 +204,32 @@ def _payload_tools(payload):
 
 class Workbench:
     def __init__(self, root):
-        self.root = Path(root)
-        self.path = self.root / 'data/social/workbench.db'
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='fish-chat')
+        from locations import instance_context
+        self.context = instance_context(root)
+        self.instance_id = self.context.instance_id
+        self.root = self.context.root
+        self.path = project_path(self.root, 'data/social/workbench.db')
         self._chat_instance = None
         self._delegation_instance = None
         self._selected_conversation = ''
+        self._instances = {}
         self._lock = threading.Lock()
-        self._job_cancels = {}
         with database(self.path) as db:
             db.execute('''CREATE TABLE IF NOT EXISTS jobs(
                 id TEXT PRIMARY KEY, conversation TEXT NOT NULL, status TEXT NOT NULL,
                 error TEXT NOT NULL DEFAULT '', created REAL NOT NULL, updated REAL NOT NULL)''')
-            if 'input_message' not in {row[1] for row in db.execute('PRAGMA table_info(jobs)')}:
+            columns = {row[1] for row in db.execute('PRAGMA table_info(jobs)')}
+            if 'input_message' not in columns:
                 db.execute('ALTER TABLE jobs ADD COLUMN input_message INTEGER')
-            db.execute("UPDATE jobs SET status='failed',error='服务已重启，原记录保留，请继续任务',updated=? WHERE status IN ('queued','running')", (time.time(),))
+            if 'execution' not in columns:
+                # The client's request map only keeps the reference; the real status is
+                # always read back from the one main execution's own turn ledger.
+                db.execute("ALTER TABLE jobs ADD COLUMN execution TEXT NOT NULL DEFAULT ''")
+            db.execute("UPDATE jobs SET status='failed',error='服务已重启，原记录保留，请继续任务',updated=? WHERE execution='' AND status IN ('queued','running')", (time.time(),))
+
+    def runtime(self):
+        from fish_agent import get_runtime
+        return get_runtime(self.root)
 
     def chat(self):
         with self._lock:
@@ -280,13 +291,15 @@ class Workbench:
         from social_context import SocialContext
         policy = Governance(self.root)
         contexts = SocialContext(self.root)
-        persona = contexts.active_persona('qq')
+        from social_context import PersonaNotConfigured
+        try:persona = contexts.active_persona('qq')
+        except PersonaNotConfigured:persona={'id':'','name':'未配置人格','body':''}
         mode = OwnerMode(self.root).get()
         from governance import CAPABILITIES
         from storage import read_json
         return {**self.settings(), **mode, 'owner': policy.owner_id(), 'owner_capabilities': CAPABILITIES,
-                'keep_background_on_close': read_json(self.root / 'harness/integration.json', {}).get('keep_background_on_close', True),
-                'qzone_enabled': read_json(self.root / 'harness/integration.json', {}).get('qzone_enabled', False),
+                'keep_background_on_close': integration_settings(self.root).get('keep_background_on_close', True),
+                'qzone_enabled': integration_settings(self.root).get('qzone_enabled', False),
                 'send_policy': policy.config()['send_policy'],
                 'permissions': '、'.join(policy.owner_capabilities(desktop=True).values()),
                 'persona': {k: persona[k] for k in ('id', 'name', 'body')},
@@ -295,12 +308,11 @@ class Workbench:
     # ---------------------------------------------------------------- chat view
     def _role_db(self, name):
         """One database of the role this workbench answers for."""
-        return self.root / 'data' / self.chat().role / name
+        return project_path(self.root, 'data', self.chat().role, name)
 
     def _group_ids(self):
-        from storage import read_json
-        config = read_json(self.root / 'channels/fish_qq/config.json', {})
-        return [str(value) for value in config.get('allowlist', {}).get('group_ids', [])]
+        from fish_agent.settings.channels import ChannelSettings
+        return ChannelSettings(self.root).group_ids()
 
     @staticmethod
     def _group_conversation_id(group_id):
@@ -391,7 +403,7 @@ class Workbench:
     def _persona_name(self, revision):
         if not revision:
             return ''
-        path = self.root / 'data/social/context.db'
+        path = project_path(self.root, 'data/social/context.db')
         if not path.is_file():
             return ''
         conn = _query_only(path)
@@ -452,7 +464,7 @@ class Workbench:
         """Request starts of one private conversation, each with the tools it carried."""
         role = self.chat().role
         events = []
-        usage = self.root / 'data' / role / 'model-usage.db'
+        usage = project_path(self.root, 'data', role, 'model-usage.db')
         if usage.is_file():
             conn = _query_only(usage)
             try:
@@ -466,7 +478,7 @@ class Workbench:
                         events.append((stamp, (str(row['tool'] or ''),)))
             finally:
                 conn.close()
-        inspector = self.root / 'data/social/request-inspector.db'
+        inspector = project_path(self.root, 'data/social/request-inspector.db')
         if inspector.is_file():
             conn = _query_only(inspector)
             try:
@@ -561,9 +573,14 @@ class Workbench:
         from context_budget import snapshot as context_usage
         session = ('group-fish:group:' + group['group_id']) if group else ''
         result['context_usage'] = context_usage(self.root, session)['latest']
+        # 有效预算、最近整理范围和它真实的结果：页面读这里，不需要自己再解析配置。
+        from fish_agent.experience.compaction import status as compaction_status
+        store = 'desktop-chat.db' if group is None else 'qq.db'
+        result['context_compaction'] = compaction_status(
+            self.root, store + ':' + str(result['conversation_id']))
         from turn_trace import latest as latest_thought
         result['thought'] = latest_thought(self.root)
-        task_path = self.root/'data/delegation/tasks.db'
+        task_path = project_path(self.root, 'data/delegation/tasks.db')
         result['active_tasks'] = 0
         if task_path.is_file():
             with database(task_path) as db:
@@ -588,9 +605,12 @@ class Workbench:
                 wanted.append(value)
         chat = self.chat()
         removed = {'conversations': 0, 'messages': 0, 'conversation_ids': []}
+        removed_messages = []
+        # The main execution owns the running turn; ask it, not a page-local flag.
+        active = self.runtime().execution.active_conversation() or chat.active_cid
+        if active and active in wanted:
+            raise ValueError('这个会话正在回复，请先取消再删除')
         with chat._state_lock:
-            if chat.active_cid and chat.active_cid in wanted:
-                raise ValueError('这个会话正在回复，请先取消再删除')
             conn = chat.connect()
             try:
                 for cid in wanted:
@@ -598,6 +618,8 @@ class Workbench:
                         raise ValueError('群聊记录属于 QQ 侧，这里只能删除私人会话')
                     if conn.execute('SELECT 1 FROM conversations WHERE id=?', (cid,)).fetchone() is None:
                         continue
+                    removed_messages.extend(row[0] for row in conn.execute(
+                        'SELECT id FROM messages WHERE conversation_id=?', (cid,)))
                     removed['messages'] += conn.execute('DELETE FROM messages WHERE conversation_id=?', (cid,)).rowcount
                     conn.execute('DELETE FROM conversations WHERE id=?', (cid,))
                     removed['conversations'] += 1
@@ -605,11 +627,35 @@ class Workbench:
                 conn.commit()
             finally:
                 conn.close()
+        if removed_messages:
+            # The FTS index is derived: forget these originals in the same delete path.
+            from history_index import forget_messages
+            forget_messages(self.root, 'desktop-chat.db', removed_messages)
         if self._selected_conversation in removed['conversation_ids']:
             self._selected_conversation = ''
         return {'ok': True, **removed}
 
     def dispatch(self, action, params):
+        from locations import InstanceCatalog
+        if not isinstance(params, dict):
+            raise ValueError('操作参数必须是对象')
+        catalog=InstanceCatalog(self.context.host_root)
+        if action=='instances.list':return catalog.list()
+        if action=='instances.presets':return catalog.presets()
+        if action=='instances.create':return catalog.create(params.get('name'),params.get('persona'),params.get('running'))
+        if action=='instances.rename':return catalog.rename(str(params.get('id') or ''),params.get('name'))
+        if action=='instances.set_running':return catalog.set_running(str(params.get('id') or ''),params.get('running'))
+        selected = str(params.get('instance_id') or self.instance_id)
+        if selected!=self.instance_id:
+            context=catalog.resolve(selected)
+            with self._lock:
+                if selected not in self._instances:self._instances[selected]=Workbench(context.root)
+                workbench=self._instances[selected]
+            return workbench.dispatch(action,params)
+        params = {key: value for key, value in params.items() if key != 'instance_id'}
+        return self._dispatch(action, params)
+
+    def _dispatch(self, action, params):
         from bot_control import BotControl
         from governance import Governance
         from memory_store import MemoryStore
@@ -675,7 +721,7 @@ class Workbench:
             # The pacing numbers are read straight from where they are written, so the
             # settings page shows the value that actually paces her.
             import json as _json
-            path = self.root / 'harness/context-settings.json'
+            path = project_path(self.root, 'harness/context-settings.json')
             pacing = _json.loads(path.read_text(encoding='utf-8') or '{}') if path.is_file() else {}
             keys = ('proactive_check_min_s', 'proactive_check_max_s', 'round_backoff_base',
                     'round_backoff_cap', 'round_backoff_start_after', 'round_bypass_messages',
@@ -689,7 +735,7 @@ class Workbench:
             # Autonomous pacing lives in context-settings.json: governance rewrites
             # control.json, and a number the owner typed must survive that.
             import json as _json
-            path = self.root / 'harness/context-settings.json'
+            path = project_path(self.root, 'harness/context-settings.json')
             current = {}
             if path.is_file():
                 current = _json.loads(path.read_text(encoding='utf-8') or '{}')
@@ -713,13 +759,12 @@ class Workbench:
                 from storage import write_json
                 value=params['image_identification_enabled']
                 if type(value) is not bool:raise ValueError('识图资料核对需为开关值')
-                write_json(self.root/'harness/vision-identification.json',{**image_settings(self.root),'enabled':value})
+                write_json(project_path(self.root, 'harness/vision-identification.json'),{**image_settings(self.root),'enabled':value})
             for option in ('keep_background_on_close', 'qzone_enabled'):
                 if option not in params: continue
                 from storage import read_json, write_json
                 if type(params[option]) is not bool: raise ValueError('开关必须为布尔值')
-                path = self.root / 'harness/integration.json'
-                write_json(path, {**read_json(path, {}), option: params[option]})
+                save_integration_option(self.root, option, params[option])
             if 'paused' in params:
                 if type(params['paused']) is not bool:
                     raise ValueError('暂停开关必须是布尔值')
@@ -752,74 +797,55 @@ class Workbench:
             if action == 'language.list': return language.list(**params)
             if action == 'language.save': return language.save(**params, owner=Governance(self.root).owner_id())
             if action == 'language.manage': return language.manage(params['id'], params['status'])
-        if action == 'channels.status':
-            import requests
-            from core import HarnessConfig
-            from governance import control_token
+        if action in ('channels.status', 'channels.update'):
+            from fish_agent.settings.channels import ChannelSettings
+            from fish_agent.settings.tools import ToolSettings
             from group_policy import GroupPolicy
+            from conversation_policy import community
+            import requests
+            from governance import control_token
             from storage import read_json
-            config = read_json(self.root / 'channels/fish_qq/config.json', {})
-            headers = {'x-fish-token': control_token(self.root)}
+            participation = ChannelSettings(self.root)
+            if action == 'channels.update': participation.save(params)
+            value = participation.get()
+            config = read_json(project_path(self.root, 'channels/fish_qq/config.json'), {})
             loop = {}
             try:
-                loop = requests.get('http://127.0.0.1:3102/status', headers=headers, timeout=2,
-                                    proxies={'http': None, 'https': None, 'all': None}).json()
-            except (requests.RequestException, ValueError):
-                pass
-            ready = False
-            try:
-                port = HarnessConfig(self.root).runtime_port('qq')
-                ready = bool(requests.get(f'http://127.0.0.1:{port}/fish/status', headers=headers, timeout=2,
-                                         proxies={'http': None, 'https': None, 'all': None}).json().get('ok'))
-            except (requests.RequestException, ValueError):
-                pass
-            groups = []
-            for group_id in config.get('allowlist', {}).get('group_ids', []):
-                from group_tests import GroupTests
-                from conversation_policy import community
-                # The switches that actually decide whether this group hears and answers live
-                # in the main policy: engine=fish reads it on every message. A group-test
-                # window keeps its own copy and used to be what this page showed, so the
-                # toggles wrote to a policy nobody was reading and appeared to do nothing.
-                value = GroupPolicy(self.root).config('group:' + str(group_id))
-                trial = GroupTests(self.root).current(str(group_id))
-                groups.append({'id': str(group_id), 'listen': bool(value.get('listen')), 'reply': bool(value.get('reply')),
-                    'topic': community(self.root, str(group_id)).get('topic',''),
-                    'route': 'normal', 'window': trial['id'] if trial else '',
-                    'engine': str(value.get('engine') or ''), 'learn': bool(value.get('learn')),
-                    'read': bool(value.get('read'))})
+                loop = requests.get('http://127.0.0.1:3102/status', headers={'x-fish-token': control_token(self.root)},
+                                    timeout=2, proxies={'http': None, 'https': None, 'all': None}).json()
+            except (requests.RequestException, ValueError): pass
             bot = loop.get('bot') or config.get('bot') or {}
-            return {'owner': Governance(self.root).owner_id(), 'bot': str(bot.get('id', 'unknown')),
-                    'private_route': 'private:' + Governance(self.root).owner_id(), 'groups': groups,
-                    'services': [{'name': '主人消息处理', 'ready': bool(loop), 'detail': '已连接' if loop else '未连接'},
-                                 {'name': '原生 DSH 工作环境', 'ready': ready, 'detail': '可用' if ready else '未启动'},
-                                 {'name': '工具与记忆', 'ready': True, 'detail': '已连接'}],
-                    'note': '主人交办的单次群发送与群聊自动参与分开设置。'}
-        if action == 'channels.update':
-            from group_policy import GroupPolicy
-            from storage import read_json
-            group_id = str(params.get('group_id', ''))
-            config = read_json(self.root / 'channels/fish_qq/config.json', {})
-            allowed = {str(value) for value in config.get('allowlist', {}).get('group_ids', [])}
-            if group_id not in allowed:
-                raise ValueError('只能修改白名单群')
-            changes = {key: params[key] for key in ('listen', 'read', 'reply') if key in params}
-            if not changes and 'topic' not in params:
-                raise ValueError('没有要保存的群设置')
-            if any(type(value) is not bool for value in changes.values()):
-                raise ValueError('群设置必须是开关值')
-            from group_tests import GroupTests
-            from conversation_policy import set_community
-            if 'topic' in params: set_community(self.root, group_id, params['topic'])
-            # Always the main policy: writing into a test window changed a copy that the
-            # fish engine never reads, which is why the switch looked broken.
-            policy = GroupPolicy(self.root)
-            return policy.configure('group:' + group_id, changes) if changes else policy.config('group:' + group_id)
+            connected = loop.get('connected') is True
+            native_ready = False
+            try:
+                from core import HarnessConfig
+                port = HarnessConfig(self.root).runtime_port('qq')
+                native_ready = requests.get(f'http://127.0.0.1:{port}/fish/status',
+                    headers={'x-fish-token': control_token(self.root)}, timeout=2,
+                    proxies={'http': None, 'https': None, 'all': None}).json().get('ok') is True
+            except (requests.RequestException, ValueError): pass
+            capabilities = ToolSettings(self.root)
+            groups = []
+            for group in participation.group_ids():
+                policy = GroupPolicy(self.root).config('group:' + group)
+                groups.append({'id': group, 'listen': policy['listen'],
+                    'reply': capabilities.effective_capability(target='group:' + group)['enabled'],
+                    'topic': community(self.root, group).get('topic', ''),
+                    'route': 'normal', 'window': '', 'engine': 'fish', 'learn': policy['learn'], 'read': policy['read']})
+            return {**value, 'instance_id': self.instance_id,
+                'connections': [{'id': 'qq', 'name': '现有QQ连接', 'bot': str(bot.get('id', 'unknown')), 'connected': connected}],
+                'owner': Governance(self.root).owner_id(), 'bot': str(bot.get('id', 'unknown')),
+                'private_route': 'private:' + Governance(self.root).owner_id(), 'groups': groups,
+                'services': [{'name': '共用QQ连接', 'ready': connected, 'detail': '已连接' if connected else '未连接'},
+                             {'name': '原生 DSH 工作环境', 'ready': native_ready, 'detail': '可用' if native_ready else '未启动'}],
+                'note': '群号是本窗口参与设置，不代表账号已经入群；接收与发送分别生效。'}
         if action == 'personas.list':
             contexts = SocialContext(self.root)
             return [{**row, 'body': contexts.persona(row['id'])['body']} for row in PersonaLibrary(self.root).list()]
         if action == 'personas.current':
-            persona = self._current_persona()
+            from social_context import PersonaNotConfigured
+            try:persona = self._current_persona()
+            except PersonaNotConfigured:persona={'id':'','name':'未配置人格','body':''}
             return {'id': persona['id'], 'revision': persona['id'],
                     'name': persona['name'], 'body': persona['body']}
         if action == 'personas.preview':
@@ -837,6 +863,24 @@ class Workbench:
             return [{'id': row['id'], 'name': row['name'], 'body': row['body']} for row in rows]
         if action == 'personas.apply':
             return PersonaLibrary(self.root).apply(params['revision'])
+        if action == 'context.compact':
+            # The owner's immediate compression uses the same selection/commit chain as
+            # the automatic one; it is the only entry that ignores the automatic switch.
+            from fish_agent.experience.compaction import compact_now
+            source = str(params.get('source') or 'desktop-chat.db')
+            conversation = str(params.get('conversation') or '')
+            if not conversation:
+                raise ValueError('缺少要整理的会话编号')
+            return compact_now(self.root, source=source, conversation=conversation)
+        if action == 'context.status':
+            # 上下文管理的只读接口：有效预算、触发/保留比例，最近一次整理的完整范围和结果。
+            # 09-06 接页面动作时读这里，不再自己解析 harness 配置或猜窗口容量。
+            from context_budget import snapshot as context_usage
+            from fish_agent.experience.compaction import status as compaction_status
+            budget = context_usage(self.root)
+            return {'effective_budget': budget['effective'],
+                    'compaction': compaction_status(self.root, params.get('context_key')),
+                    'latest_request': budget['latest']}
         if action == 'memory.layers':
             # The three layers in one read: what she remembers, what got digested,
             # what is still raw. Read-only; it answers "is the pipeline alive".
@@ -848,9 +892,9 @@ class Workbench:
                 with _c(_s.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
                     row = db.execute(sql, args).fetchone()
                     return row[0] if row else None
-            memory_db = self.root / 'data/qq/memory.db'
-            qq_db = self.root / 'data/qq/qq.db'
-            exp = self.root / 'data/social/experience.db'
+            memory_db = project_path(self.root, 'data/qq/memory.db')
+            qq_db = project_path(self.root, 'data/qq/qq.db')
+            exp = project_path(self.root, 'data/social/experience.db')
             layers = {
                 'retrieval': {
                     'active': _one(memory_db, "SELECT COUNT(*) FROM memories WHERE status='active'"),
@@ -873,14 +917,19 @@ class Workbench:
         if action == 'memory.overview':
             from memory_digest import overview
             from daily_curate import latest
-            # 最近一次每日整理：清了哪几条、收了哪几张图、各自什么理由。
+            # 最近一次整理：每日、工具和这个按钮共用同一条执行记录；
+            # 升级前旧表行只在没有新记录时作为迁移读取。
             return {**overview(self.root), 'daily_curate': latest(self.root)}
         if action == 'memory.curate.run':
-            from daily_curate import run
+            from memory_curation import submit
             force = params.get('force', False)
             if type(force) is not bool:
                 raise ValueError('重做标记需为开关值')
-            return run(self.root, params.get('day'), force=force)
+            return submit(self.root, day=params.get('day'), start=params.get('start'),
+                          end=params.get('end'), force=force, requested_by='client')
+        if action == 'memory.curate.status':
+            from memory_curation import status as curation_status
+            return curation_status(self.root, params.get('run_id'), limit=10)
         if action.startswith('memory.digest.'):
             from memory_digest import build, list_digests, revise
             if action == 'memory.digest.list':
@@ -931,7 +980,21 @@ class Workbench:
                            ('merged_into:' + keep, _time.time(), drop))
             return {'keep': keep, 'drop': drop, 'drop_status': 'merged'}
         if action == 'memory.search':
-            return MemoryStore(self.root, 'qq').search(params.get('query', ''), scope='owner', limit=60, include_candidates=True)
+            # The page reads the one memory; each row keeps its source scope.
+            return MemoryStore(self.root, 'qq').search(params.get('query', ''), scope=None, limit=60,
+                                                      include_candidates=True)
+        if action in ('knowledge.search', 'knowledge.open'):
+            from knowledge import open as knowledge_open
+            from knowledge import search as knowledge_search
+            if action == 'knowledge.search':
+                limit = params.get('limit', 12)
+                if type(limit) is not int or not 1 <= limit <= 50:
+                    raise ValueError('检索条数需为 1 到 50 的整数')
+                return knowledge_search(self.root, params.get('query', ''), limit=limit,
+                                        scope=params.get('scope') or None)
+            return knowledge_open(self.root, str(params.get('reference') or ''),
+                                  level=params.get('level', 'original'),
+                                  page=params.get('page', 1), count=params.get('count', 5))
         if action == 'memory.save':
             store = MemoryStore(self.root, 'qq')
             memory_id = params.get('id')
@@ -956,7 +1019,7 @@ class Workbench:
         if action == 'workspace.write':
             # One writer only: this delegates to the agent's own file tool, so the
             # workspace never gets a second, differently-guarded write path.
-            base = (self.root / 'workspace').resolve()
+            base = (project_path(self.root, 'workspace')).resolve()
             base.mkdir(parents=True, exist_ok=True)
             wanted = str(params.get('path', '') or '').strip()
             if not wanted:
@@ -972,42 +1035,117 @@ class Workbench:
                                   {'path': str(target), 'text': str(params.get('text', '')),
                                    **({'expected_mtime_ns': params['expected_mtime_ns']} if 'expected_mtime_ns' in params else {})},
                                   identity, 'workspace-write-' + uuid.uuid4().hex[:8])
-        if action == 'models.preflight':
-            # Prove the registry can drive a gateway *before* switching her live one.
-            import json as _json, os as _os, urllib.request as _url
-            path = self.root / 'harness/models.json'
-            if not path.is_file():
-                return {'ok': False, 'reason': '还没有模型连接清单'}
-            data = _json.loads(path.read_text(encoding='utf-8') or '{}')
-            chosen = next((c for c in data.get('connections', []) if c.get('id') == data.get('active')), None)
-            if chosen is None:
-                return {'ok': False, 'reason': 'active 指向的连接不存在'}
-            key = _os.environ.get(str(chosen.get('key_ref', '')), '')
-            if not key:
+        if action.startswith('models.'):
+            import model_connections
+            if action == 'models.connections':
+                return model_connections.describe(self.root)
+            if action == 'models.list':
+                return model_connections.describe(self.root)
+            if action == 'models.current':
+                described = model_connections.describe(self.root)
+                from model_gateway import ModelGateway
                 try:
-                    from secrets_store import SecretStore
-                    key = SecretStore(self.root).get('channel-core', str(chosen.get('key_ref', ''))) or ''
-                except Exception:
-                    key = ''
-            if not key:
-                return {'ok': False, 'connection': chosen, 'reason': '清单里的密钥引用取不到值'}
-            req = _url.Request(str(chosen.get('base', '')).rstrip('/') + '/models',
-                               headers={'Authorization': 'Bearer ' + key})
-            try:
-                with _url.urlopen(req, timeout=20) as reply:
-                    body = reply.read().decode('utf-8', 'replace')
-                return {'ok': True, 'connection': chosen, 'models_seen': body.count('"id"'),
-                        'note': '清单能驱动网关；切换前的一切条件已满足'}
-            except Exception as exc:
-                return {'ok': False, 'connection': chosen, 'reason': type(exc).__name__ + ': ' + str(exc)[:160]}
-        if action == 'models.list':
-            # The registry, not the live gateway: one place lists what exists.
-            import json as _json
-            path = self.root / 'harness/models.json'
-            if not path.is_file():
-                return {'connections': [], 'active': '', 'note': '还没有模型连接清单'}
-            data = _json.loads(path.read_text(encoding='utf-8') or '{}')
-            return {'connections': data.get('connections', []), 'active': data.get('active', '')}
+                    gateway = ModelGateway(self.root, 'qq')
+                    current = {'base': gateway.base, 'model': gateway.model, 'has_key': bool(gateway.key)}
+                except Exception as exc:  # noqa: BLE001 - the page shows why it is not configured
+                    current = {'error': str(exc)[:200]}
+                return {**described, 'gateway': current}
+            if action == 'models.save':
+                return model_connections.save(self.root, role=str(params.get('role') or 'qq'),
+                                              base=str(params.get('base') or ''), model=str(params.get('model') or ''),
+                                              key=str(params.get('key') or ''), name=str(params.get('name') or ''))
+            if action == 'models.test':
+                return model_connections.test(self.root, role=str(params.get('role') or 'qq'),
+                                              base=str(params.get('base') or ''), model=str(params.get('model') or ''),
+                                              key=str(params.get('key') or ''))
+            if action == 'models.discover':
+                return model_connections.discover(self.root, role=str(params.get('role') or 'qq'),
+                                                  base=str(params.get('base') or ''),
+                                                  key=str(params.get('key') or ''))
+            if action == 'models.remove':
+                return model_connections.remove(self.root, role=str(params.get('role') or 'qq'))
+            raise ValueError('未知模型操作')
+        if action in ('tools.settings.get','tools.settings.save'):
+            from storage import read_json
+            from fish_agent.settings.tools import ToolSettings
+            from tool_host import builtins, skill_tool
+            settings=ToolSettings(self.root)
+            value=settings.save(params.get('patch',{})) if action.endswith('.save') else settings.get()
+            groups=self._group_ids()
+            return {'instance_id':self.instance_id,'settings':value,
+                    'tools':[dict(name=item['name'],description=item.get('description',''),
+                                  **settings.effective_capability(item['name'])) for item in builtins('qq')+[skill_tool(self.root)]],
+                    'groups':[str(g) for g in groups]}
+        if action.startswith('plugins.'):
+            from plugin_registry import PluginRegistry
+            from locations import host_root
+            from fish_agent.settings.tools import ToolSettings
+            registry = PluginRegistry(host_root(self.root))
+            preferences=ToolSettings(self.root)
+            if action == 'plugins.list':
+                snapshot=registry.snapshot()
+                rows=[]
+                for item in snapshot['plugins']:
+                    aliases={t['name']:'fishp__'+item['id']+'__'+t['name'] for t in item.get('tools',[])}
+                    overrides=preferences.get()['tools']
+                    selected=[name for name,alias in aliases.items() if overrides.get(alias,name in item.get('allowed_tools',[]) if item.get('allowed_tools') is not None else True)]
+                    rows.append({**item,'enabled':preferences.plugin_enabled(item),'shared_enabled':item.get('enabled',False),
+                                 'allowed_tools':None if len(selected)==len(aliases) else selected})
+                return {**snapshot,'plugins':rows}
+            if action == 'plugins.save':
+                manifest = params.get('manifest')
+                if not isinstance(manifest, dict):
+                    raise ValueError('缺少插件配置对象')
+                manifest=dict(manifest)
+                requested=manifest.get('enabled',False)
+                selected=manifest.pop('allowed_tools',None)
+                old=next((p for p in registry.entries() if p['id']==manifest.get('id')),None)
+                manifest['allowed_tools']=old.get('allowed_tools') if old else None
+                # Installation metadata is shared; window enablement is one saved preference.
+                manifest['enabled']=bool(old and old.get('enabled'))
+                if old and any(manifest.get(k,old.get(k))!=old.get(k) for k in ('kind','command','args','url','tools')):
+                    manifest['enabled']=False
+                result=registry.save(manifest)
+                registered=next(p for p in registry.entries() if p['id']==manifest['id'])
+                aliases={'fishp__'+manifest['id']+'__'+tool['name']:selected is None or tool['name'] in selected
+                         for tool in registered.get('tools',[])}
+                preferences.save({'plugins':{str(manifest['id']):bool(requested)},'tools':aliases})
+                return result
+            if action == 'plugins.remove':
+                return registry.remove(str(params.get('id') or ''))
+            if action == 'plugins.enable':
+                pid=str(params.get('id') or '');enabled=params.get('enabled',True)
+                if type(enabled) is not bool:raise ValueError('扩展开关必须为布尔值')
+                item=next((row for row in registry.entries() if row['id']==pid),None)
+                if not item:raise ValueError('扩展不存在')
+                if enabled and item['kind']!='dsh' and (not item.get('last_test') or item.get('test_ok') is False):
+                    raise ValueError('请先测试并发现工具，再启用')
+                preferences.save({'plugins':{pid:enabled}})
+                return {'ok':True,'instance_id':self.instance_id,'enabled':preferences.plugin_enabled(item)}
+            if action == 'plugins.test':
+                return registry.discover(str(params.get('id') or ''), str(params.get('role') or 'research'))
+            raise ValueError('未知插件操作')
+        if action.startswith('skills.'):
+            import skills_store
+            if action == 'skills.list':
+                return {'skills': skills_store.list_skills(self.root),
+                        'note': '技能是做法资料；停用只影响是否列出与加载，不改变人格或权限'}
+            if action == 'skills.save':
+                return skills_store.save(self.root, name=params.get('name', ''),
+                                         description=params.get('description', ''),
+                                         body=params.get('body', ''),
+                                         enabled=bool(params.get('enabled', True)))
+            if action == 'skills.import':
+                return skills_store.import_path(self.root, params.get('path', ''),
+                                                enabled=bool(params.get('enabled', True)))
+            if action == 'skills.enable':
+                return skills_store.set_enabled(self.root, params.get('name', ''),
+                                                bool(params.get('enabled', True)))
+            if action == 'skills.read':
+                return skills_store.read(self.root, params.get('name', ''))
+            if action == 'skills.delete':
+                return skills_store.delete(self.root, params.get('name', ''))
+            raise ValueError('未知技能操作')
         if action == 'system.storage':
             # Read-only map of where the disk goes, so cleanup is decided on numbers
             # instead of worry. Nothing here deletes anything.
@@ -1023,41 +1161,20 @@ class Workbench:
                 return round(total / 1024 / 1024, 1)
             root = self.root
             layers = {
-                'raw_messages_and_media': {'bytes_mb': _dir(root / 'data/qq'), 'what': '原始消息、附件、媒体' },
-                'memory': {'bytes_mb': _dir(root / 'data/qq/memory.db') if False else round((root / 'data/qq/memory.db').stat().st_size / 1024 / 1024, 1) if (root / 'data/qq/memory.db').exists() else 0.0, 'what': '长期记忆数据库' },
-                'social_models_and_logs': {'bytes_mb': _dir(root / 'data/social'), 'what': '用量、任务、摘要、目录' },
-                'embeddings': {'bytes_mb': _dir(root / 'data/shared'), 'what': '中文向量模型（不可删）' },
-                'research_cache': {'bytes_mb': _dir(root / 'data/research'), 'what': '调研缓存（可重建）' },
+                'raw_messages_and_media': {'bytes_mb': _dir(project_path(root, 'data/qq')), 'what': '原始消息、附件、媒体' },
+                'memory': {'bytes_mb': _dir(project_path(root, 'data/qq/memory.db')) if False else round((project_path(root, 'data/qq/memory.db')).stat().st_size / 1024 / 1024, 1) if (project_path(root, 'data/qq/memory.db')).exists() else 0.0, 'what': '长期记忆数据库' },
+                'social_models_and_logs': {'bytes_mb': _dir(project_path(root, 'data/social')), 'what': '用量、任务、摘要、目录' },
+                'embeddings': {'bytes_mb': _dir(project_path(root, 'data/shared')), 'what': '中文向量模型（不可删）' },
+                'research_cache': {'bytes_mb': _dir(project_path(root, 'data/research')), 'what': '调研缓存（可重建）' },
                 'backups': {'bytes_mb': _dir(root / 'backups'), 'what': '自动备份（保留 14 份）' },
                 'archived_for_owner': {'bytes_mb': _dir(root / '需要清理'), 'what': '已归档、等主人处理' },
             }
             return {'layers': layers, 'note': '这里只统计，不删除；清理由 data_retention 按保留期处理可重建的部分'}
-        if action in ('models.current', 'models.test'):
-            # Read-only view of what she actually talks to. Switching the model is a
-            # behaviour change and needs its own decision, so this only reports and probes.
-            from model_gateway import ModelGateway
-            gateway = ModelGateway(self.root, 'qq')
-            current = {'base': str(getattr(gateway, 'base', '')), 'model': str(getattr(gateway, 'model', '')),
-                       'has_key': bool(getattr(gateway, 'key', ''))}
-            if action == 'models.current':
-                return current
-            if not current['has_key']:
-                return {**current, 'ok': False, 'reason': '没有可用的密钥，无法测试连接'}
-            import urllib.request as _url
-            request_url = current['base'].rstrip('/') + '/models'
-            req = _url.Request(request_url, headers={'Authorization': 'Bearer ' + gateway.key})
-            try:
-                with _url.urlopen(req, timeout=20) as reply:
-                    body = reply.read().decode('utf-8', 'replace')
-                count = body.count('"id"')
-                return {**current, 'ok': True, 'status': 200, 'models_seen': count}
-            except Exception as exc:
-                return {**current, 'ok': False, 'reason': type(exc).__name__ + ': ' + str(exc)[:160]}
         if action in ('workspace.list', 'workspace.read'):
             # Read-only view of Fish's own workspace. Writes stay with the tool path,
             # which already has its own permission story; a second writer would be a
             # second truth about who may touch the disk.
-            base = (self.root / 'workspace').resolve()
+            base = (project_path(self.root, 'workspace')).resolve()
             base.mkdir(parents=True, exist_ok=True)
             wanted = str(params.get('path', '') or '').strip()
             target = (base / wanted).resolve() if wanted else base
@@ -1117,6 +1234,30 @@ class Workbench:
                 return store.upload_status(cid, params['upload_id'])
             if action == 'attachments.import':
                 raise ValueError('整份base64导入入口已退役，请使用当前客户端分块导入')
+            if action == 'attachments.batches':
+                source = str(params.get('source') or 'desktop')
+                place = source + ':' + cid
+                batches = self.runtime().experience.batches.state(place)
+                # One batch row keeps the registration/window/read facts of this layer;
+                # each file's download, parse and index state is the attachment record's
+                # own truth, attached here by resource so it is not copied or guessed.
+                for batch in batches:
+                    for item in batch['items']:
+                        resource = str(item.get('resource') or '').split('#')[0]
+                        if not resource:
+                            continue
+                        try:
+                            record = store.get(resource)
+                        except Exception:  # noqa: BLE001 - a missing record leaves the ref visible
+                            record = None
+                        if record:
+                            item['attachment'] = {
+                                'id': record['id'], 'size': record['size'], 'type': record.get('type'),
+                                'processing': record.get('processing'),
+                                'indexed': bool((record.get('processing') or {}).get('indexed')),
+                                'preview': bool((record.get('processing') or {}).get('preview')),
+                            }
+                return {'place': place, 'batches': batches, 'limits': store.limits()}
             if action == 'attachments.list':
                 return store.list(cid)
             if action == 'attachments.search':
@@ -1142,7 +1283,7 @@ class Workbench:
             import sqlite3 as _sqlite3
             from contextlib import closing as _closing
             limit = min(200, max(5, int(params.get('limit', 40) or 40)))
-            path = self.root / 'data/social/experience.db'
+            path = project_path(self.root, 'data/social/experience.db')
             if not path.is_file():
                 return {'thoughts': []}
             with _closing(_sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
@@ -1158,19 +1299,9 @@ class Workbench:
         if action == 'chat.reasoning':
             # Stored display copy of the provider's own reasoning for one turn.
             # Nothing is regenerated here: a turn without a trace answers empty.
-            import sqlite3 as _sqlite3
-            from contextlib import closing as _closing
             reference = str(params.get('reference', '') or '')
-            path = self.root / 'data/social/experience.db'
-            if not reference or not path.is_file():
-                return {'reference': reference, 'reasoning': '', 'phase': '', 'error': ''}
-            with _closing(_sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
-                row = db.execute('SELECT phase, reasoning, error FROM turn_traces WHERE reference=? ORDER BY updated DESC LIMIT 1',
-                                 (reference,)).fetchone()
-            if not row:
-                return {'reference': reference, 'reasoning': '', 'phase': '', 'error': ''}
-            return {'reference': reference, 'phase': str(row[0] or ''),
-                    'reasoning': str(row[1] or '')[:20000], 'error': str(row[2] or '')[:500]}
+            from fish_agent.execution.reads import read_trace
+            return read_trace(self.root, reference, main_only=False)
         if action == 'chat.delete':
             return self.delete_conversations(params)
         if action == 'chat.mode':
@@ -1196,48 +1327,56 @@ class Workbench:
                         raise ValueError('请求编号已用于另一会话')
                     return {'job_id': job, 'status': old['status']}
                 db.execute('INSERT INTO jobs(id,conversation,status,created,updated) VALUES(?,?,?,?,?)', (job, cid, 'queued', now, now))
-            with self._lock:
-                self._job_cancels[job] = threading.Event()
             try:
                 message_id = self.chat().receive(cid, text, attachments)
                 with database(self.path) as db:
                     db.execute('UPDATE jobs SET input_message=? WHERE id=?', (message_id, job))
+                # One main execution owns the turn: the same submission reference goes
+                # to its ledger, and the client polls that real status, not a copy.
+                submission = self.runtime().execution.submit(
+                    source='desktop', conversation=cid, message=message_id, text=text,
+                    reference='desktop:' + str(message_id), request=job, place='desktop')
+                with database(self.path) as db:
+                    db.execute('UPDATE jobs SET execution=? WHERE id=?', (submission.get('execution', ''), job))
             except Exception as exc:
                 with database(self.path) as db:
                     db.execute("UPDATE jobs SET status='failed',error=?,updated=? WHERE id=?", (str(exc)[:500], time.time(), job))
-                with self._lock:
-                    self._job_cancels.pop(job, None)
                 raise
-            self._executor.submit(self._send, job, cid, text, attachments, message_id)
-            return {'job_id': job, 'status': 'queued'}
+            return {'job_id': job, 'status': submission.get('status', 'queued')}
         if action == 'chat.job':
             with database(self.path) as db:
                 row = db.execute('SELECT * FROM jobs WHERE id=?', (params['job_id'],)).fetchone()
             if row is None:
                 raise ValueError('任务不存在')
-            return dict(row)
+            result = dict(row)
+            execution = str(result.get('execution') or '')
+            if execution:
+                live = self.runtime().execution.job_status(execution)
+                result['status'] = live['status']
+                result['error'] = live.get('error') or ''
+                result['execution'] = live.get('execution') or execution
+                result['elapsed_ms'] = live.get('elapsed_ms', 0)
+            return result
+        if action == 'turns.list':
+            return self.runtime().execution.turns_list(limit=params.get('limit', 20),
+                                                        cursor=params.get('cursor') or '')
+        if action == 'turn.view':
+            view = self.runtime().execution.turn_view(str(params.get('execution') or ''))
+            if view is None:
+                raise ValueError('执行记录不存在')
+            return view
         if action == 'chat.cancel':
             cid = str(params['id'])
-            chat = self.chat()
-            with chat._state_lock:
-                with database(self.path) as db:
-                    rows = db.execute("SELECT id FROM jobs WHERE conversation=? AND status IN ('queued','running')", (cid,)).fetchall()
-                    db.execute("UPDATE jobs SET status='cancelled',updated=? WHERE conversation=? AND status='queued'", (time.time(), cid))
-                # A worker may have claimed the job just before DesktopChat.send.
-                # Its event is already registered, so cancellation cannot be lost.
-                with self._lock:
-                    for row in rows:
-                        if row['id'] in self._job_cancels and not (chat.active_cid == cid and chat._committed):
-                            self._job_cancels[row['id']].set()
-                return chat.cancel() if chat.active_cid == cid else {'ok': True}
+            info = self.runtime().execution.cancel(cid)
+            return {'ok': True, **info}
         if action.startswith('library.'):
             from doc_store import delete_doc, doc_detail, ingest, list_docs
             from doc_store import search as search_documents
             if action == 'library.status':
                 from doc_store import retrieval_status
-                return retrieval_status(self.root)
+                return retrieval_status(self.root, scope=None)
             if action == 'library.open':
-                row = doc_detail(self.root, params['doc_id'])
+                row = doc_detail(self.root, params['doc_id'], scope=None)
                 path = Path(row['original_path'])
                 if not row['original_path'] or not path.is_file():
                     raise ValueError('这份旧资料没有可打开的原件，已存切片仍可查看')
@@ -1251,14 +1390,14 @@ class Workbench:
             if action == 'library.list':
                 return list_docs(self.root)
             if action == 'library.detail':
-                return doc_detail(self.root, params.get('doc_id') or params.get('id'))
+                return doc_detail(self.root, params.get('doc_id') or params.get('id'), scope=None)
             if action == 'library.delete':
                 return delete_doc(self.root, params.get('doc_id') or params.get('id'))
             if action == 'library.search':
                 limit = params.get('limit', 5)
                 if type(limit) is not int or not 1 <= limit <= 50:
                     raise ValueError('检索条数需为 1 到 50 的整数')
-                return search_documents(self.root, params.get('query', ''), limit=limit, with_status=True)
+                return search_documents(self.root, params.get('query', ''), scope=None, limit=limit, with_status=True)
             raise ValueError('未知资料库操作')
         if action.startswith('life.'):
             if action == 'life.status':
@@ -1271,7 +1410,10 @@ class Workbench:
                 if any(type(value) is not bool for value in changes.values()):
                     raise ValueError('群开关必须是开关值')
                 from group_policy import GroupPolicy
-                GroupPolicy(self.root).configure(chat, changes)
+                if 'reply' in changes:
+                    from fish_agent.settings.tools import ToolSettings
+                    ToolSettings(self.root).save({'send': {'groups': {chat.removeprefix('group:'): changes.pop('reply')}}})
+                if changes: GroupPolicy(self.root).configure(chat, changes)
                 return self.life_status()
             if action == 'life.dive':
                 from group_policy import DIVE_MINUTES_RANGE, GroupPolicy
@@ -1306,7 +1448,10 @@ class Workbench:
                     changes['wake_probability'] = float(value)
                 if not changes:
                     raise ValueError('没有要保存的习惯设置')
-                GroupPolicy(self.root).configure(chat, changes)
+                if 'reply' in changes:
+                    from fish_agent.settings.tools import ToolSettings
+                    ToolSettings(self.root).save({'send': {'groups': {chat.removeprefix('group:'): changes.pop('reply')}}})
+                if changes: GroupPolicy(self.root).configure(chat, changes)
                 return self.life_status()
             if action == 'life.events':
                 return self.life_events(params)
@@ -1326,7 +1471,7 @@ class Workbench:
         except sqlite3.Error as exc:
             raise ValueError('故障记录库无法读取，请检查本地数据库；状态尚未读取成功') from exc
         configuration = []
-        path = self.root / 'channels/fish_qq/config.json'
+        path = project_path(self.root, 'channels/fish_qq/config.json')
         try:
             config = json.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
         except (OSError, json.JSONDecodeError) as exc:
@@ -1334,8 +1479,8 @@ class Workbench:
         owner = str(config.get('allowlist', {}).get('owner_id', ''))
         if not owner:
             configuration.append({'source': 'owner_private', 'code': 'owner_missing',
-                                  'reason': '尚未绑定主人 QQ 账号，主人私聊和系统故障通知不能发送'})
-        context = self.root / 'data/social/context.db'
+                                  'reason': '尚未绑定主人 QQ 账号，主人私聊不能发送'})
+        context = project_path(self.root, 'data/social/context.db')
         if not context.is_file():
             configuration.append({'source': 'owner_private', 'code': 'persona_missing',
                                   'reason': 'QQ 人格库尚未建立，请先选择人格；状态读取不会创建默认人格'})
@@ -1362,9 +1507,7 @@ class Workbench:
 
     # ---------------------------------------------------------------- life page
     def _life_allowlist(self):
-        from storage import read_json
-        config = read_json(self.root / 'channels/fish_qq/config.json', {})
-        return [str(value) for value in config.get('allowlist', {}).get('group_ids', [])]
+        return self._group_ids()
 
     def _life_chat(self, params):
         allowed = self._life_allowlist()
@@ -1381,7 +1524,7 @@ class Workbench:
     def _life_group(self, chat):
         from group_policy import DEFAULTS
         stored = {}
-        path = self.root / 'data/social/group-policy.db'
+        path = project_path(self.root, 'data/social/group-policy.db')
         if path.is_file() and chat:
             conn = _query_only(path)
             try:
@@ -1393,8 +1536,9 @@ class Workbench:
                 conn.close()
         config = {**DEFAULTS, **stored}
         allowed = self._life_allowlist()
+        from fish_agent.settings.tools import ToolSettings
         return {'chat': chat, 'engine': str(config['engine']), 'listen': bool(config['listen']),
-                'reply': bool(config['reply']), 'learn': bool(config['learn']), 'read': bool(config['read']),
+                'reply': ToolSettings(self.root).effective_capability(target=chat)['enabled'], 'learn': bool(config['learn']), 'read': bool(config['read']),
                 'dive_until': float(config['dive_until'] or 0),
                 'wake_probability': float(config['wake_probability']),
                 'active_cooldown_s': int(config['active_cooldown_s']),
@@ -1413,7 +1557,7 @@ class Workbench:
         limit = params.get('limit', 20)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError('事件条数需为 1 到 100 的整数')
-        path = self.root / 'data/qq/memory.db'
+        path = project_path(self.root, 'data/qq/memory.db')
         if not path.is_file():
             return []
         store = MemoryStore(self.root, 'qq')
@@ -1447,31 +1591,9 @@ class Workbench:
             raise ValueError(str(result.get('reason') or '事件没有更新成功'))
         return self.life_events({'limit': params.get('limit', 20)})
 
-    def _send(self, job, cid, text, attachments, message_id=None):
-        with database(self.path) as db:
-            changed = db.execute("UPDATE jobs SET status='running',updated=? WHERE id=? AND status='queued'", (time.time(), job)).rowcount
-            if not changed:
-                with self._lock:
-                    self._job_cancels.pop(job, None)
-                return
-        try:
-            with self._lock:
-                cancelled = self._job_cancels.setdefault(job, threading.Event())
-            self.chat().send(cid, text, attachments, cancelled=cancelled, message_id=message_id)
-        except Exception as error:
-            from dsh_web import safe_runtime_error
-            state = 'cancelled' if isinstance(error, InterruptedError) else 'failed'
-            message = safe_runtime_error(str(error) or type(error).__name__)
-        else:
-            state, message = 'complete', ''
-        with database(self.path) as db:
-            db.execute('UPDATE jobs SET status=?,error=?,updated=? WHERE id=?', (state, message, time.time(), job))
-        with self._lock:
-            self._job_cancels.pop(job, None)
-
     def close(self):
+        for child in self._instances.values():child.close()
         if self._delegation_instance:
             self._delegation_instance.close()
         if self._chat_instance:
             self._chat_instance.cancel()
-        self._executor.shutdown(wait=False, cancel_futures=True)

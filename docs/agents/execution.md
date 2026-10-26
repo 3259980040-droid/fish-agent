@@ -7,6 +7,40 @@
 实际源码保持当前根；前端在同宿主的 `source/dsh/packages/client/ui-fish`。M01 搬根仍延期。
 执行进度记录到 `F:/AIWork/DSH/项目/DSH-Fish/实施/统一Agent系统更新/实施记录/`，文件按所属票分类。
 
-当前实施顺序按索引依赖，07 最后集中验收。用户 2026-10-24 已批准整批自行执行、API 调用和必要重载，取消先前“本轮只改文档／禁止提交部署”的阶段性范围；其他业务要求继续有效。
+当前实施顺序按唯一规格§8.10的2026-10-26九票依赖：W01起步，随后R01—R05，W02、W03、W04依实际前置推进；原21张为既有实现，不重做。原父项历史状态保留。本轮最终由09-10集中一次客户端＋主人私聊验收，07-01仅接真实运行结果，群只读/临时根。主人此前已授权必要实施、API和重载；每轮仍按当轮范围执行，主人已调用implement-spec，当前按九票整合分支实施；各票必要离线核对后整组集中验收。
 
 保留当前工作树已有修改；GitHub 初始上传仅包含工作代码与当前规格工单，排除凭据、生产数据、私聊原文、输出日志及旧历史中的敏感内容。上传前审查实际清单，不直接整盘上传。
+
+## 实例位置
+
+`locations.InstanceContext`明确宿主根、稳定实例ID和实例目录。旧root/data等调用已改用显式`project_path`，不复制Store算法，也不切换进程环境变量。
+
+初始实例`main`归在`data/instances/main`；首次新版本初始化在停服维护时搬接既有可变数据，`data/host/initial-migration.json`记录实际移动及结构化文件引用更新。程序、端口、模型凭据、账号连接、MCP应用保留宿主位置；旧测试space仅保留为初始实例历史资料，不当作新实例。当前票只在临时根执行迁接，生产维护留最终部署。
+
+窗口工作台动作以params.instance_id定位，`instances.list`为宿主动作。所有入口未显式指定时只落稳定初始实例，永远不从当前前端选中值推断目标。
+
+## 固定范围整理
+
+原`memory.curate.run/status`、`fish_memory_curate`与每日tick共用原整理记录。request.source_limits固定原库和学习队列的高水位；运行时progress的learn步骤保存completed/remaining/batch_count，终态result保存相同计数。completed含已完成或明确排除的来源，saved_count和model_calls是本次实际接续数；旧记录没有的逐批字段由前端保持缺失，不推算为零。
+
+普通重新提交先接续原未完成run及其截止；明确force重做才重新处理已有来源。原learning_jobs与原文引用决定跳过或提炼，失败后不再请求下一来源；小结在整个范围学习完成后更新。`ensure_worker(instance_root, stop=生命周期Event)`使用所属实例原停止事件；W02由各Runtime绑定生命周期，不能用共享host.stop替换实例的Event。`execute/run_pending`的cancelled参数沿同一事件检查，未传时保持原同步调用行为。
+
+## QQ执行结果监听
+
+`QQAgentLoop.watch_turn(execution, source=..., chat=..., instance=runtime.context)`在QQ事件循环调用，返回已创建的Task；也接受实例root。监听固定该实例的状态请求和管理员日志，完成后自动移出生命周期集合，QQ停机由原stop取消并等待。阻塞提交在线程结束后回到事件循环再调监听；私聊沿watch_private使用同一入口。
+
+W03逐实例保存原消息、提交后，用对应runtime.context和execution调用此入口。监听只读取原执行记录并写所属实例管理员日志，不改QQStore消息；原消息的runtime_turn_id等写回由提交方使用所属实例QQStore负责，不使用共享连接的默认Store覆写另一实例记录。开始/结束、工具与投递事实仍由原turn_view/trace读取。
+
+## W02窗口操作与实际生命周期
+
+instances.list/create/rename/set_running/presets为宿主管理动作。create的persona可以是明确{name,body}或{instance_id,revision}；不填创建暂停且未配置的窗口。其余窗口动作由固定instance_id交给同一宿主的对应Workbench/ToolHost上下文，不能改self.root临时执行，也不能从前端选中对象推断QQ等外部入口。
+
+set_running与旧settings.save.paused共用本实例Governance值；每实例有一个主消费者、自己的停止Event和原计划检测调度、每日整理/索引维护，后台启动和关闭遍历真实实例。ToolHost只建一个server/ResearchWorker；按实例代理共用实现并持有各自工具身份/队列。窗口停止不改宿主连接，未配置人格不能启动，状态照实返回。
+
+## W04回合工作台读面
+
+`turns.list({cursor?,limit?})`按当前实例agent_runs的(created,id)稳定降序分页，返回runs/next_cursor及本实例stats。每行复用turn_view的实际认领材料、原件缺失态、简洁工具行动与投递；不按reasoning非空筛选。合并等待记录保留merged_into，不重复计为思考。`turn.view({execution})`读取选中回合完整reasoning/events、五时间点及单轮usage；原chat.reasoning同样返回全文，不再静默截20000字。读取失败不等于缺失记录，原件删除不从预览恢复。
+
+新请求沿原context_requests.turn_id关联原trace.id，trace.execution事件保留主执行引用；累计和单轮只统计可可靠关联的主执行请求，旧未关联记录留coverage，不能按时间/session猜账。闭合步骤由原usage字段从空串变为JSON的完成事实计数（失败及未回传tokens也可闭合），有闭合步骤的distinct execution才计轮。原model-usage账本不与context_requests相加；缺缓存字段为null。现有首输出含reasoning/工具且没有正文末时间和对应正文tokens，output_speed据实null并说明原因。
+
+outputs从同trace的final_content和同call_id发送工具/真实投递结果读取：generated不等于发言，staged仅queued，实际sent/uncertain/failed按原回执；没有增加生成或发送流程。前端以(instance_id,execution)固定查询归属，累计不随当前分页变化，历史选择不自动变成最新轮。

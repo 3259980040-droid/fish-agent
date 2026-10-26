@@ -5,6 +5,7 @@ tertiary. Keep the existing type/colors/spacing and the one primary Send action;
 use selection plus a border to identify the focused message (§5.7).
 """
 from __future__ import annotations
+from locations import project_path
 
 import uuid
 import json
@@ -144,7 +145,7 @@ class ChatPage(BasePage):
         self.files.setMaximumHeight(86)
         self.files.hide()
         chat.body.addWidget(self.files)
-        self.editor = Composer(lambda: self.services.root / "data" / self.role / "pasted")
+        self.editor = Composer(lambda: project_path(self.services.root, "data", self.role, "pasted"))
         self.editor.setPlaceholderText("发送消息，或粘贴、拖入照片…  Ctrl+Enter 发送")
         self.editor.setFixedHeight(100)
         chat.body.addWidget(self.editor)

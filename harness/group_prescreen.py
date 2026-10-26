@@ -14,6 +14,7 @@
 所以失败时 audit 会带上尝试次数，账能对上。
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 from pathlib import Path
@@ -81,7 +82,7 @@ def _context(root, chat, payload):
     if not text.strip():
         text = str(payload.get('text') or '')
     own = str(payload.get('message_id') or '')
-    store = Path(root) / 'data/qq/qq.db'
+    store = project_path(Path(root), 'data/qq/qq.db')
     columns = 'id,ts,sender_id,text,direction,status,channel_message_id'
     own_row = _rows(store, 'SELECT ' + columns + ' FROM messages WHERE chat_id=? AND '
                            'channel_message_id=? ORDER BY id DESC LIMIT 1', (chat, own)) if own else []

@@ -1,4 +1,5 @@
 """Optional Fish child tasks over the existing Fish model/tool loop and task ledger."""
+from locations import project_path
 from concurrent.futures import ThreadPoolExecutor
 import json
 import re
@@ -17,7 +18,7 @@ ACTIVE = ('queued','starting','running','cancel_requested')
 class TaskDelegation:
     def __init__(self,root,on_result=None):
         self.root = Path(root)
-        self.path = self.root/'data/delegation/tasks.db'
+        self.path = project_path(self.root, 'data/delegation/tasks.db')
         self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(max_workers=1,thread_name_prefix='fish-child')
         self._cancels,self._futures = {},{}
@@ -45,7 +46,7 @@ class TaskDelegation:
         if row is None: raise ValueError('任务不存在')
         value = dict(row)
         value.update(config=json.loads(value['config']),artifacts=json.loads(value['artifacts']))
-        value['workspace'] = value['config'].get('workspace') or str(self.root/'data/delegation/tasks'/task/'workspace')
+        value['workspace'] = value['config'].get('workspace') or str(project_path(self.root, 'data/delegation/tasks', task, 'workspace'))
         value['kind'] = value['config'].get('kind','legacy')
         value['engine'] = value['config'].get('engine','dsh')
         return value
@@ -74,7 +75,8 @@ class TaskDelegation:
         task,now = uuid.uuid4().hex,time.time()
         owner = Governance(self.root,'qq').owner_id()
         target = 'private:'+owner if notify=='owner' else source_place if notify=='source' else ''
-        config = {'engine':'fish','role':'qq','kind':kind,'owner_id':owner,'workspace':str(self.root/'workspace/tasks'/task),
+        from locations import instance_context
+        config = {'instance_id': instance_context(self.root).instance_id, 'engine':'fish','role':'qq','kind':kind,'owner_id':owner,'workspace':str(project_path(self.root, 'workspace/tasks', task)),
                   'parent_session':parent_session,'parent_task':parent_task,'source_scope':source_scope,'source_place':source_place,
                   'notify_target':target,'model_source':'harness/agents.json; same Fish ModelGateway; no DSH system prompt'}
         with self._lock:
@@ -181,7 +183,8 @@ class TaskDelegation:
             task = row['id']
         else:
             task,now = uuid.uuid4().hex,time.time()
-            config = dict(engine='fish',kind='inline',owner_id=Governance(self.root).owner_id(),workspace=str(Path(files[0]['source_path']).parent),
+            from locations import instance_context
+            config = dict(instance_id=instance_context(self.root).instance_id,engine='fish',kind='inline',owner_id=Governance(self.root).owner_id(),workspace=str(Path(files[0]['source_path']).parent),
                           parent_session=parent_session or session,source_scope=source_scope,source_place=source_place,notify_target='')
             with database(self.path) as db:
                 db.execute('INSERT INTO tasks(id,request_id,title,prompt,source_conversation,source_message,session,status,config,artifacts,artifact_status,created,updated,result) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',

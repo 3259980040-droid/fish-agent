@@ -12,11 +12,29 @@
 | 记忆与资料 | 来源、词法+有效向量、原件/读取范围、日周月整理 | memory_store/memory_engine、doc_store；fish_library仅适配接口，语义不可用明确显示词法 |
 | 视觉 | 同一主模型看原图/局部/帧，不默认另起识图判断 | image_views，multimodal；本机图片可由fish_file_read直接返回像素 |
 | 表达与投递 | 既有气泡规则、唯一通道分段与实际回执 | chat_output、owner_private/BotControl；不把工具staged当送达 |
-| 定时 | reminder可靠履约，autonomy可不行动 | fish_schedules、agent_scheduler，同一任务页；已发送或未知结果不自动补发 |
-| 客户端状态 | 当前真实阶段、服务商reasoning副本、工具与投递 | turn_trace→workbench→ui-fish；不再为解释自身状态调用另一个模型 |
+| 主执行 | 唯一消费者、唯一模型循环、输入合并与唤醒判定 | fish_agent（execution/experience/settings/tools/delivery/plans/adapters）；客户端、QQ私聊、群、计划、时钟都经同一回合 |
+| 唤醒与批次 | 客户端/私聊立即、群@或8条、45分钟、3秒续醒；文件固定3秒归批 | execution/wakes、experience/batches；批次只供材料，不另起思考 |
+| 定时 | reminder可靠履约，autonomy可不行动；实例只提交主执行 | plans 经主执行，fish_schedules 保留计划/实例与回执；已发送或未知结果不自动补发 |
+| 记忆整理与检索 | 每日/工具/客户端共用一条执行记录；索引→概述→原文分层回查 | memory_curation、knowledge、history_index/history_catalog、memory_store；FTS5真实调用，语义未就绪明确降级 |
+| 客户端状态 | 当前真实阶段、服务商reasoning副本、工具与投递、批次与计划实例 | turn_trace + turn.view→workbench→ui-fish；不再为解释自身状态调用另一个模型 |
 
 `agent_tools.py` 文件/进程接口参考本地DSH的fs-local、tool-fs和tool-bash，用Python实现适配，并非宣称逐字复制TS执行器全部特性。主人明确指定已有工程时使用其真实路径；默认文件在workspace分类目录。源码仍在E盘原根，M01没有执行。
 
 QQ操作来自当前Fish账号的真实OneBot/Tulpa接口，不能冒充主人的QQ身份。MCP采用原版授权登记的完整能力；某个接口服务端不支持、认证失效或回执不全均如实返回。声音、视频和跨设备操作仍是接口预留或现有外部依赖，不能据此宣称已完整验收。
 
+统一检索和原资料搜索/读取在本Fish实例内跨客户端、私聊及群读取，命中保留真实场所、来源人物、引用与修订；工作台原件打开也按同一实例的真实资料编号回读。资料保存与整理仍登记其原来源scope，不把群资料改存owner。查询分别返回是否命中、原件尚无文本索引的数量、读取失败及实际词法/语义状态；语义就绪不等于本次查询用过语义。
+
 本机语义模型使用vendor/runtime/memory-python独立环境，依赖见requirements-memory.txt；模型BAAI/bge-small-zh-v1.5。浏览器使用Fish自己的workspace/browser/profile。安装依赖、模型缓存、运行数据和登录凭据不进入GitHub发布包。
+
+## 工具执行入口的已知例外
+
+`fish_emoji_search` / `fish_emoji_read` 的**定义**仍只来自 ToolHost `/catalog`，但主执行循环在拿到结果后要为模型附加真实预览图，所以这两个工具在 `fish_agent/execution/runner.py` 内直接调用 `emoji_store`（`EMOJI_TOOLS` 常量与分支）。这是本批保留的既有例外，不是第二套工具注册或第二套身份；其余内置工具与 MCP 一律经 ToolHost `/execute`。清理方向是把预览作为工具结果的受控图像附件回到同一执行入口，已记录为后续工程债。
+
+
+## 本窗口有效能力与原调用结果（R03）
+
+`fish_agent.settings.tools.ToolSettings(instance_root)` 是唯一实例开关读取点；宿主 `PluginRegistry` 仅共用安装、工具定义、连接与受保护凭据。本窗口停用不调用 registry.toggle/cancel，不断开其他窗口的连接。`tools.settings.get/save` 保存 `tools/plugins/send`，返回实际提交的同一实例值；旧 send_policy 私聊/任务结果与群发送字段只是同源投影，退出独立裁决。
+
+`effective_capability(name, arguments, identity, target, plugin)` 返回 enabled/reason/instance_id/target；`require` 被目录、执行和最后可控发送共同使用；`require_delivery(target, source_tools)` 同时核对目的地和已暂存发送工具。通用多目的地工具保留定义，实际调用按具体目的地拒绝；发送关闭不影响输入或思考。已交给外部的结果保持真实回执，不反向取消、不重发。
+
+按需发现返回的完整定义进入同一模型循环，目录在下一请求前重新读取当前实例设置；不再用初始 offered 清单否决后来发现的工具。工具结果沿原 tool_call_id 回原模型，安全的扩展错误与参数错误也在这条结果内。异步任务、进程及投递终态从所属实例原存储读取，作为下一次普通思考的结果材料，不另造回合；原始结果/工作文件不迁到宿主或其他实例。

@@ -1,9 +1,14 @@
-"""Persistent Fish chat; legacy work sessions retain their DSH execution path."""
-from __future__ import annotations
+"""Persistent Fish chat records for the native client; the turn itself is the runtime's.
 
-import asyncio
+This module owns the client's conversation store: conversations, inbound records and
+the outbound bubbles the page reads. It no longer generates a reply - a submission
+goes to the one main execution, and the runtime's delivery writes the answer here
+through the same atomic commit the old path used.
+"""
+from __future__ import annotations
+from locations import project_path
+
 import json
-import shutil
 import sqlite3
 import threading
 import time
@@ -11,19 +16,16 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 
-import requests
-from dsh_web import DSHWebClient
-from governance import Governance, control_token
-from multimodal import MediaService
+from governance import Governance
 from storage import locked_settings
 
 
 class DesktopChat:
-    def __init__(self, root: Path, role: str, runtime):
+    def __init__(self, root: Path, role: str, runtime=None):
         if role not in ("qq", "research"):
             raise ValueError("未知角色")
         self.root, self.role, self.runtime = root, role, runtime
-        self.db = root / "data" / role / "desktop-chat.db"
+        self.db = project_path(root, "data", role, "desktop-chat.db")
         self.db.parent.mkdir(parents=True, exist_ok=True)
         self.cancel_event = threading.Event()
         self.lock = threading.Lock()
@@ -73,41 +75,8 @@ class DesktopChat:
         return cid
 
     def set_mode(self, cid: str, mode: str, workspace: str = '') -> dict:
-        """Switch this conversation between chat and work without a new conversation.
-
-        The conversation id, space, runtime session, persona revision, messages
-        and attachments never change. The native working-directory service
-        applies an updated workspace before the next work turn.
-        """
-        if self.role=='qq':
-            raise ValueError('Fish已使用自己的Agent工具，不再切换DSH工作模式；直接交办任务即可')
-        if mode not in ('chat', 'work'):
-            raise ValueError('未知对话模式')
-        with self._state_lock:
-            if self.active_cid == cid:
-                raise RuntimeError('请等待当前回复完成或取消后再切换模式')
-        with closing(self.connect()) as db:
-            row = db.execute('SELECT * FROM conversations WHERE id=?', (cid,)).fetchone()
-            if not row:
-                raise ValueError('请选择对话')
-            target = row['workspace']
-            if mode == 'work':
-                if workspace:
-                    target = workspace
-                elif not target:
-                    from owner_computer import workspace as owner_workspace
-                    target = str(owner_workspace(self.root))
-                directory = Path(target).resolve()
-                if not directory.is_dir():
-                    raise ValueError('请选择存在的工作目录')
-                target = str(directory)
-            db.execute('UPDATE conversations SET mode=?,workspace=?,updated_at=? WHERE id=?',
-                       (mode, target, time.strftime("%Y-%m-%d %H:%M:%S"), cid))
-            db.commit()
-            settings = dict(db.execute('SELECT mode,workspace,revision,permission FROM conversations WHERE id=?', (cid,)).fetchone())
-        return {'ok': True, 'conversation_id': cid, 'session_id': row['session_id'] or '',
-                'space_id': row['space_id'] or '', 'settings': settings,
-                'note': '已切换到' + ('工作模式' if mode == 'work' else '聊天模式') + '；同一对话、人格与历史保持不变。'}
+        """Retired for Fish: she already uses her own Agent tools in one main execution."""
+        raise ValueError('Fish已使用自己的Agent工具，不再切换DSH工作模式；直接交办任务即可')
 
     def snapshot(self, cid: str = "", search: str = "", after='', before='', limit=100, *, around=0) -> dict:
         with closing(self.connect()) as conn:
@@ -146,7 +115,7 @@ class DesktopChat:
         with closing(self.connect()) as conn:
             settings = conn.execute('SELECT mode,workspace,revision,permission FROM conversations WHERE id=?',(cid,)).fetchone()
         return {"conversation_id": cid, "conversations": [dict(row) for row in conversations], "messages": result, 'has_more': total > len(result), 'search_hits': hits, 'focus_id': around,
-                'space': context, 'settings':dict(settings) if settings else {},'activity':getattr(self.active_client,'activity',{}) if cid==self.active_cid else {}}
+                'space': context, 'settings':dict(settings) if settings else {}}
 
     @locked_settings
     def reload_persona(self, cid, revision):
@@ -177,6 +146,7 @@ class DesktopChat:
         from social_context import SocialContext
         return SocialContext(self.root).space(row['space_id'])
 
+    # ---------------------------------------------------------------- records
     def _record(self, cid, direction, text, segments, status, error=""):
         with closing(self.connect()) as conn:
             cur = conn.execute("INSERT INTO messages(conversation_id,direction,text,segments,status,error,created_at) VALUES(?,?,?,?,?,?,?)", (cid, direction, text, json.dumps(segments, ensure_ascii=False), status, error[:500], time.strftime("%Y-%m-%d %H:%M:%S")))
@@ -189,10 +159,45 @@ class DesktopChat:
             conn.execute("UPDATE messages SET status=?,error=? WHERE id=?", (status, error[:500], mid))
             conn.commit()
 
-    def _client(self):
-        from runtime_adapter import DSHRuntimeAdapter
-        return DSHRuntimeAdapter(self.root, self.role, self.runtime).connect(self.cancel_event,
-            require_isolation=bool(getattr(self, '_isolation_requested', False)))
+    def inbound(self, cid, mid):
+        """The inbound record that was saved before submission, or None."""
+        with closing(self.connect()) as db:
+            row = db.execute('SELECT * FROM messages WHERE id=? AND conversation_id=?', (int(mid), cid)).fetchone()
+        return dict(row) if row else None
+
+    def status(self, mid, status, error=""):
+        """Record what actually happened to one inbound message."""
+        self._status(mid, status, error)
+
+    def update_segments(self, mid, segments):
+        with closing(self.connect()) as db:
+            db.execute('UPDATE messages SET segments=? WHERE id=?', (json.dumps(segments, ensure_ascii=False), mid))
+            db.commit()
+
+    def commit_reply(self, cid, mid, bubbles):
+        """The answer and its delivery share one commit: a late result cannot half-land."""
+        from chat_output import local_segments
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with self._state_lock:
+            with closing(self.connect()) as conn:
+                for bubble in bubbles:
+                    conn.execute('INSERT INTO messages(conversation_id,direction,text,segments,status,error,created_at) VALUES(?,?,?,?,?,?,?)',
+                                 (cid, 'outbound', str(bubble.get('text') or ''),
+                                  json.dumps(local_segments(self.root, bubble), ensure_ascii=False),
+                                  'done', '', stamp))
+                if mid not in (None, 0, '0', ''):
+                    conn.execute("UPDATE messages SET status='done',error='' WHERE id=?", (mid,))
+                conn.execute('UPDATE conversations SET updated_at=? WHERE id=?', (stamp, cid))
+                conn.commit()
+            self._committed = True
+
+    def mode(self, cid):
+        """Current persisted settings of one conversation (mode read per phase)."""
+        with closing(self.connect()) as db:
+            row = db.execute('SELECT mode,workspace,revision,permission FROM conversations WHERE id=?', (cid,)).fetchone()
+        if not row:
+            raise ValueError("对话不存在")
+        return dict(row)
 
     def receive(self, cid, text, attachments):
         """Persist an inbound immediately, even while this Fish is thinking."""
@@ -227,206 +232,61 @@ class DesktopChat:
             db.commit()
         return mid
 
+    # ------------------------------------------------------------- submission
     def send(self, cid: str, text: str, attachments: list[dict], *, cancelled=None, message_id=None) -> dict:
+        """Blocking submission kept for the old desktop callers.
+
+        The turn runs in the same one main execution the client uses; this call only
+        waits for its real result. Nothing is generated here.
+        """
+        from fish_agent import get_runtime
         if not self.lock.acquire(blocking=False):
             raise RuntimeError("这个角色正在回复，请等待或取消")
-        with self._state_lock:
-            self.cancel_event = cancelled if cancelled is not None else threading.Event()
-            self.active_cid = cid
-            self._committed = False
         mid = message_id
+        previous_cid = self.active_cid
         try:
             if self.policy.config()["paused"]:
                 raise PermissionError("主人已暂停任务，请在系统设置或主人私聊恢复")
             if not text.strip() and not attachments:
                 raise ValueError("请输入文字或添加照片")
             with closing(self.connect()) as conn:
-                conversation = conn.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
-            if conversation is None:
-                raise ValueError("对话不存在")
-            space = None if self.role == 'qq' else self.conversation_context(cid)
-            # Resolve the queued turn's route from storage. An active turn must
-            # finish or cancel before its conversation can switch routes.
-            work = self.role != 'qq' and self._mode(cid)['mode'] == 'work'
-            self._isolation_requested = bool(space)
-            scope = 'work:'+cid if work else space['scope'] if space else 'owner'
+                if conn.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone() is None:
+                    raise ValueError("对话不存在")
             mid = mid if mid is not None else self.receive(cid, text, attachments)
-            with closing(self.connect()) as db:
-                inbound = db.execute('SELECT * FROM messages WHERE id=? AND conversation_id=?', (mid, cid)).fetchone()
-            if not inbound:
-                raise ValueError('已接收的原始消息不存在，未重复建立消息')
-            from experience import was_considered
-            if was_considered(self.root, 'desktop:' + str(mid), session='desktop:' + cid):
-                self._status(mid, 'considered', '')
-                return self.snapshot(cid)
-            imported = json.loads(inbound['segments'] or '[]')
-            self._status(mid, 'processing')
-            media = MediaService(self.root, self.role)
-            if space:
-                from social_context import SocialContext
-                media.directory = SocialContext(self.root).directory(space['id']) / 'media'
-            content = media.prepare_content(imported, text or "请查看附件。", local=True,
-                                          cancelled=self.cancel_event, include_sources=not work, source_reference='desktop:' + str(mid))
-            from memory_store import MemoryStore
-            memory = MemoryStore(self.root, self.role)
-            if self.cancel_event.is_set():
-                raise InterruptedError("已取消")
-            self.policy.consume("calls")
-            if work:
-                # Only the DSH work prompt is pre-searched; the chat turn leaves
-                # web results to the model's own tools.
-                from web_knowledge import WebKnowledge
-                web = WebKnowledge(self.root).resolve(cid, text, self.cancel_event)
-                content[0]['text'] = self._prompt_text(cid, text, memory, scope) + web + content[0]['text']
-                client = self._client()
-                result = asyncio.run(self._turn(client, conversation['session_id'], cid, content))
-            else:
-                result = self._chat_turn(cid, mid, content, imported, media, memory, scope, space)
-            if result.get("cancelled") or self.cancel_event.is_set():
-                raise InterruptedError("已取消")
-            if not result.get("ok"):
-                raise RuntimeError(result.get("error", "没有取得完整回复"))
-            if result.get('silent'):
-                self._status(mid, 'considered', '')
-                return self.snapshot(cid)
-            if not work:self.policy.check_output(result["text"])
-            from chat_output import decode_reply,local_segments
-            bubbles = decode_reply(self.root,result['text']) if self.role=='qq' else [{'kind':'text','text':result['text']}]
-            with self._state_lock:
-                if self.cancel_event.is_set():
-                    raise InterruptedError('本地已取消等待；晚到结果未保存为成功回复')
-                # Cancellation and successful delivery share one commit boundary.
-                from experience import delivery
-                delivery(self.root, 'desktop:' + str(mid), sending=True)
-                with closing(self.connect()) as conn:
-                    for bubble in bubbles:
-                        conn.execute('INSERT INTO messages(conversation_id,direction,text,segments,status,error,created_at) VALUES(?,?,?,?,?,?,?)',
-                            (cid,'outbound',str(bubble.get('text') or ''),json.dumps(local_segments(self.root,bubble),ensure_ascii=False),'done','',time.strftime('%Y-%m-%d %H:%M:%S')))
-                    conn.execute("UPDATE messages SET status='done',error='' WHERE id=?", (mid,))
-                    conn.execute('UPDATE conversations SET updated_at=? WHERE id=?', (time.strftime('%Y-%m-%d %H:%M:%S'), cid))
-                    conn.commit()
-                self._committed = True
-                delivery(self.root, 'desktop:' + str(mid), outcome='sent')
-            if not work:
-                try:
-                    memory.enqueue('desktop:' + str(mid), text, scope)
-                except Exception:
-                    self.policy.audit('desktop_memory_enqueue_failed', '回复已交付；后续记忆提取未排队')
+            self.active_cid = cid
+            runtime = get_runtime(self.root)
+            submission = runtime.execution.submit(
+                source='desktop', conversation=cid, message=mid, text=text,
+                reference='desktop:' + str(mid), request='')
+            run = runtime.execution.wait(submission['execution'], cancelled=cancelled)
+            if run['status'] == 'cancelled':
+                raise InterruptedError(run['error'] or '已取消')
+            if run['status'] == 'failed':
+                kind = run['error_kind'] or 'RuntimeError'
+                message = run['error'] or '没有取得完整回复'
+                if kind in ('TimeoutError', 'InterruptedError'):
+                    raise (TimeoutError if kind == 'TimeoutError' else InterruptedError)(message)
+                raise RuntimeError(message)
             return self.snapshot(cid)
         except Exception as exc:
-            if mid is not None:
-                status = "cancelled" if isinstance(exc, InterruptedError) else "blocked" if isinstance(exc, PermissionError) else "failed"
-                self._status(mid, status, str(exc))
+            if mid is not None and not isinstance(exc, InterruptedError):
+                self._status(mid, "cancelled" if isinstance(exc, InterruptedError) else "blocked"
+                             if isinstance(exc, PermissionError) else "failed", str(exc))
             raise
         finally:
+            self.active_cid = previous_cid
             with self._state_lock:
                 self.active_session = None
                 self.active_client = None
-                self.active_cid = ''
             self.lock.release()
 
-    def _chat_turn(self, cid, mid, content, imported, media, memory, scope, space):
-        from desktop_context import DesktopContext
-        from model_gateway import ModelGateway
-        from social_context import SocialContext
-        from conversation_style import private_context
-        from fish_chat import respond
-        from tool_host import bind_session
-        # Unreadable attachments keep the turn alive, with the same note QQ uses.
-        from owner_private import note_media_gaps
-        note_media_gaps(imported, content, self.policy)
-        context = DesktopContext(self.root, self.db)
-        context.remember_input(mid, content)
-        with closing(self.connect()) as db:
-            db.execute('UPDATE messages SET segments=? WHERE id=?', (json.dumps(imported, ensure_ascii=False), mid))
-            db.commit()
-        gateway = ModelGateway(self.root, self.role)
-        self.active_client = gateway
-        from experience import ExperienceTurn
-        experience = ExperienceTurn(self.root, self.db, cid, mid)
-        revision = self._mode(cid)['revision']
-        contexts = SocialContext(self.root)
-        persona = contexts.active_persona('qq') if self.role == 'qq' else space['persona'] if space else contexts.persona(revision) if revision else contexts.ensure_default(self.role)
-        session = 'desktop:' + cid
-        bind_session(self.root, self.role, session, 'owner', desktop=True)
-        tool_context = 'owner-desktop' if self.role == 'qq' else ''
-        from chat_output import TurnSilent
-        try:
-            answer = respond(self.root, self.role, persona=persona, history=[], history_source={},
-            memory=memory.context(content[0]['text'], scope), scope=scope,
-            references=private_context(self.root, content[0]['text'], conversation=cid, desktop=True),
-            current=media.chat_completions_content(content), session=session,
-            cancelled=self.cancel_event, origin='desktop-chat:' + cid, tool_context=tool_context, experience=experience,
-            output='bubbles' if self.role=='qq' else 'text',emoji_state={'previewed':set(),'tools':[]})
-        except TurnSilent:
-            return {'ok': True, 'silent': True, 'text': ''}
-        return {'ok': True, 'text': answer}
-
-    def _mode(self, cid):
-        """Current persisted settings of one conversation (mode read per phase)."""
-        with closing(self.connect()) as db:
-            row = db.execute('SELECT mode,workspace,revision,permission FROM conversations WHERE id=?', (cid,)).fetchone()
-        if not row:
-            raise ValueError("对话不存在")
-        return dict(row)
-
-    def _prompt_text(self, cid, text, memory, scope):
-        """Program prefix for one turn; the user's own words are left raw."""
-        from conversation_style import private_context
-        style=private_context(self.root,text,conversation=cid,desktop=True) if self._mode(cid)['mode']=='chat' else ''
-        return memory.context(text, scope)+style
-
-    async def _turn(self, client, session, cid, content):
-        self.active_client=client
-        await client.auth()
-        settings=self._mode(cid)
-        if session:
-            try:
-                baseline = await client.baseline(session)
-            except Exception:
-                # Preserve the desktop conversation when the runtime history
-                # cannot be resumed. Require an explicit new conversation.
-                raise RuntimeError("运行时会话无法恢复，请新建对话；原记录仍保留")
-        else:
-            context = self.conversation_context(cid)
-            if settings['mode']=='work':
-                session=await client.create_session(cwd=settings['workspace'])
-            elif context:
-                from social_context import SocialContext
-                session = await client.create_session(cwd=str(SocialContext(self.root).directory(context['id'])))
-            else:
-                session = await client.create_session()
-            with closing(self.connect()) as conn:
-                conn.execute("UPDATE conversations SET session_id=? WHERE id=?", (session, cid))
-                conn.commit()
-            baseline = await client.baseline(session)
-        self.active_session = session
-        from tool_host import bind_session
-        space = self.conversation_context(cid)
-        settings = self._mode(cid)  # set_mode() may have run while awaiting the client.
-        if settings['mode']=='work':
-            bind_session(self.root,self.role,session,scope='work:'+cid,desktop=True)
-            port=self.runtime.config.runtime_port(self.role)
-            response=await asyncio.to_thread(requests.post,f'http://127.0.0.1:{port}/fish/work-permission',
-                json={'session':session,'preset':settings['permission']},headers={'x-fish-token':control_token(self.root)},timeout=10,
-                proxies={'http':None,'https':None,'all':None})
-            if not response.ok:raise RuntimeError(response.json().get('error','工作工具权限未能应用'))
-        elif space:
-            from social_context import SocialContext
-            SocialContext(self.root).bind_runtime(space['id'], session)
-            bind_session(self.root, self.role, session, scope=space['scope'], desktop=True)
-        else:
-            bind_session(self.root, self.role, session, desktop=True)
-        if self.cancel_event.is_set():
-            return {"cancelled": True}
-        await client.prompt(session, content)
-        return await client.wait_response(session, baseline, 1800 if self._mode(cid)['mode']=='work' else 180, cancel_event=self.cancel_event)
-
     def cancel(self):
-        with self._state_lock:
-            if self._committed:
-                return {'ok': True, 'note': '本轮回复已完成保存'}
-            self.cancel_event.set()
-            if self.active_session:
-                return self.runtime.cancel(self.role, self.active_session)
-            return {'ok': True, 'note': '已请求取消本地等待；未确认服务商是否停止计算'}
+        """Cancel the real work: this conversation's queued submissions and its turn."""
+        from fish_agent import get_runtime
+        if self._committed:
+            return {'ok': True, 'note': '本轮回复已完成保存'}
+        conversation = self.active_cid
+        if not conversation:
+            return {'ok': True, 'note': '没有正在进行的回合'}
+        info = get_runtime(self.root).execution.cancel(conversation)
+        return {'ok': True, 'note': info['note'], **info}

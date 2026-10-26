@@ -1,6 +1,7 @@
 """Research 收藏夹最小闭环：同步、字幕优先、无字幕才视频理解，失败可重试。"""
 
 from __future__ import annotations
+from locations import project_path
 
 import json
 import re
@@ -31,7 +32,7 @@ class LocalVideoAnalyzer:
     def __init__(self, root: Path, command: str | None = None):
         self.root = root
         self.command = command or self._resolve()
-        self.out_dir = root / "data" / "research" / "frames"
+        self.out_dir = project_path(root, "data", "research", "frames")
 
     @staticmethod
     def _resolve() -> str | None:

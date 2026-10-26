@@ -4,6 +4,7 @@ No persona text grants authority. Approval requires the currently verified owner
 on QQ; selecting or editing a revision never enables group replies.
 """
 from __future__ import annotations
+from locations import project_path
 
 import hashlib
 import json
@@ -21,10 +22,14 @@ def identifier(value):
     return str(value)
 
 
+class PersonaNotConfigured(ValueError):
+    """A new instance has no owner-selected persona; no host default is borrowed."""
+
+
 class SocialContext:
     def __init__(self, root):
         self.root = Path(root)
-        self.path = self.root / 'data/social/context.db'
+        self.path = project_path(self.root, 'data/social/context.db')
         with database(self.path) as db:
             db.executescript('''
             CREATE TABLE IF NOT EXISTS personas(
@@ -59,7 +64,7 @@ class SocialContext:
                 db.execute("ALTER TABLE audit ADD COLUMN runtime_digest TEXT NOT NULL DEFAULT ''")
 
     def owner(self):
-        return str(read_json(self.root / 'channels/fish_qq/config.json').get('allowlist', {}).get('owner_id', ''))
+        return str(read_json(project_path(self.root, 'channels/fish_qq/config.json')).get('allowlist', {}).get('owner_id', ''))
 
     def require_owner(self, sender):
         from governance import Governance
@@ -108,7 +113,7 @@ class SocialContext:
         return self.persona(revision)
 
     def _text(self, name):
-        path = self.root / name
+        path = project_path(self.root, name)
         return path.read_text(encoding='utf-8') if path.is_file() else ''
 
     @locked_settings
@@ -128,6 +133,10 @@ class SocialContext:
             else:
                 default = db.execute('SELECT revision FROM default_personas WHERE role=?', (role,)).fetchone()
                 revision = default['revision'] if default else ''
+        if not revision:
+            from locations import instance_context, INITIAL_INSTANCE_ID
+            if role=='qq' and instance_context(self.root).instance_id!=INITIAL_INSTANCE_ID:
+                raise PersonaNotConfigured('这个Fish窗口尚未配置人格，请填写或选择人格后启动')
         persona = self.persona(revision) if revision else self.ensure_default(role)
         with database(self.path) as db:
             db.execute('INSERT OR IGNORE INTO agent_profiles VALUES(?,?,?)', (role, persona['id'], time.time()))
@@ -151,6 +160,9 @@ class SocialContext:
             row = db.execute('SELECT id FROM personas WHERE role=? ORDER BY created,id LIMIT 1', (role,)).fetchone()
         if row:
             return self.persona(row['id'])
+        from locations import instance_context, INITIAL_INSTANCE_ID
+        if role=='qq' and instance_context(self.root).instance_id!=INITIAL_INSTANCE_ID:
+            raise PersonaNotConfigured('这个Fish窗口尚未配置人格，请填写或选择人格后启动')
         from core import HarnessConfig
         agent = HarnessConfig(self.root).agent(role)
         if agent is None:
@@ -233,6 +245,10 @@ class SocialContext:
     def create_space(self, role, name='独立测试', *, revision='', origin='desktop'):
         if origin not in ('desktop', 'owner-qq', 'group'):
             raise ValueError('无效的会话入口')
+        if not revision:
+            from locations import instance_context, INITIAL_INSTANCE_ID
+            if role=='qq' and instance_context(self.root).instance_id!=INITIAL_INSTANCE_ID:
+                raise PersonaNotConfigured('这个Fish窗口尚未配置人格，请填写或选择人格后启动')
         persona = self.persona(revision) if revision else self.ensure_default(role)
         if persona['role'] != role:
             raise ValueError('人格版本不属于当前角色')
@@ -266,8 +282,8 @@ class SocialContext:
                     raise
             # A window that was deleted still needs a scratch directory: leftover task
             # rows point at it, and one stale row must not fail an unrelated reply.
-            return self.root / 'data' / 'qq' / 'spaces' / sid
-        return self.root / 'data' / space['role'] / 'spaces' / sid
+            return project_path(self.root, 'data', 'qq', 'spaces', sid)
+        return project_path(self.root, 'data', space['role'], 'spaces', sid)
 
     def bind_runtime(self, sid, session):
         self.space(sid)
@@ -318,7 +334,7 @@ class SocialContext:
         persona = self.persona(revision)
         if persona['role'] != 'qq' or not persona['approved']:
             raise PermissionError('此人格版本尚未由当前主人完成测试并认可')
-        allow = read_json(self.root / 'channels/fish_qq/config.json').get('allowlist', {}).get('group_ids', [])
+        allow = read_json(project_path(self.root, 'channels/fish_qq/config.json')).get('allowlist', {}).get('group_ids', [])
         if str(group_id) not in {str(value) for value in allow}:
             raise PermissionError('此群不在主人设置的白名单中')
         with database(self.path) as db:

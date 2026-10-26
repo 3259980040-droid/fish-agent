@@ -65,15 +65,13 @@ def _part(call, *args, **kwargs):
 
 
 def _cleanup(root, now):
-    """过期与重复的记忆转成候选：沿用维护任务那一套，不另立判断。"""
-    from memory_maintenance import MemoryMaintenance, due_windows
-    maintenance = MemoryMaintenance(root)
-    window = due_windows(now)['weekly']
+    """过期与重复的记忆转成候选：沿用同一个整理程序，不另立判断。"""
+    from memory_curation import tidy_memories
     merged, expired, roles, kept = [], [], [], 0
-    for role in maintenance._roles() or ['qq']:
-        # 公开的 run() 按周窗口去重，每天调用会一直回 already-done，所以这里
-        # 直接走它执行的那段整理：判断标准、停用方式、保留规则都是同一份。
-        summary = maintenance._weekly(role, window, now)
+    for role in ('qq', 'research'):
+        if not (role_dir(Path(root), role) / 'memory.db').is_file():
+            continue
+        summary = tidy_memories(root, role, now)
         roles.append(role)
         kept += int(summary.get('kept') or 0)
         for row in summary.get('collapsed') or []:
@@ -274,52 +272,40 @@ def _summary(digest):
 
 
 def run(root, day=None, *, force=False, gateway=None, messages_db=None, now=None):
-    """一天一次：清理记忆、写小结、挑表情，然后留下一份可读的结果。"""
-    root = Path(root)
-    day = _day(day)
-    now = time.time() if now is None else float(now)
-    path = _memory_path(root)
-    with database(path) as db:
-        db.execute(TABLE)
-        existing = db.execute('SELECT result FROM daily_curate WHERE day=?', (day,)).fetchone()
-    if existing is not None and not force:
-        try:
-            return {**json.loads(existing['result']), 'skipped': True}
-        except ValueError:
-            pass  # 旧行坏了就重做一次，不把页面卡在一段读不出来的文本上
-    from memory_digest import daily as memory_digest_daily
-    cleaned = _part(_cleanup, root, now)
-    digest = _part(memory_digest_daily, root, day, force=force)
-    emoji = _part(_emoji, root, day, gateway=gateway, messages_db=messages_db)
-    created = time.time()
-    record = {'day': day, 'created': created,
-              'created_text': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(created)),
-              'cleaned': cleaned, 'digest': _summary(digest), 'emoji': emoji, 'skipped': False}
-    with database(path) as db:
-        db.execute(TABLE)
-        db.execute('INSERT INTO daily_curate(day,result,created) VALUES(?,?,?) '
-                   'ON CONFLICT(day) DO UPDATE SET result=excluded.result,created=excluded.created',
-                   (day, json.dumps(record, ensure_ascii=False), created))
-    return record
+    """Compatibility entry: one run of the shared curation program.
+
+    The daily window, the Fish tool and the client button all call
+    ``memory_curation`` directly; this name only keeps older call sites working
+    on the same program, run record and result instead of a second loop.
+    """
+    from memory_curation import run_now
+    record = run_now(root, day=day, force=force, gateway=gateway, requested_by='client')
+    result = record.get('result') or {}
+    return {'day': result.get('range', {}).get('day') or _day(day),
+            'created': record.get('finished') or record.get('created'),
+            'cleaned': result.get('tidy') or _cleanup(root, time.time()),
+            'digest': _summary(result.get('digest') or {}),
+            'emoji': result.get('emoji') or {},
+            'skipped': record.get('status') in ('queued', 'running'),
+            'status': record.get('status'), 'run': record.get('id'), 'result': result}
 
 
 def tick(root, now=None):
-    """调度入口：凌晨四点以后、当天还没做过才真的跑一次。"""
-    now = time.time() if now is None else float(now)
-    day = _day(time.strftime('%Y-%m-%d', time.localtime(now)))
-    if time.localtime(now).tm_hour < DAY_HOUR:
-        return {'day': day, 'skipped': '还没到凌晨四点'}
-    path = _memory_path(root)
-    with database(path) as db:
-        db.execute(TABLE)
-        done = db.execute('SELECT 1 FROM daily_curate WHERE day=?', (day,)).fetchone()
-    if done:
-        return {'day': day, 'skipped': '今天已经整理过'}
-    return run(root, day, now=now)
+    """调度入口改为同一个整理程序的自动窗口，不再有第二套每日循环。"""
+    from memory_curation import tick as curation_tick
+    moment = time.time() if now is None else (now.timestamp() if hasattr(now, 'timestamp') else float(now))
+    if time.localtime(moment).tm_hour < DAY_HOUR:
+        return {'day': time.strftime('%Y-%m-%d', time.localtime(moment)),
+                'skipped': '还没到凌晨四点'}
+    return curation_tick(root, now)
 
 
 def latest(root):
-    """最近一次整理的结果，页面 memory.overview 里的 daily_curate 字段。"""
+    """最近一次整理的结果；升级前旧的 daily_curate 行只作为迁移读取。"""
+    from memory_curation import latest as curation_latest
+    found = curation_latest(root)
+    if found:
+        return found
     path = _memory_path(root)
     if not path.is_file():
         return None

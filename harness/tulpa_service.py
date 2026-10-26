@@ -3,6 +3,7 @@
 The HTTP facade adapts transport only. Tulpa owns chat batches, reply plans,
 sticker selection, send queues and receipts; Harness owns the model and timers.
 """
+from locations import project_path
 import argparse
 import asyncio
 from contextlib import asynccontextmanager
@@ -15,15 +16,15 @@ import threading
 
 
 def application(root: Path, ui_port: int):
-    source = root / 'vendor/integrations/tulpa/source'
-    home = root / 'data/integrations/tulpa/app'
+    source = project_path(root, 'vendor/integrations/tulpa/source')
+    home = project_path(root, 'data/integrations/tulpa/app')
     home.mkdir(parents=True, exist_ok=True)
     for name in ('data', '.tmp', '.cache', 'imports'):
         (home / name).mkdir(exist_ok=True)
-    sys.path[:0] = [str(source), str(root / 'channels'), str(root / 'harness')]
+    sys.path[:0] = [str(source), str(project_path(root, 'channels')), str(project_path(root, 'harness'))]
     from secrets_store import SecretStore
     token = SecretStore(root).get('channel-napcat', 'NAPCAT_TOKEN')
-    channel = json.loads((root / 'channels/fish_qq/config.json').read_text('utf-8'))
+    channel = json.loads((project_path(root, 'channels/fish_qq/config.json')).read_text('utf-8'))
     owner = str(channel['allowlist']['owner_id'])
     ws_url = channel['napcat']['url']
     os.environ.update(REPLY_ONEBOT_URL=f'http://127.0.0.1:{ui_port}/onebot',

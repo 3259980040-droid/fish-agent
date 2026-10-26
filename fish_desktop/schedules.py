@@ -3,6 +3,7 @@
 Primary: task editor and Save. Secondary: task list, timing and delivery detail.
 Use existing theme tokens, Card and button hierarchy; no additional navigation.
 """
+from locations import project_path
 import json
 from PySide6.QtCore import Qt, QDateTime
 from PySide6.QtWidgets import (QComboBox,QFormLayout,QHBoxLayout,QLineEdit,
@@ -22,7 +23,7 @@ class SchedulePanel(BasePage):
         self.title=QLineEdit();form.addRow('名称',self.title)
         self.target=QComboBox();self.target.addItem('主人私聊','owner')
         from storage import read_json
-        for gid in read_json(services.root/'channels/fish_qq/config.json').get('allowlist',{}).get('group_ids',[]):self.target.addItem('群 '+str(gid),'group:'+str(gid))
+        for gid in read_json(project_path(services.root, 'channels/fish_qq/config.json')).get('allowlist',{}).get('group_ids',[]):self.target.addItem('群 '+str(gid),'group:'+str(gid))
         form.addRow('发送到',self.target)
         self.kind=QComboBox()
         for text,key in [('延后一次','after_seconds'),('指定日期一次','at'),('每隔一段时间','every_seconds'),('每天固定时间','daily'),('每周固定时间','weekly'),('Cron 规则','cron')]:self.kind.addItem(text,key)

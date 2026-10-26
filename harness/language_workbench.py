@@ -22,6 +22,7 @@ retrieval/adoption happens inside MCP results the host does not log, so it is
 always unknown. None of these numbers proves a style was "learned".
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import re
@@ -88,11 +89,11 @@ def _trim(value, size=280):
 class LanguageWorkbench:
     def __init__(self, root):
         self.root = Path(root)
-        self.group_path = self.root / 'data/social/group-language.db'
-        self.tulpa_path = self.root / 'data/integrations/tulpa/app/data/mcp-language.sqlite3'
-        self.memory_path = self.root / 'data/qq/memory.db'
-        self.qq_path = self.root / 'data/qq/qq.db'
-        self.workbench_path = self.root / 'data/social/workbench.db'
+        self.group_path = project_path(self.root, 'data/social/group-language.db')
+        self.tulpa_path = project_path(self.root, 'data/integrations/tulpa/app/data/mcp-language.sqlite3')
+        self.memory_path = project_path(self.root, 'data/qq/memory.db')
+        self.qq_path = project_path(self.root, 'data/qq/qq.db')
+        self.workbench_path = project_path(self.root, 'data/social/workbench.db')
 
     # ---------- read-only access ----------
 

@@ -1,8 +1,10 @@
 """Local conversation history and incremental compaction; raw messages stay intact."""
+from locations import project_path
+from contextlib import closing
 import json
 from functools import lru_cache
 from pathlib import Path
-from storage import database, read_json
+from storage import database
 
 
 @lru_cache(maxsize=2)
@@ -12,35 +14,30 @@ def _tokenizer(path):
 
 
 def _tokens(root, text):
-    path = str(Path(root) / 'vendor/tokenizers/deepseek-v4/tokenizer.json')
+    path = str(project_path(Path(root), 'vendor/tokenizers/deepseek-v4/tokenizer.json'))
     return len(_tokenizer(path).encode(str(text or '')).ids)
 
 
-def retain_tokens(root):
-    """Verbatim room for one turn, derived from the real window and the working ratio."""
-    control = dict(read_json(Path(root) / 'harness/control.json'))
-    control.update(read_json(Path(root) / 'harness/context-settings.json', {}) or {})
-    ratio = float(control.get('context_window_ratio', .08))
-    retain = float(control.get('retain_ratio', .16))
-    window = 0
-    for value in (read_json(Path(root) / 'data/social/model-metadata.json', {}) or {}).values():
-        if isinstance(value, dict) and isinstance(value.get('context_window'), int):
-            window = max(window, int(value['context_window']))
-    window = window or 1048576
-    budget = min(int(window * ratio), window - 8192)
-    return max(1500, int(budget * retain))
+def _continuation(root, path, conversation):
+    """The one continuation material for this place, from the common-experience ledger.
+
+    Compression owns this now. The old per-store ``chat_summaries`` row is still read
+    once for continuity after an upgrade (no new rows are written there); a checkpoint
+    committed by the current compression path always wins over it.
+    """
+    from fish_agent.experience import compaction
+    return compaction.summary_material(root, source=path.name, conversation=conversation)
 
 
 class DesktopContext:
-    # Verbatim material is bounded by real tokens, not characters: the working budget
-    # comes from the model window, and older records travel as the continuation summary.
+    # Records travel verbatim until the one request budget trims optional layers or
+    # compression replaces an older complete range with its checkpoint; this module
+    # never deletes an original or writes a second summary store.
 
     def __init__(self, root, path, *, channel='desktop'):
         self.root, self.path, self.channel = root, path, channel
         with database(path) as db:
             db.execute('CREATE TABLE IF NOT EXISTS chat_inputs(message INTEGER PRIMARY KEY,content TEXT NOT NULL)')
-            db.execute('''CREATE TABLE IF NOT EXISTS chat_summaries(
-                conversation TEXT PRIMARY KEY, through INTEGER NOT NULL, summary TEXT NOT NULL)''')
 
     def remember_input(self, mid, content):
         # Images remain in the existing media archive; never duplicate base64 in SQLite.
@@ -55,17 +52,20 @@ class DesktopContext:
         with database(self.path) as db:
             db.execute('INSERT OR REPLACE INTO chat_inputs VALUES(?,?)', (mid, json.dumps(cached, ensure_ascii=False)))
 
-    def history(self, cid, current_mid, media, gateway, cancelled, *, after=None, event=None):
+    def history(self, cid, current_mid, media, gateway, cancelled, *, after=None, event=None,
+                claimed_references=()):
         """One view over existing QQ/desktop records; originals stay in their own stores.
 
         The message adapter knows schemas. The one request budget owns size and
-        clipping, so this path never invokes an inline summary or counts characters.
+        clipping, and compression owns which older complete range became a checkpoint,
+        so this path never invokes an inline summary or counts characters.
         """
         import sqlite3
         from datetime import datetime
         from governance import Governance
 
         virtual_event = event
+        claimed_references = frozenset(claimed_references)
         self.recent_window = int((virtual_event or {}).get('recent_window') or 1800)
         from contextlib import contextmanager
 
@@ -79,7 +79,7 @@ class DesktopContext:
                 conn.close()
 
         considered = set()
-        ledger = self.root / 'data/social/experience.db'
+        ledger = project_path(self.root, 'data/social/experience.db')
         if ledger.is_file():
             with connect(ledger) as db:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='considered'").fetchone():
@@ -99,15 +99,15 @@ class DesktopContext:
                 raise ValueError('当前输入记录不存在，未拼接其他对话代替')
             current = dict(current)
             timestamp = str(current.get('created_at') or current.get('ts') or '')
-            summary = db.execute('SELECT * FROM chat_summaries WHERE conversation=?', (cid,)).fetchone()
+        continuation = None if after is not None else _continuation(self.root, self.path, cid)
         paths = [self.path]
         if self.path.parent.name == 'qq':
             for name in ('qq.db', 'desktop-chat.db'):
-                other = self.root / 'data/qq' / name
+                other = project_path(self.root, 'data/qq', name)
                 if other != self.path and other.exists():
                     paths.append(other)
         names = {}
-        roster = self.root / 'data/social/people.db'
+        roster = project_path(self.root, 'data/social/people.db')
         if roster.exists():
             with connect(roster) as db:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='members'").fetchone():
@@ -158,7 +158,11 @@ class DesktopContext:
                              'attachments': [b for b in objects(row.get('segments')) if b.get('type') not in ('text', 'at')],
                              'current_place': place == current_place,
                              'current_conversation': path == self.path and row.get('conversation_id') == cid,
-                             'outbound': outbound and not system_notice, 'remote_id': str(row.get('channel_message_id') or '')}
+                             'outbound': outbound and not system_notice, 'remote_id': str(row.get('channel_message_id') or ''),
+                             # 每条记录带自己的库名、会话和消息号：跨库时不能用别的库的行号，
+                             # 也不能在循环结束后拿最后一行代替。
+                             'store': path.name, 'id': int(row['id']),
+                             'conversation': str(row.get('conversation_id') or cid)}
                     events.append(event)
                     if event['remote_id']:
                         index[(place, event['remote_id'])] = event
@@ -174,9 +178,10 @@ class DesktopContext:
         for event in events:
             age = cutoff - datetime.fromisoformat(event['time']).timestamp() if event['time'] else float('inf')
             relevant = any(word in event['text'].casefold() for word in words)
-            summarized = bool(summary and event['current_conversation'] and
-                              int(event['reference'].split(':')[1]) <= int(summary['through']))
-            if after is None and summarized and not relevant:
+            summarized = bool(continuation and continuation.get('summary') and event['current_conversation'] and
+                              int(event['reference'].split(':')[1]) <= int(continuation['through']))
+            claimed = event['reference'] in claimed_references
+            if after is None and summarized and not relevant and not claimed:
                 continue
             if after is None and not event['current_conversation'] and not (relevant or age <= self.recent_window):
                 continue
@@ -204,38 +209,30 @@ class DesktopContext:
             # insert an incomplete assistant envelope into a thinking/tool request.
             role = 'user'
             picked.append((event['time'], event['reference'],
-                           {'role': role, 'content': body, '_fish_layer': 1 if event['current_conversation'] else 2,
+                           {'role': role, 'content': body, '_fish_layer': 0 if claimed else 1 if event['current_conversation'] else 2,
                             '_fish_refs': [event['reference']], '_fish_bundle': event['bundle']},
-                           {'source': path.name, 'conversation': str(row.get('conversation_id') or cid),
-                            'id': int(row['id'])}))
-        picked.sort(key=lambda item: (item[0], item[1]))
-        # Newest slice of each layer stays verbatim; older records are queued for the
-        # continuation summary instead of being re-sent whole every turn. Originals kept.
-        older = []
-        if after is None:
-            room = retain_tokens(self.root)
-            limits = {1: room, 2: max(600, room // 3)}
-            used = {1: 0, 2: 0}
-            full = set()
-            keep = []
-            for item in reversed(picked):
-                layer = item[2].get('_fish_layer', 1)
-                if layer in full:
-                    older.append(item[3])
-                    continue
-                size = _tokens(self.root, item[2].get('content'))
-                if used[layer] + size > limits[layer]:
-                    full.add(layer)
-                    older.append(item[3])
-                    continue
-                used[layer] = used[layer] + size
-                keep.append(item)
-            keep.reverse()
-            picked = keep
+                           {'source': event['store'], 'conversation': event['conversation'],
+                            'id': int(event['id'])}))
+        # 时间相同时按各库自己的消息号排序：消息号是数字，不能按 "qq:10" < "qq:2" 的字符串比。
+        picked.sort(key=lambda item: (item[0], item[3]['source'], int(item[3]['id'])))
+        # The surface is the ordered, unmodified original material of this place, priced
+        # once here: the one request budget fits the request, and compression selects
+        # complete older ranges from exactly this order. Originals are never removed.
+        surface = []
+        for item in picked:
+            info = item[3]
+            surface.append({'reference': info['source'] + ':' + str(info['id']),
+                            'bundle': item[2].get('_fish_bundle') or '',
+                            'layer': int(item[2].get('_fish_layer', 1)),
+                            'source': info['source'], 'conversation': info['conversation'],
+                            'id': int(info['id']), 'role': 'user',
+                            'tokens': _tokens(self.root, item[2]['content']),
+                            'text': item[2]['content']})
         history = [item[2] for item in picked]
-        if after is None and summary and summary['summary']:
-            history.insert(0, {'role': 'user', 'content': '[较早续聊摘要，以原文及更正为准]\n' + summary['summary'],
-                               '_fish_layer': 1, '_fish_refs': [self.path.name + ':summary:' + str(summary['through'])]})
+        if continuation and continuation.get('summary'):
+            history.insert(0, {'role': 'user', 'content': continuation.get('material') or continuation['summary'],
+                               '_fish_layer': 1,
+                               '_fish_refs': [self.path.name + ':checkpoint:' + str(continuation['through'])]})
         if after is None and not self.channel.startswith('group:'):
             history.extend(self.period_material(question, words))
         current_quote = index.get((current_place, str(current.get('reply_to') or '')))
@@ -253,18 +250,19 @@ class DesktopContext:
         return history, {'source': 'common-experience over original message stores',
                          'stores': [p.name for p in paths], 'current_place': current_place,
                          'current_reference': reference, 'current_event': current_event, 'positions': positions,
-                         'older': older,
+                         'surface': surface, 'continuation': (continuation or {}).get('kind', ''),
+                         'claimed_references': list(claimed_references),
                          'material_count': len(history), 'budget': 'shared actual-model token budget'}
 
     def period_material(self, question, words):
         """Reuse existing day/week/month stores, without inventing another digest."""
         import sqlite3
         import time
-        path = self.root / 'data/qq/memory.db'
+        path = project_path(self.root, 'data/qq/memory.db')
         if not path.exists():
             return []
         result = []
-        with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as db:
+        with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
             db.row_factory = sqlite3.Row
             tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             queries = []

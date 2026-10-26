@@ -1,5 +1,11 @@
-"""Preparation and considered coverage over original records, shared by all entry points."""
-import json
+"""Preparation and considered coverage over original records, shared by all entry points.
+
+The turn also carries the one automatic compression trigger: the request budget reports
+this turn's measured pressure together with the compression numbers resolved from the
+same policy, and this module selects the complete older range. It only queues that
+range; the summary itself runs outside the main thinking lock.
+"""
+from locations import project_path
 import time
 import uuid
 from pathlib import Path
@@ -15,56 +21,90 @@ class ExperienceTurn:
         self.id = uuid.uuid4().hex
         self.positions = {}
         self.covered = set()
-        self.ledger = self.root / 'data/social/experience.db'
+        self.claimed_references = frozenset()
+        self.surface = []
+        self.ledger = project_path(self.root, 'data/social/experience.db')
         with database(self.ledger) as db:
             db.execute('CREATE TABLE IF NOT EXISTS considered(reference TEXT PRIMARY KEY,turn TEXT NOT NULL,at REAL NOT NULL,outcome TEXT NOT NULL)')
             db.execute('CREATE TABLE IF NOT EXISTS experience_turns(id TEXT PRIMARY KEY,session TEXT NOT NULL,reference TEXT NOT NULL,arrival TEXT NOT NULL,started REAL,first_output REAL,sending REAL,receipt REAL,outcome TEXT NOT NULL,error TEXT NOT NULL)')
 
     def prepare(self, cancelled=None):
         self.context = DesktopContext(self.root, self.path, channel=self.channel)
-        history, source = self.context.history(self.conversation, self.message, None, None, cancelled, event=self.event)
+        history, source = self.context.history(
+            self.conversation, self.message, None, None, cancelled, event=self.event,
+            claimed_references=self.claimed_references)
         self.positions = source['positions']
-        # Each entry keeps its own source file and conversation: a bare message id is
-        # only meaningful inside one store, so they are never mixed into one maximum.
-        self.older = [dict(item) for item in source.get('older') or []
-                      if isinstance(item, dict) and str(item.get('id', '')).isdigit()]
+        # The ordered original material of this place: compression selects complete older
+        # ranges from exactly this order, and each entry keeps its own source and id.
+        self.surface = [dict(node) for node in source.get('surface') or []
+                        if isinstance(node, dict) and str(node.get('id', '')).isdigit()]
         self.reference = source['current_reference']
         with database(self.ledger) as db:
             db.execute('INSERT INTO experience_turns(id,session,reference,arrival,started,first_output,sending,receipt,outcome,error) VALUES(?,?,?,?,?,?,?,?,?,?)',
                        (self.id, self.session, self.reference, source['current_event']['time'], None, None, None, None, 'running', ''))
         return history, source
 
-    def updates(self, cancelled=None):
-        history, source = self.context.history(self.conversation, self.message, None, None, cancelled, after=self.positions, event=self.event)
-        self.positions = source['positions']
-        # These arrived after the snapshot while tools were executing. They are
-        # live inputs for this thought, rather than another independent generation.
-        for message in history:
-            message['_fish_layer'] = 0
-        return history
-
-    def requested(self, report):
+    def requested(self, report, tokens=None):
         with database(self.ledger) as db:
             db.execute('UPDATE experience_turns SET started=COALESCE(started,?) WHERE id=?', (time.time(), self.id))
-        self.pending = set(report['covered'])
-        compacted = [int(ref.split(':')[1]) for item in report['trimmed'] if item['layer'] == 1
-                     for ref in item['references'] if ref.startswith(('qq:', 'desktop:')) and ref.split(':')[1].isdigit()]
-        # Records kept out of the verbatim window are the summary's business, whether or
-        # not the single token cap also trimmed something this turn.
-        from context_compaction import enqueue
-        if compacted:
-            enqueue(self.root, self.path, self.conversation, max(compacted))
-        by_place = {}
-        for item in getattr(self, 'older', []):
-            key = (str(item.get('source') or ''), str(item.get('conversation') or ''))
-            by_place[key] = max(by_place.get(key, 0), int(item['id']))
-        for (name, conversation), through in by_place.items():
-            if not name or not conversation:
-                continue
-            enqueue(self.root, self.root / 'data/qq' / name, conversation, through)
+        self.pending = set(report.get('covered') or ())
+        self._request_compaction(report, tokens)
+
+    def _request_compaction(self, report, tokens):
+        """One pressure trigger over the range selection; it queues, it never calls a model.
+
+        The budget report already carries the pressure it measured and the trigger and
+        retention numbers resolved from the one policy, so no second configuration read
+        and no character or message-count estimate happens here.
+        """
+        if getattr(self, '_compaction_decided', False):
+            return
+        pressure = report.get('pressure_tokens')
+        threshold = report.get('threshold_tokens')
+        retain = report.get('retain_tokens')
+        if not isinstance(pressure, (int, float)) or not isinstance(threshold, (int, float)):
+            return
+        if not report.get('compaction_auto', True):
+            return
+        if pressure < threshold:
+            return
+        self._compaction_decided = True
+        try:
+            from fish_agent.experience.compaction import request, select_regions
+            regions = select_regions(self.surface, tokens, int(retain or 0))
+        except Exception as exc:
+            # A configuration or storage problem must not turn the owner's turn into a
+            # failure; it is audited and this range stays unscheduled.
+            from governance import Governance
+            try:
+                Governance(self.root).audit('context.compaction.request',
+                                            '自动压缩没有入队，本轮对话继续', str(exc)[:200])
+            except Exception:
+                pass
+            return
+        queued = []
+        for region in regions:
+            # Each region belongs to its own original store and conversation: its
+            # progress must not be written under the asking place's database.
+            try:
+                queued.append(request(self.root, source=region['source'],
+                                      conversation=region['conversation'] or self.conversation,
+                                      through=region['through'], pressure=int(pressure),
+                                      threshold=int(threshold), retain=int(retain or 0),
+                                      reason='pressure'))
+            except Exception as exc:
+                from governance import Governance
+                try:
+                    Governance(self.root).audit('context.compaction.request',
+                                                '自动压缩没有入队，本轮对话继续', str(exc)[:200])
+                except Exception:
+                    pass
+        self.compaction_request = queued
 
     def received(self, first_output_at=None):
-        self.covered.update(self.pending)
+        # A budget report describes what was visible, including background and
+        # late arrivals. Only the fixed claim is eligible to settle input work.
+        self.covered.update(self.pending.intersection(self.claimed_references))
         self.covered.add(self.reference)
         if first_output_at is not None:
             with database(self.ledger) as db:
@@ -74,13 +114,14 @@ class ExperienceTurn:
         with database(self.ledger) as db:
             db.execute('UPDATE experience_turns SET outcome=CASE WHEN receipt IS NULL THEN ? ELSE outcome END,error=CASE WHEN ?=\'\' THEN error ELSE ? END WHERE id=?', (outcome,str(error)[:500],str(error)[:500],self.id))
             if outcome in ('considered', 'silent'):
+                actual = self.covered.intersection(self.claimed_references | {getattr(self, 'reference', '')})
                 db.executemany('INSERT OR REPLACE INTO considered VALUES(?,?,?,?)',
-                               [(ref, self.id, time.time(), outcome) for ref in self.covered])
+                               [(ref, self.id, time.time(), outcome) for ref in actual])
 
 
 def was_considered(root, reference, *, session=None):
     """Coverage is shared; consuming a queued wake is local to its actual session."""
-    path = Path(root) / 'data/social/experience.db'
+    path = project_path(Path(root), 'data/social/experience.db')
     if not path.exists():
         return False
     import sqlite3
@@ -101,7 +142,7 @@ def was_considered(root, reference, *, session=None):
 
 def delivery(root, reference, *, sending=False, outcome=None,error=''):
     """Stamp real transport actions, including unknown receipts; never resend here."""
-    path = Path(root) / 'data/social/experience.db'
+    path = project_path(Path(root), 'data/social/experience.db')
     if not path.exists():
         return
     with database(path) as db:
@@ -114,7 +155,7 @@ def delivery(root, reference, *, sending=False, outcome=None,error=''):
 
 def reference_for_session(root,session):
     import sqlite3
-    path=Path(root)/'data/social/experience.db'
+    path=project_path(Path(root), 'data/social/experience.db')
     if not session or not path.is_file():return ''
     with sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True) as db:
         if not db.execute("SELECT 1 FROM sqlite_master WHERE name='experience_turns'").fetchone():return ''

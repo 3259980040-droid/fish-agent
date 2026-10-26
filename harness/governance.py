@@ -1,5 +1,6 @@
 """Local owner capabilities, outbound policy and atomic per-role call budgets."""
 from __future__ import annotations
+from locations import project_path
 
 import hashlib
 import hmac
@@ -156,8 +157,8 @@ class Governance:
         if agent_id not in ("qq", "research"):
             raise ValueError("未知角色")
         self.root, self.agent_id = Path(root), agent_id
-        self.path = self.root / "harness" / "control.json"
-        self.db = self.root / "data" / agent_id / "governance.db"
+        self.path = project_path(self.root, "harness", "control.json")
+        self.db = project_path(self.root, "data", agent_id, "governance.db")
         self.db.parent.mkdir(parents=True, exist_ok=True)
         with closing(self.connect()) as conn:
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='faults'").fetchone():
@@ -183,7 +184,7 @@ class Governance:
     def upgrade_fault_schema(cls, root, agent_id='qq'):
         """Explicit maintenance entry only; never called by the runtime constructor."""
         if agent_id not in ('qq','research'): raise ValueError('未知角色')
-        path = Path(root) / 'data' / agent_id / 'governance.db'
+        path = project_path(Path(root), 'data', agent_id, 'governance.db')
         with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=rw',uri=True,timeout=15)) as conn:
             return cls._upgrade_fault_schema(conn)
 
@@ -228,15 +229,14 @@ class Governance:
             result['version'] = 3
             if "paused_roles" not in raw:
                 result["paused_roles"] = {role: bool(raw.get("paused", False)) for role in ("qq", "research")}
-            # Missing or older send settings keep their safe defaults; public
-            # group auto-reply is never enabled from this key.
-            result['send_policy'] = normalize_policy(raw)
+        from fish_agent.settings.tools import ToolSettings
+        result['send_policy'] = ToolSettings(self.root).legacy_policy()
         result["paused"] = bool(result["paused_roles"].get(self.agent_id, False))
         result['daily_usage_limits'] = {role: daily_limits_enabled(result, role) for role in ('qq', 'research')}
         return result
 
     def owner_id(self) -> str:
-        path = self.root / "channels" / "fish_qq" / "config.json"
+        path = project_path(self.root, "channels", "fish_qq", "config.json")
         if not path.exists():
             return ""
         return str(json.loads(path.read_text(encoding="utf-8")).get("allowlist", {}).get("owner_id", ""))
@@ -250,16 +250,12 @@ class Governance:
             if not isinstance(values, dict) or any(k not in daily_limits or type(v) is not bool for k, v in values.items()):
                 raise ValueError('每日用量开关必须按 QQ 和研究角色分别设置为开启或关闭')
             daily_limits.update(values)
-        send_policy = cfg['send_policy']
         if 'send_policy' in updates:
-            # Partial update: validate unknown keys/types, then merge per bucket.
-            changes = validate_updates(updates['send_policy'])
-            send_policy = json.loads(json.dumps(send_policy))
-            for bucket, values in changes.items():
-                send_policy[bucket].update(values)
-            send_policy = normalize_policy(send_policy)
+            from fish_agent.settings.tools import ToolSettings
+            ToolSettings(self.root).update_legacy(validate_updates(updates['send_policy']))
         cfg.update({k: v for k, v in updates.items() if k in cfg and k != 'send_policy'})
-        cfg['send_policy'] = send_policy
+        from fish_agent.settings.tools import ToolSettings
+        cfg['send_policy'] = ToolSettings(self.root).legacy_policy()
         cfg['daily_usage_limits'] = daily_limits
         if "paused" in updates:
             cfg["paused_roles"][self.agent_id] = bool(updates["paused"])
@@ -291,13 +287,19 @@ class Governance:
             owner_id = str(owner_id).strip()
             if not re.fullmatch(r"[1-9][0-9]{4,14}", owner_id):
                 raise ValueError("请填写真实的主人 QQ 号")
-            path = self.root / "channels" / "fish_qq" / "config.json"
+            path = project_path(self.root, "channels", "fish_qq", "config.json")
             channel = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
             channel.setdefault("allowlist", {}).update(owner_id=owner_id, private_mode="owner_only")
             write_json(path, channel)
-        stored = {**cfg, "paused": False}
+        stored = {k:v for k,v in cfg.items() if k != "send_policy"}
+        stored["paused"] = False
         write_json(self.path, stored)
         self.audit("settings", "主人权限及本地规则已更新")
+        if ('paused' in updates and self.agent_id=='qq') or 'qq' in updates.get('paused_roles',{}):
+            from fish_agent.bootstrap import loaded_runtime
+            runtime=loaded_runtime(self.root)
+            if runtime is not None:
+                runtime.stop() if cfg['paused_roles'].get('qq',False) else runtime.start()
         return cfg
 
     def is_owner(self, sender_id: str, *, private: bool = True) -> bool:
@@ -434,8 +436,8 @@ class Governance:
         if agent_id not in ('qq','research'): raise ValueError('未知角色')
         value = cls.__new__(cls)
         value.root, value.agent_id = Path(root), agent_id
-        value.path = value.root / 'harness/control.json'
-        value.db = value.root / 'data' / agent_id / 'governance.db'
+        value.path = project_path(value.root, 'harness/control.json')
+        value.db = project_path(value.root, 'data', agent_id, 'governance.db')
         return value.fault_snapshot(limit)
 
     def fault_snapshot(self, limit=40):
@@ -493,7 +495,7 @@ class Governance:
             reason = "命中主人配置的阻断词"
         elif any(safe_search(pattern, normalize(text)) for pattern in cfg["block_patterns"]):
             reason = "命中主人配置的阻断规则"
-        rules = self.root / "harness" / "safety" / "rules.json"
+        rules = project_path(self.root, "harness", "safety", "rules.json")
         if not rules.exists():
             bundled = Path(__file__).parent / "safety"
             if not (bundled / "rules.json").exists():
@@ -540,7 +542,7 @@ class Governance:
 
 
 def control_token(root: Path) -> str:
-    path = Path(root) / "harness" / "runtime" / "control.token"
+    path = project_path(Path(root), "harness", "runtime", "control.token")
     env = os.environ.get("FISH_CONTROL_TOKEN", "")
     if env:
         return env

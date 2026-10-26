@@ -1,4 +1,5 @@
 """Source-checked character candidates, with explicit feature weights."""
+from locations import project_path
 import hashlib
 import json
 import re
@@ -12,7 +13,7 @@ DEFAULTS={'enabled':True,'weights':{'hair':2,'eyes':2,'head_accessory':3,'outfit
 
 
 def settings(root):
-    raw=read_json(Path(root)/'harness/vision-identification.json',{})
+    raw=read_json(project_path(Path(root), 'harness/vision-identification.json'),{})
     cfg={**DEFAULTS,**raw,'weights':{**DEFAULTS['weights'],**raw.get('weights',{})}}
     for key in DEFAULTS['weights']:
         weight=cfg['weights'][key]
@@ -60,7 +61,7 @@ def rank_candidates(candidates,features,sources,cfg,topic=''):
 
 class VisionIdentification:
     def __init__(self,root):
-        self.root=Path(root);self.config=settings(root);self.path=self.root/'data/qq/vision-identification.db'
+        self.root=Path(root);self.config=settings(root);self.path=project_path(self.root, 'data/qq/vision-identification.db')
         with database(self.path) as db:db.execute('CREATE TABLE IF NOT EXISTS analyses(id TEXT PRIMARY KEY,result TEXT,created REAL,expires REAL)')
 
     def inspect(self,path,question,uri,*,chat='',cancelled=None):

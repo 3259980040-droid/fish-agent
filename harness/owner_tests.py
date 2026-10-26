@@ -44,6 +44,6 @@ async def command(loop, payload, sender):
 
 
 async def process(loop, item):
-    """Compatibility import for tests/tools; QQ dispatch uses the same Fish path."""
-    from owner_private import process as private_process
-    return await private_process(loop, item)
+    """Compatibility import for tools; QQ dispatch uses the same Fish path."""
+    from owner_private import handle
+    return await handle(loop, item)

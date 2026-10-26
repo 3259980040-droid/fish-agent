@@ -1,26 +1,12 @@
-"""One sending boundary for every Fish-authored outbound: owner reply, timer result, manual send.
+"""Transport eligibility, per-instance sending capability and real send receipts.
 
-The channel (channels/fish_qq/server.py) already enforces the hard floor: owner
-private or a whitelisted group, no arbitrary recipients, output guard rules.
-``channel_allows`` mirrors exactly those checks so callers fail fast with a
-readable reason, and the channel stays the final gate. This module adds the
-owner-editable *sending settings* that sit between "who may receive" and
-"what was sent", acting per destination and per action:
-
-* ``owner_reply``               -- program's own final reply in the owner's private chat
-* ``owner_private.scheduled``  -- a scheduled task result sent to ``private:<owner>``
-* ``group_reply``              -- public (non-owner) auto-participation in a whitelisted group
-* ``group_owner_request``      -- owner's explicit one-off / scheduled send to a group
-
-Defaults: owner reply and owner private scheduled result allowed; group relay
-only on the owner's explicit request; public auto-reply off and not exposed as
-a setting here (it stays in GroupPolicy listen/reply).
-
-Message transport uses the fish-qq WebSocket channel. Real file uploads use
-owner_files, and Qzone drafts/publishing use social_publish with its explicit
-runtime switch. No mass-send transport is configured.
+ToolSettings owns private/group/per-group choices. The legacy send_policy wire
+fields are projections of those same values; action names no longer add another
+private/task-result/owner-request toggle. Group listening stays an input concern.
+The channel still checks its configured owner and authorized QQ destinations.
 """
 from __future__ import annotations
+from locations import project_path, instance_context, host_root
 
 import re
 from datetime import datetime
@@ -110,55 +96,26 @@ def owner_private_chat(root) -> str:
 def channel_allows(root, chat_id: str) -> tuple[bool, str]:
     """Mirror channels/fish_qq server ``_check_delivery`` recipient checks."""
     try:
-        from storage import read_json
-        allow = read_json(Path(root) / 'channels/fish_qq/config.json', {}).get('allowlist', {})
+        from fish_agent.settings.channels import ChannelSettings
+        groups = ChannelSettings(root).group_ids()
         owner = owner_private_chat(root)
         if chat_id == owner:
             return True, ''
-        if str(chat_id).startswith('group:') and str(chat_id)[6:] in [str(g) for g in allow.get('group_ids', [])]:
+        if str(chat_id).startswith('group:') and str(chat_id)[6:] in groups:
             return True, ''
     except (OSError, ValueError):
         return False, '频道配置不可读'
-    return False, '目标不是程序核验的主人私聊或白名单群，频道会拒绝发送'
+    return False, '目标不是已核验的主人私聊或本窗口配置的群'
 
 
 def policy_check(root, chat_id: str, *, action: str, scheduled: bool = False, context: str = '') -> tuple[bool, str]:
     """Policy decision for one Fish outbound (not a transport). Returns (allowed, reason)."""
     from governance import Governance
-    cfg = Governance(root).config()
-    if cfg.get('paused'):
+    from fish_agent.settings.tools import ToolSettings
+    if Governance(root).config().get('paused'):
         return False, '主人已暂停'
-    policy = cfg['send_policy']
-    owner = owner_private_chat(root)
-    if action == 'fish_autonomous':
-        if chat_id == owner:
-            return (True, '') if policy['owner_private']['owner_reply'] else (False, '主人关闭了私聊发送')
-        if str(chat_id).startswith('group:'):
-            from group_policy import GroupPolicy
-            group = GroupPolicy(root).config(chat_id)
-            if not group['listen'] or not group['reply']:
-                return False, '此群的旁听或回复已关闭'
-            if float(group.get('dive_until') or 0) > time.time():
-                return False, 'Fish 当前选择在此群潜水'
-            return True, ''
-    if chat_id == owner:
-        if action == 'owner_reply':
-            ok = policy['owner_private']['owner_reply']
-            return (True, '') if ok else (False, '发送设置关闭了主人私聊回复（定时结果与主人明确交办通知不受影响）')
-        if action == 'scheduled_result' and scheduled:
-            ok = policy['owner_private']['scheduled_result']
-            return (True, '') if ok else (False, '发送设置关闭了主人私聊定时结果')
-        return True, ''
-    if str(chat_id).startswith('group:'):
-        if action in ('group_send', 'scheduled_result'):
-            if not policy['group']['owner_request']:
-                return False, '发送设置关闭了主人在群聊的明确交办发送'
-            if not (str(context).startswith('owner') or str(context).startswith('control:')
-                    or (str(context).startswith('chat:') and not str(context).startswith('chat:group:'))):
-                return False, '跨群发送只接受主人在当前会话的明确要求'
-            return True, ''
-        return False, '公开群自动回复不走此发送边界；请在群聊设置中控制'
-    return False, '不支持的目标'
+    result=ToolSettings(root).effective_capability(target=chat_id)
+    return result['enabled'],result['reason']
 
 
 def decide(root, chat_id: str, *, action: str, scheduled: bool = False, context: str = '') -> tuple[bool, str]:
@@ -174,7 +131,9 @@ def _slot(chat_id: str) -> str:
 
 def origin_kind(request_id: str) -> str:
     """Classify program-owned request IDs; these labels confer no authority."""
-    key = str(request_id).removeprefix('scheduled:')
+    key = str(request_id)
+    if key.startswith('instance:'): key = key.split(':', 2)[-1]
+    key = key.removeprefix('scheduled:')
     if key.startswith('group-job-'): return 'group_agent'
     if key.startswith('owner-send:'): return 'owner_delegated'
     if key.startswith(('sched:', 'schedule:')): return 'scheduled'
@@ -195,9 +154,10 @@ def public_origin(row: dict) -> dict:
 def _outbound_box(root):
     from storage import read_json
     from channels.fish_qq.spool import Outbox
-    config = read_json(root / 'channels/fish_qq/config.json')
+    config = read_json(project_path(root, 'channels/fish_qq/config.json'))
     state = Path(config.get('spool_dir', 'channel-state'))
-    if not state.is_absolute(): state = root / state
+    if not state.is_absolute():
+        state = host_root(root) / state
     return Outbox(state) if (state / 'outbox.jsonl').is_file() else None
 
 
@@ -206,7 +166,7 @@ def _owner_receipts(root, chat_id, *, limit=None):
     import json
     import sqlite3
     from contextlib import closing
-    path = root / 'data/social/owner-control.db'
+    path = project_path(root, 'data/social/owner-control.db')
     if not path.is_file(): return
     try:
         with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=1)) as db:
@@ -238,7 +198,7 @@ def outbound_source(root, chat_id: str, message_id: str) -> dict | None:
     root = Path(root)
     if not message_id or not chat_id.startswith('group:'): return None
     box = _outbound_box(root)
-    if box and (row := box.find_message(chat_id, message_id)): return public_origin(row)
+    if box and (row := box.find_message(chat_id, message_id, instance_id=instance_context(root).instance_id)): return public_origin(row)
     for row in _owner_receipts(root, chat_id):
         if row['message_id'] == str(message_id): return public_origin(row)
     return None
@@ -250,7 +210,7 @@ def recent_outbound_sources(root, chat_id: str, *, since: float, until: float, l
     if not chat_id.startswith('group:') or until <= since: return []
     limit = max(1, min(limit, 8))
     box = _outbound_box(root)
-    rows = box.recent_confirmed(chat_id, since=since, until=until, limit=limit) if box else []
+    rows = box.recent_confirmed(chat_id, since=since, until=until, limit=limit, instance_id=instance_context(root).instance_id) if box else []
     rows += [row for row in _owner_receipts(root, chat_id, limit=100) if since < row['confirmed_at'] <= until]
     by_id = {}
     for row in rows:
@@ -269,7 +229,7 @@ def record_send(root, *, request_id: str, chat_id: str, text: str, action: str, 
     """Append one row to the adaptive ledger (actual sends only; ledger failures never block a send)."""
     try:
         from storage import database
-        path = Path(root) / 'data/social/owner-control.db'
+        path = project_path(Path(root), 'data/social/owner-control.db')
         with database(path) as db:
             db.executescript('''CREATE TABLE IF NOT EXISTS send_log(id INTEGER PRIMARY KEY,request_id TEXT,slot TEXT,chat TEXT,
                 action TEXT,source TEXT,state TEXT,receipt TEXT,text_hash TEXT,created REAL);''')
@@ -287,7 +247,7 @@ def summary(root, *, limit: int = 500) -> dict:
     result = {'window': limit, 'slots': {}, 'unavailable_slots': {}}
     try:
         from storage import database
-        path = Path(root) / 'data/social/owner-control.db'
+        path = project_path(Path(root), 'data/social/owner-control.db')
         if not path.exists():
             return result
         with database(path) as db:

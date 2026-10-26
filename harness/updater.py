@@ -1,4 +1,5 @@
 """Prepare a checksummed local release without overwriting a running program."""
+from locations import project_path
 import hashlib
 import json
 import os
@@ -66,7 +67,7 @@ def launch_maintenance(root, operation, *, archive='', password='', exe='', targ
     """The helper waits until this UI exits before touching data or launching."""
     from secrets_store import SecretStore
     task_id = uuid.uuid4().hex
-    directory = Path(root) / 'harness/maintenance'; directory.mkdir(parents=True, exist_ok=True)
+    directory = project_path(Path(root), 'harness/maintenance'); directory.mkdir(parents=True, exist_ok=True)
     request = {'operation': operation, 'archive': str(archive), 'target': str(target), 'exe': str(exe or sys.executable), 'parent': os.getpid(), 'source_mode': not getattr(sys, 'frozen', False)}
     if password: request['password'] = __import__('base64').b64encode(SecretStore._crypt(password.encode())).decode()
     path = directory / (task_id + '.json'); path.write_text(json.dumps(request), encoding='utf-8')
@@ -79,7 +80,7 @@ def launch_maintenance(root, operation, *, archive='', password='', exe='', targ
 
 
 def run_maintenance(root, request_path):
-    request_path = Path(request_path).resolve(); directory = (Path(root) / 'harness/maintenance').resolve()
+    request_path = Path(request_path).resolve(); directory = (project_path(Path(root), 'harness/maintenance')).resolve()
     if not request_path.is_relative_to(directory): raise ValueError('维护请求位置不正确')
     request = json.loads(request_path.read_text(encoding='utf-8'))
     if os.name == 'nt':

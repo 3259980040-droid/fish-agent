@@ -1,4 +1,5 @@
 """Fish-owned persistent plans and occurrences; neither CRUD nor execution needs DSH."""
+from locations import project_path
 import json
 import time
 import uuid
@@ -102,13 +103,21 @@ class FishSchedules:
             receipt['messageId'] = str(payload.get('message_id') or next(iter(payload.get('message_ids') or []), ''))
             receipt['receipt'] = ('OK msg=' + receipt['messageId'] if receipt['state'] == 'SUCCEEDED'
                                   else json.dumps(raw.get('error') or receipt['state'], ensure_ascii=False))
-        row['occurrences'] = [{**r, 'display': send_policy.display(r['slot'])} for r in occurrences]
+        row['occurrences'] = [{**r, 'display': send_policy.display(r['slot']),
+                               'execution': r.get('execution') or ''}
+                              for r in occurrences]
         row['sendReceipts'] = receipts
         if occurrences:
             row['occurrenceState'] = occurrences[0]['state']
             row['result'] = occurrences[0]['note'] or ''
             row['receipt_id'] = occurrences[0]['receipt_id'] or ''
         return row
+
+    def attach_execution(self, schedule_id, slot, execution):
+        """Remember which main-execution turn served this instance."""
+        with database(self.path) as db:
+            db.execute('UPDATE occurrences SET execution=? WHERE schedule_id=? AND slot=?',
+                       (str(execution), str(schedule_id), str(slot)))
 
     def create(self, params, *, session=None):
         target = self.control.validate_target(params.get('target') or 'owner')
@@ -223,22 +232,39 @@ class FishSchedules:
         row = self.get(sid)
         if row['engine'] != 'fish':
             raise ValueError('此计划尚未从 DSH 迁移')
+        if row['state'] == 'deleted':
+            raise ValueError('计划已删除，不能立即运行')
         slot = datetime.now(UTC).isoformat()
+        # A paused plan keeps its pause: this one instance is marked manual and does
+        # not change the period, instead of being faked by resume-then-pause.
+        state = 'manual' if row['state'] == 'paused' else 'due'
         with database(self.path) as db:
-            db.execute("INSERT INTO occurrences(schedule_id,slot,state,created,updated) VALUES(?,?,'due',?,?)", (sid, slot, time.time(), time.time()))
-        return {'id': sid, 'slot': slot, 'state': 'due'}
+            db.execute("INSERT INTO occurrences(schedule_id,slot,state,created,updated) VALUES(?,?,?,?,?)",
+                       (sid, slot, state, time.time(), time.time()))
+        return {'id': sid, 'slot': slot, 'state': state}
 
     def pending(self):
         with database(self.path) as db:
-            return [dict(r) for r in db.execute("SELECT o.schedule_id id,o.slot,o.state FROM occurrences o JOIN scheduled s ON s.id=o.schedule_id WHERE s.engine='fish' AND s.state NOT IN ('deleted','paused') AND o.state IN ('due','catchup','queued') ORDER BY o.created")]
+            return [dict(r) for r in db.execute(
+                "SELECT o.schedule_id id,o.slot,o.state FROM occurrences o JOIN scheduled s ON s.id=o.schedule_id "
+                "WHERE s.engine='fish' AND s.state!='deleted' AND ("
+                "(o.state IN ('due','catchup','queued') AND s.state!='paused') OR o.state='manual') "
+                "ORDER BY o.created")]
 
     def claim(self, sid, slot):
         with database(self.path) as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT s.state,s.engine FROM scheduled s WHERE s.id=?', (sid,)).fetchone()
-            if not row or row['engine'] != 'fish' or row['state'] in ('deleted', 'paused'):
+            if not row or row['engine'] != 'fish' or row['state'] == 'deleted':
                 return False
-            return bool(db.execute("UPDATE occurrences SET state='running',attempts=attempts+1,updated=? WHERE schedule_id=? AND slot=? AND state IN ('due','catchup','queued')", (time.time(), sid, slot)).rowcount)
+            states = ('due', 'catchup', 'queued')
+            if row['state'] == 'paused':
+                states = ('manual',)
+            holes = ','.join('?' * len(states))
+            return bool(db.execute(
+                "UPDATE occurrences SET state='running',attempts=attempts+1,updated=? "
+                "WHERE schedule_id=? AND slot=? AND state IN (" + holes + ")",
+                (time.time(), sid, slot, *states)).rowcount)
 
     def finish(self, sid, slot, state, note='', receipt_id=''):
         with database(self.path) as db:
@@ -252,20 +278,30 @@ class FishSchedules:
             raise ValueError('本次执行记录不存在')
         return dict(row)
 
-    def run(self, sid, slot, *, run_turn=None,cancelled=None):
+    def run(self, sid, slot, *, run_turn=None, cancelled=None):
+        """Run one occurrence through a caller-provided turn, then close it honestly.
+
+        The main execution is the only model path now; this method stays for tests
+        and maintenance callers that already have a turn. Without one it records the
+        occurrence as not executed instead of starting a second generation.
+        """
         if not self.claim(sid, slot):
             return self.occurrence(sid, slot)
         row = self.get(sid)
-        prefix = 'sched:' + sid + ':' + slot
         error = ''
         skipped = ''
         try:
             if run_turn:
                 run_turn(row['session'], self.prompt(row, slot))
             else:
-                skipped = self._thought(row, slot, cancelled=cancelled) or ''
+                skipped = '计划执行已交由唯一主执行；计划线程不再自行生成'
         except Exception as exc:
             error = type(exc).__name__ + ': ' + str(exc)
+        return self.close(sid, slot, row, error=error, skipped=skipped)
+
+    def close(self, sid, slot, row, *, error='', skipped=''):
+        """Close one occurrence from its real send receipts, then report it."""
+        prefix = 'sched:' + sid + ':' + slot
         with database(self.path) as db:
             receipts = [dict(r) for r in db.execute('SELECT * FROM sends WHERE id LIKE ? ORDER BY created', (prefix + '%',))]
         uncertain = next((r for r in receipts if r['state'] in ('UNKNOWN', 'EXECUTING')), None)
@@ -303,54 +339,6 @@ class FishSchedules:
             head.append('这是一次新的自主唤醒机会，历史消息不是新的来信；先看哪些事之前已考虑、哪些已回复，不重复回应同一条消息。结合共同经历决定做事、查资料、联系主人、到群里接话，或不行动。想说话可调用 fish_message_send 选目标，或用 fish_say 提交给当前场所。发言身份始终是 Fish 自己。')
         return '\n'.join(head)
 
-    def _thought(self, row, slot, *, cancelled=None):
-        from experience import ExperienceTurn, delivery
-        from fish_chat import respond
-        from chat_output import TurnSilent, decode_reply
-        from memory_store import MemoryStore
-        from qq_store import QQStore
-        from social_context import SocialContext
-        from tool_host import bind_session
-        social = SocialContext(self.root)
-        persona = social.active_persona('qq')
-        store = QQStore(self.root)
-        if str(row.get('configuration_key') or '').startswith('autonomy-') and not self.recent_activity(row):
-            return '最近两小时没有相关场所活动，未调用模型，也未打扰任何群'
-        conversation = store.get_or_create_conversation(row['target'], 'qq')
-        session = row['session']
-        # An autonomous occurrence is her own Agent execution, not a forged owner message.
-        authority = json.loads(row.get('request') or '{}').get('_authority') or {'owner':True}
-        scope = 'owner' if authority.get('owner') else authority['scope']
-        bind_session(self.root,'qq',session,scope,social.owner() if authority.get('owner') else authority['sender'])
-        reference = 'wake:' + row['id'] + ':' + slot
-        event = {'reference': reference, 'ts': datetime.now(UTC).isoformat(), 'text': row['prompt'], 'recent_window': 7200}
-        channel = 'qq' if row['target'].startswith('private:') else row['target']
-        experience = ExperienceTurn(self.root, store.db_path, conversation['id'], channel=channel, event=event)
-        prompt = self.prompt(row, slot)
-        self._bind_occurrence(session, row, slot)
-        try:
-            raw = respond(self.root, 'qq', persona=persona, history=[], history_source={},
-                memory=MemoryStore(self.root, 'qq').context(row['prompt'], scope), scope=scope, references='',
-                current=[{'type': 'text', 'text': prompt}], session=session, cancelled=cancelled,
-                origin='fish-schedule:' + row['id'], output='bubbles',
-                tool_context='owner-private' if authority.get('owner') else 'group', experience=experience, delivery_required=row['purpose'] == 'reminder')
-        except TurnSilent:
-            return
-        finally:
-            self._unbind_occurrence(session)
-        with database(self.path) as db:
-            # A direct tool send is already an outcome, including unknown delivery.
-            sent = db.execute('SELECT 1 FROM sends WHERE id LIKE ?', ('sched:' + row['id'] + ':' + slot + '%',)).fetchone()
-        if sent:
-            return
-        bubbles = decode_reply(self.root, raw)
-        if cancelled is not None and cancelled.is_set(): raise InterruptedError('后台正在关闭，未继续发送本次结果')
-        delivery(self.root, reference, sending=True)
-        result = self.control.deliver_bubbles(row['target'], bubbles, 'sched:' + row['id'] + ':' + slot,
-            source='fish-autonomous' if row['purpose'] == 'autonomy' else 'owner-reminder',
-            scheduled=row['purpose'] == 'reminder', context='owner:schedule' if row['purpose'] == 'reminder' else 'fish:autonomous')
-        delivery(self.root, reference, outcome=result['state'].lower())
-
     def recent_activity(self, row):
         """Quiet groups are not wake candidates; do not re-read already-considered inputs."""
         import sqlite3
@@ -361,7 +349,7 @@ class FishSchedules:
         group_policy = GroupPolicy(self.root)
         patrol = row.get('configuration_key') == 'autonomy-patrol'
         for source, filename in (('qq', 'qq.db'), ('desktop', 'desktop-chat.db')):
-            path = self.root / 'data/qq' / filename
+            path = project_path(self.root, 'data/qq', filename)
             if not path.is_file():
                 continue
             with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as db:

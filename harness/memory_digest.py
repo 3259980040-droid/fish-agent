@@ -15,6 +15,7 @@ owner asked for that one paragraph to be rewritten, so its failure is raised to
 whoever asked.
 """
 from __future__ import annotations
+from locations import project_path
 
 import json
 import re
@@ -24,6 +25,7 @@ from datetime import date
 from pathlib import Path
 
 from storage import database, role_dir
+from fts5_index import bigrams, digest as fts_digest, expressions
 
 TABLE = '''CREATE TABLE IF NOT EXISTS memory_digest(
     day TEXT PRIMARY KEY, text TEXT NOT NULL, kinds TEXT NOT NULL,
@@ -34,6 +36,11 @@ PERIOD_TABLE = '''CREATE TABLE IF NOT EXISTS memory_digest_period(
     scope TEXT NOT NULL, period TEXT NOT NULL, text TEXT NOT NULL, kinds TEXT NOT NULL,
     counts TEXT NOT NULL, created REAL NOT NULL, model_calls INTEGER NOT NULL,
     PRIMARY KEY(scope, period))'''
+# Derived lexical indexes: the digest rows above stay the one stored copy.
+DIGEST_FTS = '''CREATE VIRTUAL TABLE IF NOT EXISTS memory_digest_fts
+    USING fts5(bigram, digest UNINDEXED, tokenize='unicode61')'''
+PERIOD_FTS = '''CREATE VIRTUAL TABLE IF NOT EXISTS memory_digest_period_fts
+    USING fts5(bigram, digest UNINDEXED, tokenize='unicode61')'''
 SYSTEM = ('把今天新增和改动的记忆、表达写成一段给自己看的状态小结。第一人称，写具体的人和事，'
           '不要罗列条目、不要写客套话或建议。输出 JSON {"digest":"…"}，'
           'digest 是 150 到 400 字的中文段落。')
@@ -143,7 +150,7 @@ def _memory_path(root):
 
 
 def _language_path(root):
-    return Path(root) / 'data/social/group-language.db'
+    return project_path(Path(root), 'data/social/group-language.db')
 
 
 def _readonly(path):
@@ -275,17 +282,35 @@ def _stored(root, scope, period):
     return None if row is None else _row(dict(row), scope)
 
 
+def _fts_haystack(text, labels):
+    return ' '.join([str(text or '')] + [str(label or '') for label in (labels or [])])
+
+
+def _fts_put(db, table, rowid, text, labels):
+    value = bigrams(_fts_haystack(text, labels))
+    db.execute('DELETE FROM ' + table + ' WHERE rowid=?', (int(rowid),))
+    db.execute('INSERT INTO ' + table + '(rowid, bigram, digest) VALUES(?,?,?)',
+               (int(rowid), value, fts_digest(value)))
+
+
+def _prepare_fts(db):
+    db.execute(DIGEST_FTS)
+    db.execute(PERIOD_FTS)
+
+
 def _store(root, scope, period, text, labels, counts, created, model_calls):
     """Write one period's digest; a redone period replaces its own row."""
     path = _memory_path(root)
     with database(path) as db:
-        db.execute(TABLE); db.execute(PERIOD_TABLE)
+        db.execute(TABLE); db.execute(PERIOD_TABLE); _prepare_fts(db)
         if scope == 'day':
             db.execute('INSERT INTO memory_digest(day,text,kinds,counts,created,model_calls) VALUES(?,?,?,?,?,?) '
                        'ON CONFLICT(day) DO UPDATE SET text=excluded.text,kinds=excluded.kinds,'
                        'counts=excluded.counts,created=excluded.created,model_calls=excluded.model_calls',
                        (period, text, json.dumps(labels, ensure_ascii=False),
                         json.dumps(counts, ensure_ascii=False), created, model_calls))
+            row = db.execute('SELECT rowid FROM memory_digest WHERE day=?', (period,)).fetchone()
+            _fts_put(db, 'memory_digest_fts', row[0], text, labels)
             return
         db.execute('INSERT INTO memory_digest_period(scope,period,text,kinds,counts,created,model_calls) '
                    'VALUES(?,?,?,?,?,?,?) ON CONFLICT(scope,period) DO UPDATE SET text=excluded.text,'
@@ -293,10 +318,93 @@ def _store(root, scope, period, text, labels, counts, created, model_calls):
                    'model_calls=excluded.model_calls',
                    (scope, period, text, json.dumps(labels, ensure_ascii=False),
                     json.dumps(counts, ensure_ascii=False), created, model_calls))
+        row = db.execute('SELECT rowid FROM memory_digest_period WHERE scope=? AND period=?',
+                         (scope, period)).fetchone()
+        _fts_put(db, 'memory_digest_period_fts', row[0], text, labels)
 
 
-def build(root, scope='day', period=None, *, force=False):
-    """Summarize one period once; force rewrites the summary it already has."""
+def sync_index(root):
+    """Reconcile both digest indexes with their stored rows."""
+    path = _memory_path(root)
+    counts = {'days': 0, 'periods': 0}
+    if not path.is_file():
+        return counts
+    with database(path) as db:
+        db.execute(TABLE); db.execute(PERIOD_TABLE); _prepare_fts(db)
+        for key, table, sql in (
+                ('days', 'memory_digest_fts', 'SELECT rowid, text, kinds FROM memory_digest'),
+                ('periods', 'memory_digest_period_fts',
+                 'SELECT rowid, text, kinds FROM memory_digest_period')):
+            rows = [dict(row) for row in db.execute(sql)]
+            counts[key] = len(rows)
+            indexed = {int(row[0]): str(row[1] or '') for row in db.execute(
+                'SELECT rowid, digest FROM ' + table)}
+            ids = {int(row['rowid']) for row in rows}
+            for ident in [ident for ident in indexed if ident not in ids]:
+                db.execute('DELETE FROM ' + table + ' WHERE rowid=?', (ident,))
+            for row in rows:
+                try:
+                    labels = json.loads(row['kinds'] or '[]')
+                except (TypeError, ValueError):
+                    labels = []
+                value = bigrams(_fts_haystack(row['text'], labels))
+                stamp = fts_digest(value)
+                if indexed.get(int(row['rowid'])) == stamp:
+                    continue
+                db.execute('DELETE FROM ' + table + ' WHERE rowid=?', (int(row['rowid']),))
+                db.execute('INSERT INTO ' + table + '(rowid, bigram, digest) VALUES(?,?,?)',
+                           (int(row['rowid']), value, stamp))
+    return counts
+
+
+def search_digests(root, query, *, limit=5, scope=None):
+    """FTS5 lookup over day/week/month digests; returns overview-level rows."""
+    expr = expressions(query)[1]
+    if not expr:
+        return {'results': [], 'mode': 'fts5', 'note': '请给一个要找的主题词'}
+    root = Path(root)
+    sync_index(root)
+    path = _memory_path(root)
+    results = []
+    with database(path) as db:
+        db.execute(TABLE); db.execute(PERIOD_TABLE); _prepare_fts(db)
+        try:
+            days = db.execute(
+                'SELECT d.day, d.text, d.kinds, d.counts FROM memory_digest_fts f '
+                'JOIN memory_digest d ON d.rowid=f.rowid WHERE memory_digest_fts MATCH ? '
+                'ORDER BY bm25(memory_digest_fts) LIMIT ?', (expr, int(limit))).fetchall()
+            periods = db.execute(
+                'SELECT p.scope, p.period, p.text, p.kinds, p.counts FROM memory_digest_period_fts f '
+                'JOIN memory_digest_period p ON p.rowid=f.rowid WHERE memory_digest_period_fts MATCH ? '
+                'ORDER BY bm25(memory_digest_period_fts) LIMIT ?', (expr, int(limit))).fetchall()
+        except sqlite3.Error as exc:
+            return {'results': [], 'mode': 'fts5', 'note': '小结索引查询失败：' + str(exc)[:120]}
+    for rank, row in enumerate(days, 1):
+        results.append({'scope': 'day', 'period': row['day'], 'text': row['text'],
+                        'reference': 'digest:day:' + str(row['day']), 'rank': rank,
+                        'matched_by': 'fts5'})
+    for rank, row in enumerate(periods, 1):
+        if scope not in (None, '', 'all') and str(row['scope']) != scope:
+            continue
+        results.append({'scope': row['scope'], 'period': row['period'], 'text': row['text'],
+                        'reference': 'digest:' + str(row['scope']) + ':' + str(row['period']),
+                        'rank': rank, 'matched_by': 'fts5'})
+    return {'results': results[:max(1, min(50, int(limit)) * 2)], 'mode': 'fts5', 'note': ''}
+
+
+def get_digest(root, scope, period):
+    """One stored digest by its scope and period, or None."""
+    return _stored(Path(root), _scope(scope), _period(scope, period))
+
+
+def build(root, scope='day', period=None, *, force=False, gateway=None, raise_errors=False):
+    """Summarize one period once; force rewrites the summary it already has.
+
+    ``gateway`` lets the curation program pass Fish's configured model seam so
+    the daily digest is one step of that program, not a second model owner.
+    ``raise_errors`` is for that program: a failed call is its own recorded
+    failure and must not leave a "failed" digest row that later looks finished.
+    """
     root = Path(root)
     scope = _scope(scope)
     period = _period(scope, period)
@@ -314,12 +422,16 @@ def build(root, scope='day', period=None, *, force=False):
     else:
         model_calls = 1
         try:
-            from model_gateway import ModelGateway
-            reply = ModelGateway(root, 'qq').json(
+            if gateway is None:
+                from model_gateway import ModelGateway
+                gateway = ModelGateway(root, 'qq')
+            reply = gateway.json(
                 SYSTEMS[scope], json.dumps({'scope': scope, 'period': period, **material},
                                            ensure_ascii=False), origin='memory-digest')
             text = _text(reply)
         except Exception as exc:  # A page must never see a background failure.
+            if raise_errors:
+                raise
             text = (FAILED + _reason(exc))[:MAX_TEXT]
     created = time.time()
     labels = [row['label'] for row in kinds]
@@ -327,19 +439,19 @@ def build(root, scope='day', period=None, *, force=False):
     return dict(_record(period, text, labels, counts, created, model_calls, scope), skipped=False)
 
 
-def daily(root, day=None, *, force=False):
+def daily(root, day=None, *, force=False, gateway=None, raise_errors=False):
     """Summarize one day once; force rewrites the summary it already has."""
-    return build(root, 'day', day, force=force)
+    return build(root, 'day', day, force=force, gateway=gateway, raise_errors=raise_errors)
 
 
-def weekly(root, week=None, *, force=False):
+def weekly(root, week=None, *, force=False, gateway=None, raise_errors=False):
     """Summarize one ISO week once; force rewrites the summary it already has."""
-    return build(root, 'week', week, force=force)
+    return build(root, 'week', week, force=force, gateway=gateway, raise_errors=raise_errors)
 
 
-def monthly(root, month=None, *, force=False):
+def monthly(root, month=None, *, force=False, gateway=None, raise_errors=False):
     """Summarize one calendar month once; force rewrites it when force is set."""
-    return build(root, 'month', month, force=force)
+    return build(root, 'month', month, force=force, gateway=gateway, raise_errors=raise_errors)
 
 
 def revise(root, scope, period, note):

@@ -3,6 +3,7 @@
 This records the Harness LLM boundary, not the provider's internal processing.
 No attachment bytes, credentials or private model reasoning are retained.
 """
+from locations import project_path
 from pathlib import Path
 import json
 import os
@@ -180,7 +181,7 @@ def _shrink(summary):
 class RequestInspector:
     def __init__(self, root):
         self.root = Path(root)
-        self.path = self.root / 'data/social/request-inspector.db'
+        self.path = project_path(self.root, 'data/social/request-inspector.db')
         with database(self.path) as db:
             db.execute('''CREATE TABLE IF NOT EXISTS requests(
                 id INTEGER PRIMARY KEY, role TEXT, session TEXT, scope TEXT,
