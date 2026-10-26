@@ -68,6 +68,8 @@ class WorkbenchTurns(unittest.TestCase):
         legacy_text = self.wb.dispatch('chat.reasoning', {'reference': first['reference']})
         self.assertEqual(legacy_text['reasoning'], thought * 2)
         self.assertEqual(first['actions'][0]['call_id'], 'w04-workspace')
+        with patch.object(self.runtime.execution, 'turn_view', side_effect=AssertionError('display must not run during delivery')):
+            self.assertEqual(self.runtime.tools.delivery_sources(execution), ['fish_say'])
 
         store = self.runtime.client_qq.store()
         turns = [first]

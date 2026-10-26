@@ -167,22 +167,7 @@ class ExecutionModule:
         row = self.state.run(run_id, resolve_merged=resolve_merged)
         if row is None:
             return None
-        try:
-            inputs = json.loads(row.get('inputs') or '[]')
-        except (TypeError, ValueError):
-            inputs = []
-        reference = str(inputs[-1]) if inputs else ('self:' + str(row['id']))
-        kind = str(row.get('kind') or '')
-        plan_payload = self.runtime.plans._payload(row) if str(row.get('source')) == 'plan' else {}
-        schedule_id, slot = str(plan_payload.get('schedule_id') or ''), str(plan_payload.get('slot') or '')
-        if kind in ('timer', 'followup'):
-            # A self-wake writes its common-experience record under self:<run>, not under
-            # the message that happened to be first in its input list.
-            reference = 'self:' + str(row['id'])
-        elif schedule_id and slot:
-            # The plan turn's record is written under wake:<plan>:<slot> (the virtual
-            # event), while its input reference is plan:<plan>:<slot>.
-            reference = 'wake:%s:%s' % (schedule_id, slot)
+        inputs, plan_payload, reference = self._trace_inputs(row)
         view = {'instance_id': self.runtime.context.instance_id,
                 'execution': row['id'], 'requested_execution': str(run_id),
                 'merged_into': row.get('merged_into') or (row['id'] if str(run_id) != row['id'] else ''),
@@ -231,6 +216,33 @@ class ExecutionModule:
             view['usage'] = usage(self.root, trace_id=view['trace']['id'])
             view['output_speed'] = output_speed()
         return view
+
+    def _trace_inputs(self, row):
+        """Resolve one execution's original trace without invoking display/statistics reads."""
+        try:
+            inputs = json.loads(row.get('inputs') or '[]')
+        except (TypeError, ValueError):
+            inputs = []
+        reference = str(inputs[-1]) if inputs else ('self:' + str(row['id']))
+        kind = str(row.get('kind') or '')
+        plan_payload = self.runtime.plans._payload(row) if str(row.get('source')) == 'plan' else {}
+        schedule_id, slot = str(plan_payload.get('schedule_id') or ''), str(plan_payload.get('slot') or '')
+        if kind in ('timer', 'followup'):
+            # A self-wake writes its common-experience record under self:<run>, not under
+            # the message that happened to be first in its input list.
+            reference = 'self:' + str(row['id'])
+        elif schedule_id and slot:
+            # The plan turn's record is written under wake:<plan>:<slot> (the virtual
+            # event), while its input reference is plan:<plan>:<slot>.
+            reference = 'wake:%s:%s' % (schedule_id, slot)
+        return inputs, plan_payload, reference
+
+    def turn_trace(self, run_id):
+        """Original trace only; sending provenance must not depend on workbench accounting."""
+        row = self.state.run(run_id)
+        if row is None:
+            return None
+        return self._turn_trace(self._trace_inputs(row)[2])
 
     def _turn_trace(self, reference):
         from .reads import read_trace

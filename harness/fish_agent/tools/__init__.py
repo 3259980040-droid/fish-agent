@@ -80,8 +80,8 @@ class ToolsModule:
         return execute(self.root, role, session, name, arguments, call_id, timeout)
 
     def delivery_sources(self,execution):
-        view=self.runtime.execution.turn_view(str(execution))
-        events=(view.get('trace') or {}).get('events',[]) if view else []
+        trace=self.runtime.execution.turn_trace(str(execution))
+        events=trace.get('events',[]) if trace else []
         return list(dict.fromkeys(event['value']['name'] for event in events
             if event.get('kind')=='tool_result' and isinstance(event.get('value'),dict)
             and event['value'].get('name') in ('fish_say','fish_send_sticker','fish_chat_reply')
