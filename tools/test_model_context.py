@@ -27,24 +27,32 @@ class ModelContextTests(unittest.TestCase):
         self.budget = ContextBudget(self.root, self.gateway,
             metadata={'id': 'fake-model', 'context_window': 100000}, tokenizer=fixture.CharTokenizer())
 
-    def prepare(self, context, number, text, *, memory='', image=None):
+    def prepare(self, context, number, text, *, memory='', image=None, history=None, surface=None):
         mid = self.record(self.cid, str(text))
         current = [{'type': 'text', 'text': text}]
         if image:
             current.append({'type': 'image_url', 'image_url': {'url': image}})
-        source = {'current_reference': 'qq:' + str(mid), 'surface': []}
+        source = {'current_reference': 'qq:' + str(mid), 'surface': surface or []}
         with patch('chat_request.now_line', return_value='fixed clock'):
-            request = assemble_chat_request(persona='stable persona', history=[], memory=memory,
+            request = assemble_chat_request(persona='stable persona', history=history or [], memory=memory,
                 expression={'prompt': ''}, references='', current=current,
                 runtime_state='actual tools available', sources={'history': source})
         return context.prepare(request, route='fake|model', execution='run-' + str(number),
             original={'reference': source['current_reference'], 'source': 'qq.db',
-                      'conversation': self.cid, 'id': mid})
+                      'conversation': self.cid, 'id': mid, 'place': 'private:' + fixture.OWNER,
+                      'time': '2026-10-26 12:%02d:00' % number})
 
     def seed(self):
+        self.prior = self.record(self.cid, 'old source' * 50)
+        history = [{'role': 'user', 'content': 'old source' * 50, '_fish_layer': 1,
+                    '_fish_refs': ['qq:' + str(self.prior)]}]
+        surface = [{'reference': 'qq.db:' + str(self.prior), 'source': 'qq.db',
+                    'conversation': self.cid, 'id': self.prior, 'place': 'private:' + fixture.OWNER,
+                    'time': '2026-10-26 11:59:00'}]
         for number in range(6):
             context = ModelContext(self.root)
-            messages = self.prepare(context, number, str(number) + 'u' * 480)
+            messages = self.prepare(context, number, str(number) + 'u' * 480,
+                                    history=history if number == 0 else [], surface=surface)
             self.budget.fit(messages, [], 0)
             context.save(messages, self.budget)
             messages.append({'role': 'assistant', 'content': 'a' * 480, 'reasoning_content': 'reason'})
@@ -74,33 +82,60 @@ class ModelContextTests(unittest.TestCase):
 
     def test_compaction_uses_original_checkpoint_and_preserves_recent_tail(self):
         context = self.seed()
-        messages = context.retained()
-        tail = json.loads(json.dumps(messages[-2:]))
+        messages = self.prepare(context, 7, 'u' * 700)
+        tail = json.loads(json.dumps(messages[-3:]))
         summary = fixture.FakeGateway(['已经讨论六轮，记住共同方案，保留后续问题。'])
-        result = context.compact(messages, self.budget, [], ChatOptions('high', 100, 20), summary, force=True)
+        result = context.compact(messages, self.budget, [], ChatOptions('high', 100, 20), summary)
         self.assertTrue(result['committed'])
-        self.assertEqual(messages[-2:], tail)
+        self.assertEqual(messages[-3:], tail)
         with database(context.state.path) as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM context_checkpoints').fetchone()[0], 1)
             self.assertGreater(db.execute('SELECT COUNT(*) FROM chat_catalog').fetchone()[0], 0)
+            catalog = db.execute('SELECT * FROM chat_catalog WHERE place=? AND from_message_id<=? '
+                                 'AND to_message_id>=?', ('private:' + fixture.OWNER, self.prior, self.prior)).fetchone()
+            self.assertIsNotNone(catalog, '首次采用的既有原件也必须能按真实场所回查')
+            self.assertEqual(catalog['start_time'], '2026-10-26 11:59:00')
             self.assertEqual(db.execute("SELECT COUNT(*) FROM compactions WHERE state='pending'").fetchone()[0], 0)
         loaded = ModelContext(self.root)
         self.assertEqual(loaded.value['checkpoint_id'], result['checkpoint_id'])
-        self.assertEqual(loaded.retained()[-2:], tail)
+        clean = lambda rows: [{k: v for k, v in m.items() if not k.startswith('_fish_')} for m in rows]
+        self.assertEqual(clean(loaded.retained()[-3:]), clean(tail))
         with database(self.store.db_path) as db:
-            self.assertEqual(db.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 6)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 8)
 
     def test_failed_summary_leaves_context_and_checkpoint_unchanged(self):
         context = self.seed()
         before = context.state.get_state(context.key)
         messages = context.retained()
-        gateway = fixture.FakeGateway([RuntimeError('模拟摘要失败')])
-        with self.assertRaisesRegex(RuntimeError, '模拟摘要失败'):
+        # The provider has billed this call, even though its empty summary cannot
+        # be published. Rejection must preserve both the context and real usage.
+        gateway = fixture.FakeGateway([''])
+        with self.assertRaisesRegex(ValueError, '续聊摘要为空'):
             context.compact(messages, self.budget, [], ChatOptions('high', 100, 20), gateway, force=True)
         self.assertEqual(context.state.get_state(context.key), before)
         with database(context.state.path) as db:
             exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='context_checkpoints'").fetchone()
             self.assertEqual(db.execute('SELECT COUNT(*) FROM context_checkpoints').fetchone()[0] if exists else 0, 0)
+        with database(self.budget.path) as db:
+            row = db.execute("SELECT usage,error FROM context_requests WHERE origin='context-compaction'").fetchone()
+            self.assertEqual(json.loads(row['usage'])['prompt_tokens'], 11)
+            self.assertIn('续聊摘要为空', row['error'])
+
+    def test_deletion_during_first_preparation_rejects_the_writer(self):
+        from fish_agent.execution.runner import execute
+
+        def prepare():
+            # The first reader has not published a versions map yet.
+            ModelContext.forget(self.root, ['desktop:123'])
+            return {'execution': 'run-first', 'persona': {}, 'current': []}
+
+        def run(*args, continuation, **kwargs):
+            self.assertFalse(continuation.save([{'role': 'user', 'content': 'deleted original'}], self.budget))
+            return 'complete'
+
+        with patch('fish_agent.execution.runner.run_model_loop', side_effect=run):
+            execute(self.root, 'qq', prepare=prepare, origin='test')
+        self.assertEqual(ModelContext(self.root).retained(), [])
 
     def test_images_stay_in_media_and_deletion_invalidates_an_inflight_projection(self):
         uri = 'data:image/png;base64,AAECAwQFBgcICQ=='

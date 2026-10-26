@@ -219,7 +219,7 @@ class DesktopContext:
                            {'role': role, 'content': body, '_fish_layer': 0 if claimed else 4 if recalled else 1 if event['current_conversation'] else 2,
                             '_fish_refs': [event['reference']], '_fish_bundle': event['bundle']},
                            {'source': event['store'], 'conversation': event['conversation'],
-                            'id': int(event['id'])}))
+                            'id': int(event['id']), 'place': event['place'], 'time': event['time']}))
         # 时间相同时按各库自己的消息号排序：消息号是数字，不能按 "qq:10" < "qq:2" 的字符串比。
         picked.sort(key=lambda item: (item[0], item[3]['source'], int(item[3]['id'])))
         # The surface is the ordered, unmodified original material of this place, priced
@@ -232,6 +232,7 @@ class DesktopContext:
                             'bundle': item[2].get('_fish_bundle') or '',
                             'layer': int(item[2].get('_fish_layer', 1)),
                             'source': info['source'], 'conversation': info['conversation'],
+                            'place': info['place'], 'time': info['time'],
                             'id': int(info['id']), 'role': 'user',
                             'tokens': _tokens(self.root, item[2]['content']),
                             'text': item[2]['content']})

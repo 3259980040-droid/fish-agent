@@ -649,9 +649,11 @@ def fold_model_context(context, messages, budget, tools, options, gateway, *,
     if trace is not None:
         trace.event('context_compaction', {'phase': 'started', 'context_request_id': accounting,
                                          'source_messages': cut, 'pressure_tokens': pressure})
+    usage = None
     try:
         result = gateway.chat(prompt, options=summary_options, origin='context-compaction', cancelled=cancelled)
-        meter.finish(accounting, result.usage)
+        usage = result.usage
+        meter.finish(accounting, usage)
         summary = str(result.text or '').strip()
         shadowed = sum(budget.message_tokens(m) for m in selected)
         summary_tokens = meter.tokens(summary)
@@ -665,9 +667,14 @@ def fold_model_context(context, messages, budget, tools, options, gateway, *,
                 info = context.originals.get(reference)
                 if not info:
                     continue
-                key = (info['source'], info['conversation'])
+                key = (info['source'], info['conversation'], info.get('place', ''))
                 span = ranges.setdefault(key, {'source': key[0], 'conversation': key[1],
-                                                'from': info['id'], 'to': info['id']})
+                    'place': key[2], 'from': info['id'], 'to': info['id'],
+                    'start_time': info.get('time', ''), 'end_time': info.get('time', '')})
+                if info['id'] < span['from']:
+                    span['start_time'] = info.get('time', '')
+                if info['id'] > span['to']:
+                    span['end_time'] = info.get('time', '')
                 span['from'], span['to'] = min(span['from'], info['id']), max(span['to'], info['id'])
         checkpoint_key = 'model-context:' + context.role
         with database(context.state.path) as db:
@@ -681,8 +688,8 @@ def fold_model_context(context, messages, budget, tools, options, gateway, *,
             for span in ranges.values():
                 db.execute('INSERT INTO chat_catalog(checkpoint_id,source,conversation,place,from_message_id,'
                     'to_message_id,start_time,end_time,topics,keywords,gist,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-                    (checkpoint_id, span['source'], span['conversation'], '', span['from'], span['to'],
-                     '', '', _keywords(summary), _keywords(summary), _gist(summary), time.time()))
+                    (checkpoint_id, span['source'], span['conversation'], span['place'], span['from'], span['to'],
+                     span['start_time'], span['end_time'], _keywords(summary), _keywords(summary), _gist(summary), time.time()))
             replacement = [messages[0], {'role': 'user', 'content': CHECKPOINT_HEAD + '\n' + summary,
                 '_fish_layer': 0, '_fish_refs': [checkpoint_key + ':checkpoint:' + str(checkpoint_id)],
                 '_fish_bundle': checkpoint_key + ':checkpoint:' + str(checkpoint_id)}, *messages[cut + 1:]]
@@ -700,7 +707,7 @@ def fold_model_context(context, messages, budget, tools, options, gateway, *,
         return {'committed': True, 'checkpoint_id': checkpoint_id, 'context_key': checkpoint_key,
                 'source_tokens': shadowed, 'summary_tokens': summary_tokens, 'state': 'done'}
     except Exception as exc:
-        meter.finish(accounting, error=str(exc))
+        meter.finish(accounting, usage=usage, error=str(exc))
         try:
             from governance import Governance
             Governance(context.root).fault('context-compaction', exc, stage='summary')

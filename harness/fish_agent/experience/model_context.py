@@ -97,9 +97,12 @@ class ModelContext:
         source = request.get('sources', {}).get('history') or {}
         if isinstance(source, dict):
             for node in source.get('surface', []):
-                self.originals[node['reference']] = {k: node[k] for k in ('source', 'conversation', 'id')}
+                prefix = {'desktop-chat.db': 'desktop', 'qq.db': 'qq'}[node['source']]
+                self.originals[prefix + ':' + str(node['id'])] = {
+                    k: node[k] for k in ('source', 'conversation', 'id', 'place', 'time') if k in node}
         if original and original.get('reference'):
-            self.originals[original['reference']] = {k: original[k] for k in ('source', 'conversation', 'id')}
+            self.originals[original['reference']] = {
+                k: original[k] for k in ('source', 'conversation', 'id', 'place', 'time') if k in original}
         messages = self._images(deepcopy(self.value.get('messages', [])), restore=True)
         active = {ref for m in messages for ref in m.get('_fish_refs', [])}
         recalled = set(source.get('recalled_references', [])) if isinstance(source, dict) else set()
@@ -146,6 +149,9 @@ class ModelContext:
     def save(self, messages, budget, *, connection=None, checkpoint_id=None):
         if not self.valid:
             return False
+        alive = {id(message) for message in messages}
+        self.metadata = {key: value for key, value in self.metadata.items() if key in alive}
+        self.updates = {key: value for key, value in self.updates.items() if key in alive}
         nodes = []
         for message in messages:
             layer, refs, bundle = getattr(budget, 'materials', {}).get(id(message),
@@ -173,6 +179,8 @@ class ModelContext:
         return self.valid
 
     def compact(self, messages, budget, tools, options, gateway, *, cancelled=None, force=False, trace=None):
+        if not self.valid:
+            return None
         from .compaction import fold_model_context
         return fold_model_context(self, messages, budget, tools, options, gateway,
                                   cancelled=cancelled, force=force, trace=trace)
@@ -180,7 +188,8 @@ class ModelContext:
     @classmethod
     def forget(cls, root, references, role='qq'):
         context = cls(root, role)
-        if set(references).intersection(context.value.get('versions', {})):
-            # Invalidate an in-flight writer too: it cannot restore deleted words.
+        if references:
+            # An in-flight first preparation may have read deleted originals that
+            # have not reached versions yet. Invalidate its captured epoch too.
             context.state.set_state(context.key, _json({'epoch': uuid.uuid4().hex}))
 

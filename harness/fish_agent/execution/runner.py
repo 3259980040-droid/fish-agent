@@ -93,7 +93,9 @@ def run_model_loop(root, role, *, persona, history, history_source, memory, scop
         if experience is not None and getattr(experience, 'message', None) is not None:
             original = {'reference': history_source['current_reference'],
                         'source': experience.path.name, 'conversation': experience.conversation,
-                        'id': int(experience.message)}
+                        'id': int(experience.message),
+                        'place': history_source['current_event']['place'],
+                        'time': history_source['current_event']['time']}
         messages = continuation.prepare(request, route=gateway.base.rstrip('/') + '|' + gateway.model,
                                          execution=continuation.execution, original=original)
     from governance import Governance
@@ -269,6 +271,12 @@ def execute(root, role, *, prepare, origin, cancelled=None, output='text', exper
     with thinking_slot(root, role, cancelled, key=execution_key):
         trace = None
         try:
+            # Capture the invalidation epoch before any original history is read.
+            # A concurrent deletion must reject this writer, even on first use.
+            continuation = None
+            if not child:
+                from ..experience.model_context import ModelContext
+                continuation = ModelContext(root, role)
             materials = prepare()
             if materials.get('experience') is not None:
                 experience = materials['experience']
@@ -277,11 +285,10 @@ def execute(root, role, *, prepare, origin, cancelled=None, output='text', exper
                               materials.get('trace_reference') or trace_reference, child=child)
             if materials.get('execution'):
                 trace.event('execution', str(materials['execution']))
-            continuation = None
             if materials.get('execution') and not child:
-                from ..experience.model_context import ModelContext
-                continuation = ModelContext(root, role)
                 continuation.execution = str(materials['execution'])
+            else:
+                continuation = None
             result = run_model_loop(
                 root, role, persona=materials['persona'], history=materials.get('history') or [],
                 history_source=materials.get('history_source') or {}, memory=materials.get('memory') or '',
