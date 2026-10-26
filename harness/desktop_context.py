@@ -185,6 +185,10 @@ class DesktopContext:
                 continue
             if after is None and not event['current_conversation'] and not (relevant or age <= self.recent_window):
                 continue
+            # Query-dependent old originals are references for this turn, not a
+            # change to the continuous history prefix or a fresh compaction range.
+            recalled = after is None and not claimed and (summarized or
+                       (not event['current_conversation'] and age > self.recent_window))
             if cancelled is not None and cancelled.is_set():
                 raise InterruptedError('共同上下文准备已取消')
             quoted = index.get((event['place'], event['reply_to']))
@@ -194,7 +198,7 @@ class DesktopContext:
             header = {'reference': event['reference'], 'time': event['time'], 'place': event['place'],
                       'speaker': event['speaker'], 'delivery': event['delivery'],
                       'already_considered': event['reference'] in considered}
-            body = '【历史消息】' + json.dumps(header, ensure_ascii=False) + '\n'
+            body = ('【本轮回查原文】' if recalled else '【历史消息】') + json.dumps(header, ensure_ascii=False) + '\n'
             if quote:
                 body += '引用：' + json.dumps(quote, ensure_ascii=False) + '\n'
             body += '正文：' + event['text']
@@ -209,7 +213,7 @@ class DesktopContext:
             # insert an incomplete assistant envelope into a thinking/tool request.
             role = 'user'
             picked.append((event['time'], event['reference'],
-                           {'role': role, 'content': body, '_fish_layer': 0 if claimed else 1 if event['current_conversation'] else 2,
+                           {'role': role, 'content': body, '_fish_layer': 0 if claimed else 4 if recalled else 1 if event['current_conversation'] else 2,
                             '_fish_refs': [event['reference']], '_fish_bundle': event['bundle']},
                            {'source': event['store'], 'conversation': event['conversation'],
                             'id': int(event['id'])}))
@@ -228,13 +232,16 @@ class DesktopContext:
                             'id': int(info['id']), 'role': 'user',
                             'tokens': _tokens(self.root, item[2]['content']),
                             'text': item[2]['content']})
-        history = [item[2] for item in picked]
+        history = [item[2] for item in picked if item[2]['_fish_layer'] != 4]
         if continuation and continuation.get('summary'):
             history.insert(0, {'role': 'user', 'content': continuation.get('material') or continuation['summary'],
                                '_fish_layer': 1,
                                '_fish_refs': [self.path.name + ':checkpoint:' + str(continuation['through'])]})
         if after is None and not self.channel.startswith('group:'):
             history.extend(self.period_material(question, words))
+        # Preserve the original order within both sections. A different lookup
+        # changes only this trailing section, not the checkpoint + recent history.
+        history.extend(item[2] for item in picked if item[2]['_fish_layer'] == 4)
         current_quote = index.get((current_place, str(current.get('reply_to') or '')))
         current_quote = ({'speaker': current_quote['speaker'], 'time': current_quote['time'],
                           'text': current_quote['text'], 'reference': current_quote['reference']} if current_quote else
