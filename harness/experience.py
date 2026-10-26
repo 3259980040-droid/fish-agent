@@ -48,6 +48,8 @@ class ExperienceTurn:
         with database(self.ledger) as db:
             db.execute('UPDATE experience_turns SET started=COALESCE(started,?) WHERE id=?', (time.time(), self.id))
         self.pending = set(report.get('covered') or ())
+        if report.get('model_context'):
+            return  # The persistent protocol uses the same compactor at its own actual prefix.
         self._request_compaction(report, tokens)
 
     def _request_compaction(self, report, tokens):

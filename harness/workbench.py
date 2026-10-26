@@ -628,6 +628,8 @@ class Workbench:
             finally:
                 conn.close()
         if removed_messages:
+            from fish_agent.experience.model_context import ModelContext
+            ModelContext.forget(self.root, ['desktop:' + str(mid) for mid in removed_messages])
             # The FTS index is derived: forget these originals in the same delete path.
             from history_index import forget_messages
             forget_messages(self.root, 'desktop-chat.db', removed_messages)

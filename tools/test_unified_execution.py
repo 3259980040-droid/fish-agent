@@ -232,6 +232,25 @@ class UnifiedExecutionTests(unittest.TestCase):
         bubbles = json.loads(answer)['bubbles']
         self.assertEqual([bubble['text'] for bubble in bubbles], ['私聊答复'])
 
+    def test_following_turn_preserves_the_actual_provider_prefix_and_tools(self):
+        wb = Workbench(self.root)
+        cid = self.conversation(wb)
+        fake = self.gateway([saying('第一次回复'), final('本轮结束'),
+                             saying('第二次回复'), final('第二轮结束')])
+        first = self.submit(wb, cid, '记住我们刚才讨论的方案')
+        self.assertEqual(self.job(wb, first['job_id'])['status'], 'complete')
+        previous = fake.requests[-1]
+        second = self.submit(wb, cid, '接着讨论这个方案')
+        self.assertEqual(self.job(wb, second['job_id'])['status'], 'complete')
+        following = fake.requests[2]
+        self.assertEqual(following[:len(previous)], previous)
+        self.assertEqual(following[len(previous)]['role'], 'assistant')
+        self.assertEqual(following[len(previous)]['content'], '本轮结束')
+        calls = [m for m in following if m.get('tool_calls')]
+        self.assertTrue(calls)
+        self.assertTrue(any(m.get('tool_call_id') == calls[0]['tool_calls'][0]['id']
+                            for m in following))
+
     def test_repeated_submission_does_not_create_another_input_or_generation(self):
         wb = Workbench(self.root)
         cid = self.conversation(wb)

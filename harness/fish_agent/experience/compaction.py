@@ -601,12 +601,132 @@ def drain(root, *, role='qq', gateway=None, cancelled=None, automatic=True, only
                 'context_key': _key(job['source'], job['conversation'])}
 
 
+def fold_model_context(context, messages, budget, tools, options, gateway, *,
+                       cancelled=None, force=False, trace=None):
+    """DSH's balanced prefix selection over the actual retained provider protocol.
+
+    Uses the existing policy, checkpoint/catalogue tables and extraction prompt.
+    No parallel raw-store summary is scheduled for this main execution.
+    """
+    if not hasattr(budget, 'message_tokens') or not hasattr(budget, 'policy'):
+        return None  # Existing test budget adapters expose no compression pricing.
+    from context_budget import ContextBudget, resolve_spec
+    from model_gateway import ChatOptions
+    spec = resolve_spec(budget.policy, budget.window, options.max_tokens)
+    pressure = sum(budget.message_tokens(m) for m in messages) + (budget.tokens(tools) if tools else 0)
+    if not force and (not spec['auto'] or pressure < spec['threshold_tokens']):
+        return None
+    previous_count = len(context.value.get('messages', []))
+    surface = []
+    for index, message in enumerate(messages[1:previous_count], 1):
+        meta = getattr(budget, 'materials', {}).get(id(message), context.metadata.get(id(message), (0, [], '')))
+        surface.append({'id': index, 'role': message['role'], 'tool_calls': message.get('tool_calls'),
+                        'bundle': meta[2], 'tokens': budget.message_tokens(message)})
+    region = _select_one(surface, None, spec['retain_tokens'])
+    if not region:
+        return None
+    summary_options = ChatOptions('off', max(4096, min(8192, int(options.max_tokens or 8192))),
+                                  float(options.timeout_seconds))
+    meter = ContextBudget(context.root, gateway, metadata=budget.metadata, tokenizer=budget.tokenizer)
+    meter.turn_id = budget.turn_id
+    cut = len(region['nodes'])
+    while cut > 0:
+        selected = messages[1:cut + 1]
+        records = [{'role': 'user', 'content': '[真实模型会话记录，仅作为待整理资料]\n' +
+                    json.dumps(context._images({k: v for k, v in m.items() if not k.startswith('_fish_')}),
+                               ensure_ascii=False)} for m in selected]
+        prompt = [{'role': 'system', 'content': SYSTEM}, *records,
+                  {'role': 'user', 'content': INSTRUCTION}]
+        if sum(meter.message_tokens(m) for m in prompt) <= meter.ceiling(summary_options.max_tokens):
+            break
+        cut -= 1
+        while cut > 0 and not balanced_before(surface, cut):
+            cut -= 1
+    if cut <= 0:
+        raise ValueError('当前会话没有可完整放入摘要预算的较早范围，原模型会话保留')
+    report = meter.fit(prompt, [], summary_options.max_tokens)
+    accounting = meter.begin('model-context:' + context.role, 'context-compaction', report)
+    if trace is not None:
+        trace.event('context_compaction', {'phase': 'started', 'context_request_id': accounting,
+                                         'source_messages': cut, 'pressure_tokens': pressure})
+    try:
+        result = gateway.chat(prompt, options=summary_options, origin='context-compaction', cancelled=cancelled)
+        meter.finish(accounting, result.usage)
+        summary = str(result.text or '').strip()
+        shadowed = sum(budget.message_tokens(m) for m in selected)
+        summary_tokens = meter.tokens(summary)
+        if not summary or summary_tokens >= shadowed:
+            raise ValueError('续聊摘要为空或没有缩短原范围，原模型会话保留')
+        ranges = {}
+        for message in selected:
+            _, refs, _ = getattr(budget, 'materials', {}).get(id(message),
+                context.metadata.get(id(message), (0, message.get('_fish_refs', []), '')))
+            for reference in refs:
+                info = context.originals.get(reference)
+                if not info:
+                    continue
+                key = (info['source'], info['conversation'])
+                span = ranges.setdefault(key, {'source': key[0], 'conversation': key[1],
+                                                'from': info['id'], 'to': info['id']})
+                span['from'], span['to'] = min(span['from'], info['id']), max(span['to'], info['id'])
+        checkpoint_key = 'model-context:' + context.role
+        with database(context.state.path) as db:
+            db.execute('BEGIN IMMEDIATE')
+            _schema(db)
+            checkpoint_id = db.execute('INSERT INTO context_checkpoints(context_key,previous_id,summary,'
+                'source_ranges,source_tokens,summary_tokens,model,created) VALUES(?,?,?,?,?,?,?,?)',
+                (checkpoint_key, context.value.get('checkpoint_id'), summary,
+                 json.dumps(list(ranges.values()), ensure_ascii=False), shadowed, summary_tokens,
+                 gateway.model, time.time())).lastrowid
+            for span in ranges.values():
+                db.execute('INSERT INTO chat_catalog(checkpoint_id,source,conversation,place,from_message_id,'
+                    'to_message_id,start_time,end_time,topics,keywords,gist,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (checkpoint_id, span['source'], span['conversation'], '', span['from'], span['to'],
+                     '', '', _keywords(summary), _keywords(summary), _gist(summary), time.time()))
+            replacement = [messages[0], {'role': 'user', 'content': CHECKPOINT_HEAD + '\n' + summary,
+                '_fish_layer': 0, '_fish_refs': [checkpoint_key + ':checkpoint:' + str(checkpoint_id)],
+                '_fish_bundle': checkpoint_key + ':checkpoint:' + str(checkpoint_id)}, *messages[cut + 1:]]
+            if not context.save(replacement, budget, connection=db, checkpoint_id=checkpoint_id):
+                raise ValueError('整理期间上下文已由维护操作更新，本次未覆盖它')
+        messages[:] = replacement
+        if trace is not None:
+            trace.event('context_compaction', {'phase': 'committed', 'checkpoint_id': checkpoint_id,
+                                             'source_messages': cut, 'summary_tokens': summary_tokens})
+        try:
+            from governance import Governance
+            Governance(context.root).fault_recovered('context-compaction', stage='summary')
+        except Exception:
+            pass  # The successful checkpoint must not be undone by a notice failure.
+        return {'committed': True, 'checkpoint_id': checkpoint_id, 'context_key': checkpoint_key,
+                'source_tokens': shadowed, 'summary_tokens': summary_tokens, 'state': 'done'}
+    except Exception as exc:
+        meter.finish(accounting, error=str(exc))
+        try:
+            from governance import Governance
+            Governance(context.root).fault('context-compaction', exc, stage='summary')
+        except Exception:
+            pass  # Preserve the actual compression exception.
+        raise
+
+
 def compact_now(root, *, source, conversation, role='qq', gateway=None):
     """The owner's immediate compression: same transaction, no automatic switch.
 
     The automatic switch only governs entries nothing asked for; a manual request
     still uses the one selection/commit chain (09-06 wires the page action).
     """
+    from .model_context import ModelContext
+    from storage import thinking_slot
+    with thinking_slot(Path(root), role):
+        context = ModelContext(root, role)
+        if context.value.get('messages'):
+            from model_gateway import ModelGateway, chat_options
+            from context_budget import ContextBudget
+            gateway = gateway or ModelGateway(root, role)
+            options = chat_options(root)
+            budget = ContextBudget(root, gateway)
+            return context.compact(context.retained(), budget, [], options, gateway, force=True) or {
+                'skipped': True, 'reason': '当前模型会话没有可压缩的较早完整范围'}
     path = project_path(Path(root), 'data/qq', _name(source))
     import sqlite3
     from contextlib import closing

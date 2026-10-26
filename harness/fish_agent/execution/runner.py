@@ -30,7 +30,8 @@ SEND_SURFACES = ('group', 'owner-private', 'owner-desktop')
 
 def run_model_loop(root, role, *, persona, history, history_source, memory, scope, references,
                    current, session, cancelled, origin, output='text', emoji_state=None,
-                   tool_context='', delivery_required=False, trace=None, experience=None):
+                   tool_context='', delivery_required=False, trace=None, experience=None,
+                   continuation=None):
     """Run one turn to its real result.
 
     Returns the answer text (``text`` output) or this turn's queued bubbles as JSON
@@ -87,6 +88,14 @@ def run_model_loop(root, role, *, persona, history, history_source, memory, scop
                  'parameters': 'ModelGateway.chat_options / harness/control.json'})
     request['sources']['output'] = output_source
     messages = request['messages']
+    if continuation is not None:
+        original = None
+        if experience is not None and getattr(experience, 'message', None) is not None:
+            original = {'reference': history_source['current_reference'],
+                        'source': experience.path.name, 'conversation': experience.conversation,
+                        'id': int(experience.message)}
+        messages = continuation.prepare(request, route=gateway.base.rstrip('/') + '|' + gateway.model,
+                                         execution=continuation.execution, original=original)
     from governance import Governance
     tool_limit = Governance(root, role).config()['max_tool_calls_per_turn']
     tools_used = 0
@@ -100,7 +109,15 @@ def run_model_loop(root, role, *, persona, history, history_source, memory, scop
             if not any(old['function']['name']==item['function']['name'] for old in tool_list):tool_list.append(item)
         if cancelled is not None and cancelled.is_set():
             raise InterruptedError('本轮聊天已取消，未继续生成或调用工具')
+        if continuation is not None:
+            continuation.compact(messages, budget, tool_list, options, gateway,
+                                 cancelled=cancelled, trace=trace)
         budget_report = budget.fit(messages, tool_list, options.max_tokens)
+        if continuation is not None:
+            continuation.save(messages, budget)
+            budget_report['model_context'] = {'kind': 'persistent-provider-conversation',
+                'epoch': continuation.value.get('epoch'),
+                'checkpoint_id': continuation.value.get('checkpoint_id')}
         # RequestInspector is an optional administrator diagnostic. The real input
         # boundaries, trace and usage below own this turn's records; a debug copy
         # must never be a prerequisite for either a request or its tool continuation.
@@ -130,6 +147,10 @@ def run_model_loop(root, role, *, persona, history, history_source, memory, scop
         if cancelled is not None and cancelled.is_set():
             raise InterruptedError('本轮已取消；晚到结果未保存为成功回复')
         if not result.tool_calls:
+            if continuation is not None:
+                messages.append({'role': 'assistant', 'content': result.text or '',
+                                 'reasoning_content': result.reasoning_content})
+                continuation.save(messages, budget)
             trace.event('final_content', result.text or '')
             if sending:
                 if delivery_required:
@@ -201,6 +222,8 @@ def run_model_loop(root, role, *, persona, history, history_source, memory, scop
                              'content': json.dumps(value, ensure_ascii=False)})
         if previews:
             messages.append({'role': 'user', 'content': previews})
+        if continuation is not None:
+            continuation.save(messages, budget)
     raise TimeoutError('本轮聊天及工具调用超过当前聊天超时设置；记录保留，未声称已发送')
 
 
@@ -254,6 +277,11 @@ def execute(root, role, *, prepare, origin, cancelled=None, output='text', exper
                               materials.get('trace_reference') or trace_reference, child=child)
             if materials.get('execution'):
                 trace.event('execution', str(materials['execution']))
+            continuation = None
+            if materials.get('execution') and not child:
+                from ..experience.model_context import ModelContext
+                continuation = ModelContext(root, role)
+                continuation.execution = str(materials['execution'])
             result = run_model_loop(
                 root, role, persona=materials['persona'], history=materials.get('history') or [],
                 history_source=materials.get('history_source') or {}, memory=materials.get('memory') or '',
@@ -262,7 +290,7 @@ def execute(root, role, *, prepare, origin, cancelled=None, output='text', exper
                 output=output, emoji_state=materials.get('emoji_state') or {'previewed': set(), 'tools': []},
                 tool_context=materials.get('tool_context') or '',
                 delivery_required=bool(materials.get('delivery_required')), trace=trace,
-                experience=experience)
+                experience=experience, continuation=continuation)
         except TurnSilent:
             if trace is not None:
                 trace.finish('silent')

@@ -145,6 +145,20 @@ class AgentState:
                        'ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated=excluded.updated',
                        (str(key), str(value), time.time()))
 
+    def compare_set_state(self, key, value, expected, *, connection=None):
+        """Publish one projection only if maintenance has not invalidated its input."""
+        if connection is None:
+            with database(self.path) as db:
+                db.execute('BEGIN IMMEDIATE')
+                return self.compare_set_state(key, value, expected, connection=db)
+        row = connection.execute('SELECT value FROM agent_state WHERE key=?', (str(key),)).fetchone()
+        if (str(row[0]) if row else '') != expected:
+            return False
+        connection.execute('INSERT INTO agent_state(key,value,updated) VALUES(?,?,?) '
+                           'ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated=excluded.updated',
+                           (str(key), str(value), time.time()))
+        return True
+
     def queued_or_running(self):
         with database(self.path) as db:
             return db.execute("SELECT 1 FROM agent_runs WHERE status IN ('queued','running') LIMIT 1").fetchone() is not None
