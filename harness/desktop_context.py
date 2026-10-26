@@ -175,12 +175,9 @@ class DesktopContext:
             words.update(span[i:i+2] for i in range(len(span)-1))
         cutoff = datetime.fromisoformat(timestamp).timestamp() if timestamp else 0
         picked = []
-        recalled_references = []
         for event in events:
             age = cutoff - datetime.fromisoformat(event['time']).timestamp() if event['time'] else float('inf')
             relevant = any(word in event['text'].casefold() for word in words)
-            if relevant:
-                recalled_references.append(event['reference'])
             summarized = bool(continuation and continuation.get('summary') and event['current_conversation'] and
                               int(event['reference'].split(':')[1]) <= int(continuation['through']))
             claimed = event['reference'] in claimed_references
@@ -267,7 +264,6 @@ class DesktopContext:
                          'current_reference': reference, 'current_event': current_event, 'positions': positions,
                          'surface': surface, 'continuation': (continuation or {}).get('kind', ''),
                          'claimed_references': list(claimed_references),
-                         'recalled_references': recalled_references,
                          'material_count': len(history), 'budget': 'shared actual-model token budget'}
 
     def period_material(self, question, words):

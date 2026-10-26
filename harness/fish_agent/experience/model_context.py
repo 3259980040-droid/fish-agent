@@ -104,8 +104,6 @@ class ModelContext:
             self.originals[original['reference']] = {
                 k: original[k] for k in ('source', 'conversation', 'id', 'place', 'time') if k in original}
         messages = self._images(deepcopy(self.value.get('messages', [])), restore=True)
-        active = {ref for m in messages for ref in m.get('_fish_refs', [])}
-        recalled = set(source.get('recalled_references', [])) if isinstance(source, dict) else set()
         # An actual persona/style edit changes the one system projection. Normal
         # wakes reuse the old object content rather than rewriting its neighbours.
         if fresh and fresh[0].get('role') == 'system':
@@ -125,8 +123,11 @@ class ModelContext:
             elif refs:
                 unseen = any(ref not in self.versions for ref in refs)
                 changed = any(self.versions.get(ref) not in (None, digest) for ref in refs)
-                lookup = any(ref in recalled and ref not in active for ref in refs)
-                if not (unseen or changed or lookup):
+                # Keyword matches from a freshly rebuilt archive view are not new
+                # originals. Reinjecting an unchanged compressed record on every
+                # match would immediately undo compression and defeat the cache.
+                # Explicit history tools still append their actual result below.
+                if not (unseen or changed):
                     for ref in refs:
                         if self.versions.get(ref) is None:
                             self.versions[ref] = digest

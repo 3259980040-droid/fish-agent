@@ -33,6 +33,7 @@ class ModelContextTests(unittest.TestCase):
         if image:
             current.append({'type': 'image_url', 'image_url': {'url': image}})
         source = {'current_reference': 'qq:' + str(mid), 'surface': surface or []}
+        source['recalled_references'] = [ref for m in history or [] for ref in m.get('_fish_refs', [])]
         with patch('chat_request.now_line', return_value='fixed clock'):
             request = assemble_chat_request(persona='stable persona', history=history or [], memory=memory,
                 expression={'prompt': ''}, references='', current=current,
@@ -102,6 +103,11 @@ class ModelContextTests(unittest.TestCase):
         self.assertEqual(clean(loaded.retained()[-3:]), clean(tail))
         with database(self.store.db_path) as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 8)
+        following = self.prepare(loaded, 8, '压缩后继续原话题', history=[{
+            'role': 'user', 'content': 'old source' * 50, '_fish_layer': 4,
+            '_fish_refs': ['qq:' + str(self.prior)]}])
+        self.assertFalse(any('qq:' + str(self.prior) in m.get('_fish_refs', []) for m in following),
+                         '同一原件再次关键词命中不能立即撤销刚完成的压缩')
 
     def test_failed_summary_leaves_context_and_checkpoint_unchanged(self):
         context = self.seed()
