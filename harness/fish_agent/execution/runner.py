@@ -76,7 +76,8 @@ def run_model_loop(root, role, *, persona, history, history_source, memory, scop
             output_source = contract['source']
     from chat_request import assemble_chat_request
     request = assemble_chat_request(
-        persona=material.state_first(root, role, tool_context, scope, persona['body']),
+        persona=persona['body'],
+        runtime_state=material.current_state(root, role, tool_context, scope),
         history=history, memory=memory, expression=expression,
         references=material.social_notes(references, tool_context, offered), current=current,
         sources={'execution': 'fish-api', 'persona_revision': persona['id'],

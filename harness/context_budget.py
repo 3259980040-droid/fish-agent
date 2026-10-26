@@ -238,7 +238,11 @@ class ContextBudget:
         removed = []
         # The least valuable optional layer leaves first; a raw record is never deleted.
         for layer in (5, 4, 3, 2, 1):
-            for message in list(messages):
+            # References change per turn. When tools grow this request, retain
+            # their existing prefix and release the reference tail first. Raw
+            # history still releases its oldest complete bundles as before.
+            candidates = reversed(messages) if layer == 4 else iter(messages)
+            for message in list(candidates):
                 if total <= budget:
                     break
                 item_layer, refs, bundle = self.materials.get(id(message), (0, [], ''))
@@ -253,6 +257,10 @@ class ContextBudget:
                 messages[:] = [m for m in messages if id(m) not in group_ids]
                 total -= group_cost
                 removed.append({'layer': layer, 'references': group_refs, 'tokens': group_cost})
+        # Removed dict addresses can be reused by a later assistant/tool message.
+        # Stale layer metadata would then make a required call look optional and
+        # remove it while leaving its result, producing an invalid tool protocol.
+        self.materials = {id(m): self.materials[id(m)] for m in messages if id(m) in self.materials}
         after = {str(layer): 0 for layer in range(6)}
         covered = []
         for message in messages:

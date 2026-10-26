@@ -102,11 +102,11 @@ def _state_scope(tool_context, scope):
     return str(scope) if tool_context == 'group' else ''
 
 
-def state_first(root, role, tool_context, scope, body):
-    """The live state block, right after the persona and before any history."""
+def current_state(root, role, tool_context, scope):
+    """Live place/tool facts accompany this input, without changing the persona prefix."""
     from current_capabilities import capabilities_brief
     brief = capabilities_brief(root, scope=_state_scope(tool_context, scope), role=role)
-    return (body + '\n\n【你的实际状态】' + brief) if brief else body
+    return ('【你的实际状态】' + brief) if brief else ''
 
 
 def social_notes(references, tool_context, offered):

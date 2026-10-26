@@ -232,16 +232,20 @@ class DesktopContext:
                             'id': int(info['id']), 'role': 'user',
                             'tokens': _tokens(self.root, item[2]['content']),
                             'text': item[2]['content']})
-        history = [item[2] for item in picked if item[2]['_fish_layer'] != 4]
+        # Cross-place recency rolls with the clock; keep that changing material
+        # behind this place's continuous originals, not interleaved through them.
+        # The chronological original surface above still owns claims/compaction.
+        history = [item[2] for item in picked if item[2]['_fish_layer'] in (0, 1)]
         if continuation and continuation.get('summary'):
             history.insert(0, {'role': 'user', 'content': continuation.get('material') or continuation['summary'],
                                '_fish_layer': 1,
                                '_fish_refs': [self.path.name + ':checkpoint:' + str(continuation['through'])]})
+        history.extend(item[2] for item in picked if item[2]['_fish_layer'] == 2)
         if after is None and not self.channel.startswith('group:'):
             history.extend(self.period_material(question, words))
-        # Preserve the original order within both sections. A different lookup
-        # changes only this trailing section, not the checkpoint + recent history.
-        history.extend(item[2] for item in picked if item[2]['_fish_layer'] == 4)
+        # Archive hits are references, newest first, so their oldest tail can leave
+        # under pressure. The original chronological surface is unchanged above.
+        history.extend(item[2] for item in reversed(picked) if item[2]['_fish_layer'] == 4)
         current_quote = index.get((current_place, str(current.get('reply_to') or '')))
         current_quote = ({'speaker': current_quote['speaker'], 'time': current_quote['time'],
                           'text': current_quote['text'], 'reference': current_quote['reference']} if current_quote else
