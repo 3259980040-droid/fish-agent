@@ -855,6 +855,17 @@ class ToolHost:
             return self.computer.execute(name, arguments, identity, call_id)
         if name in ('fish_group_list', 'fish_group_history', 'fish_web_search', 'fish_web_fetch',
                     'fish_history_catalog', 'fish_history_read'):
+            if name in ('fish_history_catalog', 'fish_history_read'):
+                if not (group and not identity['owner']) and not owner_main:
+                    self.scope_refused(identity, role, name, '历史目录与原文工具仅用于当前群或主人控制端')
+                if name == 'fish_history_catalog':
+                    from history_catalog import search_catalog
+                    return search_catalog(self.root, str(arguments.get('query', '')),
+                                          place=str(arguments.get('place', '') or ''), limit=5)
+                from history_catalog import read_range
+                return read_range(self.root, source=str(arguments.get('source', 'qq.db')),
+                                  conversation=str(arguments.get('conversation', '')),
+                                  from_id=int(arguments.get('from_id', 1)), to_id=int(arguments.get('to_id', 1)))
             # Read-only reach: a bound group reads only itself, and the owner's own
             # chat or console reads the authorised groups. Neither path takes a
             # target out of the arguments when the surface already fixes it.
@@ -876,15 +887,6 @@ class ToolHost:
                     from group_read import read_group
                     bounded = {key: arguments[key] for key in ('minutes', 'limit', 'before') if key in arguments}
                     return read_group(self.root, scope_text[len('chat:group:'):], **bounded)
-                if name == 'fish_history_catalog':
-                    from history_catalog import search_catalog
-                    return search_catalog(self.root, str(arguments.get('query', '')),
-                                          place=str(arguments.get('place', '') or ''), limit=5)
-                if name == 'fish_history_read':
-                    from history_catalog import read_range
-                    return read_range(self.root, source=str(arguments.get('source', 'qq.db')),
-                                      conversation=str(arguments.get('conversation', '')),
-                                      from_id=int(arguments.get('from_id', 1)), to_id=int(arguments.get('to_id', 1)))
                 from web_knowledge import WebKnowledge
                 knowledge = WebKnowledge(self.root)
                 if name == 'fish_web_search':

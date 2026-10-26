@@ -251,6 +251,22 @@ class UnifiedExecutionTests(unittest.TestCase):
         self.assertTrue(any(m.get('tool_call_id') == calls[0]['tool_calls'][0]['id']
                             for m in following))
 
+    def test_owner_history_tools_read_local_archives(self):
+        from tool_host import bind_session
+        from qq_store import QQStore
+        store = QQStore(self.root)
+        cid = store.get_or_create_conversation('private:' + OWNER, 'qq')['id']
+        mid = store.record_message(cid, 'private:' + OWNER, OWNER, 'inbound', 'history-original',
+                                   None, [], '压缩以后仍可读取这句原话', 'processed')
+        session = 'desktop-history:test'
+        bind_session(self.root, 'qq', session, 'owner', OWNER, desktop=True)
+        with patch('web_knowledge.WebKnowledge.fetch_tool', side_effect=AssertionError('历史不能落入网页抓取')):
+            catalog = self.host.execute('qq', session, 'fish_history_catalog', {'query': '原话'}, 'catalog-1')
+            original = self.host.execute('qq', session, 'fish_history_read', {
+                'source': 'qq.db', 'conversation': cid, 'from_id': mid, 'to_id': mid}, 'read-1')
+        self.assertIn('entries', catalog)
+        self.assertEqual(original['messages'][0]['text'], '压缩以后仍可读取这句原话')
+
     def test_repeated_submission_does_not_create_another_input_or_generation(self):
         wb = Workbench(self.root)
         cid = self.conversation(wb)
