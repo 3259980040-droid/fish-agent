@@ -14,7 +14,6 @@ from fish_agent.execution.runner import (EMOJI_TOOLS, SEND_SURFACES, SEND_TOOLS,
 from fish_agent.experience.context import (LIBRARY_HEAD, LIBRARY_LIMIT, OWNER_SOCIAL_NOTES,
                                            current_text, library_block, library_references)
 from fish_agent.experience.context import social_notes as _social_notes
-from fish_agent.experience.context import state_first as _state_first
 from fish_agent.tools import TOOL_TIMEOUTS
 
 __all__ = ['respond', 'tool_definitions', 'call_tool', 'TOOL_TIMEOUTS', 'EMOJI_TOOLS',

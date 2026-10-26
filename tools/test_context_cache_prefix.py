@@ -86,6 +86,9 @@ class ContextCachePrefixTests(unittest.TestCase):
         self.assertTrue(any(m['_fish_refs'] == ['qq:' + str(other)] for m in before))
 
     def test_runtime_state_changes_only_the_tail(self):
+        # Capability lookup imports this entry adapter at runtime; it must not
+        # retain an import of the retired state_first helper.
+        import fish_chat
         def request(state):
             return assemble_chat_request(persona='固定人格',
                 history=[{'role': 'user', 'content': '连续历史'}], memory='',

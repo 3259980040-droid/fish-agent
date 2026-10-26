@@ -19,6 +19,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / 'harness'), str(ROOT / 'vendor/python')]
 from fish_agent import get_runtime, reset_runtime
 from fish_agent.execution import state as st
 from governance import Governance
+from locations import project_path
 from model_gateway import ChatOptions, ChatResult
 from social_context import SocialContext
 from storage import database
@@ -172,11 +173,11 @@ class UnifiedExecutionTests(unittest.TestCase):
         return wb.dispatch('chat.snapshot', {'id': cid})
 
     def runs(self):
-        with database(self.root / 'data/social/experience.db') as db:
+        with database(project_path(self.root, 'data/social/experience.db')) as db:
             return [dict(row) for row in db.execute('SELECT * FROM agent_runs ORDER BY created,rowid')]
 
     def run_of(self, job_id):
-        with database(self.root / 'data/social/experience.db') as db:
+        with database(project_path(self.root, 'data/social/experience.db')) as db:
             row = db.execute('SELECT * FROM agent_runs WHERE request=? ORDER BY created LIMIT 1',
                              (job_id,)).fetchone()
         return dict(row) if row else None
@@ -207,7 +208,7 @@ class UnifiedExecutionTests(unittest.TestCase):
         self.assertIn('fish_say', offered)
         self.assertIn('主人', fake.renders())
         # The five real time points are stamped: arrival, start, first output, send, receipt.
-        with database(self.root / 'data/social/experience.db') as db:
+        with database(project_path(self.root, 'data/social/experience.db')) as db:
             turn = db.execute('SELECT * FROM experience_turns ORDER BY rowid DESC LIMIT 1').fetchone()
         self.assertIsNotNone(turn)
         self.assertEqual(turn['outcome'], 'sent')
