@@ -144,11 +144,16 @@ def usage(root, *, trace_id=None):
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='context_requests'").fetchone():
                 requests = [dict(row) for row in db.execute('SELECT * FROM context_requests')]
     path = project_path(root, 'data/social/experience.db')
+    requested_traces = {row.get('turn_id') for row in requests if row.get('turn_id')}
+    if trace_id is not None:
+        requested_traces.intersection_update({trace_id})
     if path.is_file():
         with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as db:
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='turn_traces'").fetchone():
                 rows = db.execute('SELECT id,events FROM turn_traces WHERE child=0').fetchall()
                 for identifier, raw in rows:
+                    if identifier not in requested_traces:
+                        continue
                     events = json.loads(raw or '[]')
                     for event in events:
                         if isinstance(event, dict) and event.get('kind') == 'execution' and isinstance(event.get('value'), str):

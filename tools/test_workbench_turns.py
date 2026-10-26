@@ -95,6 +95,12 @@ class WorkbenchTurns(unittest.TestCase):
         old = ContextBudget(self.root, fake)
         old_id = old.begin('desktop:' + cid, 'desktop-chat:' + cid, {})
         old.finish(old_id, {'prompt_tokens': 9999, 'completion_tokens': 9999})
+        # An unrelated legacy trace is not an accounting input. Its original
+        # damage must not prevent this instance's real turns from being read.
+        from turn_trace import TurnTrace
+        unrelated = TurnTrace(self.root, 'qq', 'legacy', 'legacy', reference='legacy:damaged')
+        with database(project_path(self.root, 'data/social/experience.db')) as db:
+            db.execute('UPDATE turn_traces SET events=? WHERE id=?', ('[] trailing legacy content', unrelated.id))
         listed = self.wb.dispatch('turns.list', {'limit': 2})
         next_page = self.wb.dispatch('turns.list', {'limit': 2, 'cursor': listed['next_cursor']})
         records = listed['runs'] + next_page['runs']
